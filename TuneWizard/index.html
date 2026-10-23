@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мастер настройки</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<script src="../modules/plotly.js/dist/plotly.min.js"></script>
+
+<script type="text/javascript" src="../Libraries/LogHelpers.js"></script>
+<script type="text/javascript" src="../Libraries/Param_Helpers.js"></script>
+<script type="text/javascript" src="../Libraries/LoadingOverlay.js"></script>
+<script type="text/javascript" src="../Libraries/Plotly_helpers.js"></script>
+
+<script type="text/javascript" src="core/log.js"></script>
+<script type="text/javascript" src="core/checks.js"></script>
+<script type="text/javascript" src="wizard.js"></script>
+
+<style>
+/* Токены оформления: светлая тема «Светлый технический», тёмная «Графит» (общие правила проектов, 23.10.2026) */
+:root{
+  --bg:#F0F1EE; --surface:#FCFCFB; --surface-2:#F6F7F4; --sunk:#F6F7F4;
+  --ink:#1A1D19; --ink-2:#4B514A; --ink-3:#787E77;
+  --line:#DBDED8; --line-soft:#E4E7E1;
+  --accent:#B45309; --accent-soft:rgba(180,83,9,.10);
+  --low:#0D9488;   --low-soft:rgba(13,148,136,.10);
+  --ok:#4D7C0F;    --ok-soft:rgba(77,124,15,.10);
+  --high:#B91C1C;  --high-soft:rgba(185,28,28,.10);
+  --shadow:0 1px 0 rgba(26,29,25,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#212426; --surface:#2E3234; --surface-2:#262A2C; --sunk:#262A2C;
+    --ink:#E9EBE7; --ink-2:#B8BDB7; --ink-3:#9AA09A;
+    --line:#3B4043; --line-soft:#353A3D;
+    --accent:#E0A64A; --accent-soft:rgba(224,166,74,.14);
+    --low:#4FC3D1;   --low-soft:rgba(79,195,209,.14);
+    --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
+    --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
+    --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#212426; --surface:#2E3234; --surface-2:#262A2C; --sunk:#262A2C;
+  --ink:#E9EBE7; --ink-2:#B8BDB7; --ink-3:#9AA09A;
+  --line:#3B4043; --line-soft:#353A3D;
+  --accent:#E0A64A; --accent-soft:rgba(224,166,74,.14);
+  --low:#4FC3D1;   --low-soft:rgba(79,195,209,.14);
+  --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
+  --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
+  --shadow:none;
+}
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink);
+  font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif; font-size:14px; line-height:1.55}
+.wrap{max-width:1400px; margin:0 auto; padding:24px 16px 64px; display:flex; flex-direction:column; gap:20px}
+h1,h2,h3{font-family:Archivo,"IBM Plex Sans",sans-serif; margin:0}
+h1{font-size:28px; font-weight:700; letter-spacing:-.02em; line-height:1.15}
+h2{font-size:17px; font-weight:600}
+h3{font-size:14px; font-weight:600}
+p{margin:0}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+.eyebrow{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600;
+  letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3)}
+.lede{color:var(--ink-2); font-size:15px; max-width:70ch}
+header.hero{display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--line); padding-bottom:14px}
+section{display:flex; flex-direction:column; gap:14px}
+section > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
+
+/* Переключатель темы */
+.themebar{display:flex; align-items:center; gap:6px; justify-content:flex-end; flex-wrap:wrap}
+.themebar__k{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); margin-right:4px}
+button,label.pickbtn{font-family:"IBM Plex Sans",sans-serif; font-size:12px; padding:5px 11px; cursor:pointer;
+  background:var(--surface-2); color:var(--ink-2); border:1px solid var(--line); border-radius:2px}
+button:hover,label.pickbtn:hover{color:var(--ink); border-color:var(--ink-3)}
+button:disabled{opacity:.45; cursor:not-allowed}
+button[aria-pressed="true"],button.primary{color:var(--accent); border-color:var(--accent); background:var(--accent-soft)}
+button:focus-visible,input:focus-visible,label.pickbtn:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+
+/* Полоса шагов */
+.wizbar{display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:0; border:1px solid var(--line); background:var(--surface); box-shadow:var(--shadow)}
+.wizbar button{border:0; border-right:1px solid var(--line); border-radius:0; background:var(--surface); padding:10px 8px; text-align:left;
+  display:flex; flex-direction:column; gap:2px; color:var(--ink-2)}
+.wizbar button:last-child{border-right:0}
+.wizbar button .n{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3)}
+.wizbar button .t{font-family:Archivo,"IBM Plex Sans",sans-serif; font-size:13px; font-weight:600; color:var(--ink)}
+.wizbar button[aria-current="step"]{background:var(--accent-soft); box-shadow:inset 0 -2px 0 var(--accent)}
+.wizbar button[aria-current="step"] .n{color:var(--accent)}
+.wizbar button:disabled .t{color:var(--ink-3)}
+@media (max-width:900px){.wizbar{grid-template-columns:repeat(3,minmax(0,1fr))} .wizbar button{border-bottom:1px solid var(--line)}}
+
+/* Карточки и поля */
+.lab{display:flex; flex-direction:column; gap:12px; background:var(--surface); border:1px solid var(--line); padding:14px; box-shadow:var(--shadow)}
+.row{display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap}
+.fld{display:flex; flex-direction:column; gap:5px; min-width:0}
+/* :not(.pickbtn): кнопка выбора файла — тоже label внутри .fld, но оформляется как кнопка */
+.fld label:not(.pickbtn){font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3)}
+.fld input[type=number]{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:14px; padding:7px 10px; width:110px;
+  border:1px solid var(--line); background:var(--sunk); color:var(--ink)}
+.fld input:disabled{opacity:.45}
+input[type=file]{display:none}
+.unit{text-transform:none}
+.note{border-left:2px solid var(--line); padding-left:13px; color:var(--ink-3); font-size:13px; max-width:100ch}
+
+/* Плитки */
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); border:1px solid var(--line); background:var(--surface)}
+.stat{padding:11px 13px; display:flex; flex-direction:column; gap:2px; border-right:1px solid var(--line); border-bottom:1px solid var(--line-soft)}
+.stat__k{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3)}
+.stat__v{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:18px; font-weight:500; letter-spacing:-.02em; line-height:1.3; overflow-wrap:anywhere}
+.stat--accent .stat__v{color:var(--accent)}
+
+/* Вердикт и список проверок */
+.verdict{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; padding:10px 13px; border:1px solid var(--line); background:var(--surface-2); color:var(--ink-2)}
+.verdict--ok{border-color:var(--ok); color:var(--ok)}
+.verdict--warn{border-color:var(--accent); color:var(--accent)}
+.verdict--fail{border-color:var(--high); color:var(--high)}
+.checks{display:flex; flex-direction:column; border:1px solid var(--line); background:var(--surface); box-shadow:var(--shadow)}
+.check{display:grid; grid-template-columns:64px 1fr; border-bottom:1px solid var(--line-soft)}
+.check:last-child{border-bottom:0}
+.check__s{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; font-weight:600; letter-spacing:.06em; display:flex; align-items:flex-start; justify-content:center; padding:12px 0; background:var(--surface-2)}
+.check--ok .check__s{color:var(--ok)} .check--warn .check__s{color:var(--accent)} .check--fail .check__s{color:var(--high)}
+.check__b{padding:11px 14px; display:flex; flex-direction:column; gap:2px}
+.check__b p{color:var(--ink-2); font-size:13px}
+.check__b .fix{color:var(--ink-3); font-size:12.5px}
+.check__b .fix b{color:var(--ink-2); font-weight:600}
+
+/* Графики */
+.plot{width:100%; height:420px; border:1px solid var(--line); background:var(--surface)}
+#loading{background-color:var(--bg)!important}
+#loading h1{color:var(--ink)}
+
+@media print{
+  :root{--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none}
+  .themebar,.wizbar,button,label.pickbtn{display:none!important}
+  body{background:#fff; color:#111}
+  .lab,.stats,.checks,.plot{break-inside:avoid}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="themebar" role="group" aria-label="Тема оформления">
+  <span class="themebar__k">Тема</span>
+  <button type="button" data-t="auto">как в системе</button>
+  <button type="button" data-t="light">светлая</button>
+  <button type="button" data-t="dark">тёмная</button>
+</div>
+
+<header class="hero">
+  <span class="eyebrow">ArduPilot · Copter</span>
+  <h1>Мастер настройки</h1>
+  <p class="lede">Один лог — шесть шагов: проверка лога, спектр гироскопов, гармонический notch, низкочастотные фильтры, PID по осям и сводка с файлом параметров. На каждом шаге мастер предлагает значения, вы их правите и подтверждаете.</p>
+</header>
+
+<nav class="wizbar" id="wizbar" aria-label="Шаги мастера"></nav>
+
+<section data-step="0">
+  <div class="head"><span class="eyebrow">00 · Лог и проверки</span><h2>Загрузите лог полёта</h2></div>
+  <div class="lab">
+    <div class="row">
+      <div class="fld">
+        <label for="fileItem">Файл .bin</label>
+        <label class="pickbtn" for="fileItem" id="fileLabel">Выбрать лог…</label>
+        <input id="fileItem" type="file" accept=".bin" onchange="read_file(this)">
+      </div>
+      <div class="fld">
+        <label for="TimeStart">Начало анализа, <span class="unit">с</span></label>
+        <input id="TimeStart" type="number" min="0" step="1" value="0" disabled onchange="interval_input_changed()">
+      </div>
+      <div class="fld">
+        <label for="TimeEnd">Конец анализа, <span class="unit">с</span></label>
+        <input id="TimeEnd" type="number" min="0" step="1" value="0" disabled onchange="interval_input_changed()">
+      </div>
+      <div class="fld">
+        <label for="FFTWindow_size">Окно FFT, <span class="unit">отсчётов</span></label>
+        <input id="FFTWindow_size" type="number" min="64" step="1" value="1024" disabled onchange="window_size_changed(this)">
+      </div>
+    </div>
+    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки.</p>
+  </div>
+
+  <div class="verdict" id="log_verdict" hidden></div>
+  <div class="stats" id="log_info" hidden></div>
+  <div class="checks" id="log_checks" hidden></div>
+
+  <div class="head"><span class="eyebrow">Полёт</span><h2>Крен, тангаж, газ и высота</h2></div>
+  <div id="FlightData" class="plot"></div>
+</section>
+
+<section data-step="1" hidden>
+  <div class="head"><span class="eyebrow">01 · Спектр до фильтров</span><h2>Шаг появится на этапе 2</h2></div>
+</section>
+<section data-step="2" hidden>
+  <div class="head"><span class="eyebrow">02 · Гармонический notch</span><h2>Шаг появится на этапе 2</h2></div>
+</section>
+<section data-step="3" hidden>
+  <div class="head"><span class="eyebrow">03 · Низкочастотные фильтры</span><h2>Шаг появится на этапе 3</h2></div>
+</section>
+<section data-step="4" hidden>
+  <div class="head"><span class="eyebrow">04 · PID по осям</span><h2>Шаг появится на этапе 4</h2></div>
+</section>
+<section data-step="5" hidden>
+  <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Шаг появится на этапе 5</h2></div>
+</section>
+
+</div>
+
+<script>
+    init_loading_overlay()
+    init_theme()
+    init_wizard()
+</script>
+</body>
+</html>
