@@ -7,7 +7,9 @@ const check_rules = {
     hover_min_s: 30,                // с: минимальное висение для усреднения спектра [wiki, Initial tuning flight]
     hover_throttle_tolerance: 0.05, // допустимое расхождение MOT_THST_HOVER и среднего газа [наше]
     hover_learn_min: 0.125,         // нижний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MIN]
-    log_bitmask_pid: 12,            // номер бита PID в LOG_BITMASK [код, ArduCopter/defines.h MASK_LOG_PID]
+    hover_learn_max: 0.6875,        // верхний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MAX]
+    hover_learn_s: 30,              // с висения для обучения MOT_THST_HOVER: постоянная времени 10 с, ~95 % за 30 с [код, AP_MOTORS_THST_HOVER_TC]
+    log_bitmask_pid: 12,           // номер бита PID в LOG_BITMASK [код, ArduCopter/defines.h MASK_LOG_PID]
     log_bitmask_imu_raw: 19,        // номер бита IMU_RAW [код, MASK_LOG_IMU_RAW]
 }
 
@@ -41,7 +43,7 @@ function run_checks(info, params, vibe) {
         add("gyro_log", "ok", "Данные гироскопа", "Есть " + (m.gyro_raw ? "raw (GYR)" : "batch (ISBH/ISBD)") + ": шаги 1–3 доступны")
     } else {
         add("gyro_log", "fail", "Данные гироскопа", "Нет ни raw (GYR), ни batch (ISBH/ISBD): шаги 1–3 недоступны",
-            "Batch: INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4. Raw (платы H7): бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK, INS_RAW_LOG_OPT = 8")
+            "Batch: INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4. Raw (нужна быстрая плата, обычно H7): бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK, INS_RAW_LOG_OPT = 8")
     }
 
     // До/после фильтров
@@ -50,7 +52,8 @@ function run_checks(info, params, vibe) {
         if (opt & (1 << 3)) {
             add("pre_post", "ok", "До/после фильтров", "Raw-лог до и после фильтров: оценку «станет» можно сверить с реальными данными")
         } else if (opt & (1 << 2)) {
-            add("pre_post", "warn", "До/после фильтров", "Raw-лог только после фильтров: спектра до фильтров и оценки «станет» не будет", "INS_RAW_LOG_OPT = 8 (до и после)")
+            add("pre_post", "warn", "До/после фильтров", "Raw-лог только после фильтров: спектра до фильтров и оценки «станет» не будет",
+                "Добавьте бит 3 (+8) к INS_RAW_LOG_OPT и снимите бит 2 (−4): логирование до и после фильтров")
         } else {
             add("pre_post", "ok", "До/после фильтров", "Raw-лог только до фильтров: оценка «станет» строится расчётом, реальных данных после фильтров нет")
         }
@@ -59,7 +62,8 @@ function run_checks(info, params, vibe) {
         if (opt & (1 << 2)) {
             add("pre_post", "ok", "До/после фильтров", "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными")
         } else if (opt & (1 << 1)) {
-            add("pre_post", "warn", "До/после фильтров", "Batch-лог только после фильтров: спектра до фильтров и оценки «станет» не будет", "INS_LOG_BAT_OPT = 4 (до и после)")
+            add("pre_post", "warn", "До/после фильтров", "Batch-лог только после фильтров: спектра до фильтров и оценки «станет» не будет",
+                "Добавьте бит 2 (+4) к INS_LOG_BAT_OPT и снимите бит 1 (−2): логирование до и после фильтров")
         } else {
             add("pre_post", "ok", "До/после фильтров", "Batch-лог только до фильтров: оценка «станет» строится расчётом, реальных данных после фильтров нет")
         }
@@ -77,25 +81,35 @@ function run_checks(info, params, vibe) {
 
     // Полёт
     if (info.flight == null) {
-        add("flight", "fail", "Полёт", "Газ не поднимался выше нуля: полёта в логе нет")
+        if (info.throttle_source == null) {
+            add("flight", "fail", "Полёт", "Газ не определить: в логе нет CTUN и RATE")
+        } else {
+            // Окно полёта схлопывается, если ненулевой газ короче отступов throttle_window
+            add("flight", "fail", "Полёт", "Ненулевого газа нет или он короче 3 с: полёта в логе нет")
+        }
     } else if (info.flight.duration_s < r.hover_min_s) {
         add("flight", "warn", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с: мало для усреднения спектра", "Висение не меньше " + r.hover_min_s + " с без ввода")
     } else {
-        add("flight", "ok", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с, средний газ " + (info.flight.mean_throttle ?? 0).toFixed(2))
+        const mean_text = (info.flight.mean_throttle != null) ? ", средний газ " + info.flight.mean_throttle.toFixed(2) : ""
+        add("flight", "ok", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с" + mean_text)
     }
 
     // Вибрации
     if (vibe == null) {
         add("vibe", "warn", "Вибрации", "Сообщений VIBE нет: уровень вибраций не проверить")
     } else {
-        const level = Math.round(vibe.level)
-        const text = "Уровень (95-й процентиль) " + level + " м/с², максимум " + Math.round(vibe.max) + " м/с²"
-        if (vibe.level >= r.vibe_fail) {
-            add("vibe", "fail", "Вибрации", text + ": выше " + r.vibe_fail + " — почти наверняка проблемы", "Проверьте крепление автопилота, балансировку пропеллеров и моторов")
-        } else if (vibe.level >= r.vibe_warn) {
-            add("vibe", "warn", "Вибрации", text + ": выше " + r.vibe_warn + " — возможны проблемы", "Проверьте крепление автопилота и балансировку пропеллеров")
+        if (!Number.isFinite(vibe.level)) {
+            add("vibe", "warn", "Вибрации", "Уровень вибраций не определён (нет корректных данных VIBE)")
         } else {
-            add("vibe", "ok", "Вибрации", text)
+            // Одна десятичная: 59.6 рядом с порогом 60 не должно читаться как «60»
+            const text = "Уровень (95-й процентиль) " + vibe.level.toFixed(1) + " м/с², максимум " + vibe.max.toFixed(1) + " м/с²"
+            if (vibe.level >= r.vibe_fail) {
+                add("vibe", "fail", "Вибрации", text + ": выше " + r.vibe_fail + " — почти наверняка проблемы", "Проверьте крепление автопилота, балансировку пропеллеров и моторов")
+            } else if (vibe.level >= r.vibe_warn) {
+                add("vibe", "warn", "Вибрации", text + ": выше " + r.vibe_warn + " — возможны проблемы", "Проверьте крепление автопилота и балансировку пропеллеров")
+            } else {
+                add("vibe", "ok", "Вибрации", text)
+            }
         }
         if (vibe.clip > 0) {
             add("clipping", "warn", "Clipping", vibe.clip + " событий clipping акселерометра", "Проверьте крепление автопилота и балансировку пропеллеров")
@@ -104,26 +118,28 @@ function run_checks(info, params, vibe) {
         }
     }
 
-    // Газ висения против MOT_THST_HOVER
+    // Газ висения против MOT_THST_HOVER. Расхождение считается не к самому среднему газу, а к тому значению,
+    // которое обучение вообще может дать: ArduPilot зажимает MOT_THST_HOVER в пределах hover_learn_min…hover_learn_max
     const hover = params.get("MOT_THST_HOVER")
     const mean = info.flight?.mean_throttle ?? null
     if ((hover != null) && (mean != null)) {
-        const diff = Math.abs(hover - mean)
+        const target = Math.min(Math.max(mean, r.hover_learn_min), r.hover_learn_max)
+        const diff = Math.abs(hover - target)
+        // Пояснение, почему значение не совпадёт с газом даже после обучения — в обеих ветках
+        const limit_note = (mean < r.hover_learn_min)
+            ? " (обучение ограничено снизу значением " + r.hover_learn_min + " — для очень мощного аппарата это нормально)"
+            : ""
         let text = "MOT_THST_HOVER " + hover.toFixed(2) + ", средний газ в полёте " + mean.toFixed(2)
         if (diff > r.hover_throttle_tolerance) {
             const learning = params.get("MOT_HOVER_LEARN") == 2
-            text += ": расхождение " + diff.toFixed(2)
-            // ArduPilot не обучает значение ниже предела
-            if (mean < r.hover_learn_min) {
-                text += " (обучение ограничено снизу значением " + r.hover_learn_min + " — для очень мощного аппарата это нормально)"
-            }
+            text += ": расхождение " + diff.toFixed(2) + limit_note
             if (learning) {
-                text += " (обучение включено, значение сохранится после полёта)"
+                text += " (обучение включено: большое расхождение значит, что висения в AltHold было мало)"
             }
             add("hover_throttle", "warn", "Газ висения", text,
-                learning ? "Повисите не меньше 30 с в AltHold, чтобы значение обучилось" : "MOT_HOVER_LEARN = 2 (обучение с сохранением)")
+                learning ? "Повисите не меньше " + r.hover_learn_s + " с в AltHold, чтобы значение обучилось" : "MOT_HOVER_LEARN = 2 (обучение с сохранением)")
         } else {
-            add("hover_throttle", "ok", "Газ висения", text)
+            add("hover_throttle", "ok", "Газ висения", text + limit_note)
         }
     }
 

@@ -233,6 +233,8 @@ function by_id(list, id) {
 test('run_checks: хороший лог — все проверки ok', () => {
     const list = checks.run_checks(good_info(), good_params, good_vibe)
     for (const c of list) assert.equal(c.status, 'ok', `${c.id}: ${c.text}`)
+    // Полный набор проверок в порядке показа
+    assert.deepEqual(list.map((c) => c.id), ['vehicle', 'pid_log', 'gyro_log', 'pre_post', 'tracking', 'flight', 'vibe', 'clipping', 'hover_throttle'])
     assert.equal(checks.checks_summary(list).status, 'ok')
 })
 
@@ -258,7 +260,10 @@ test('run_checks: нет данных гироскопа — fail с подск�
 
 test('run_checks: raw pre/post по INS_RAW_LOG_OPT', () => {
     const post_only = fake_params({ INS_RAW_LOG_OPT: 4 })
-    assert.equal(by_id(checks.run_checks(good_info(), post_only, good_vibe), 'pre_post').status, 'warn')
+    const c = by_id(checks.run_checks(good_info(), post_only, good_vibe), 'pre_post')
+    assert.equal(c.status, 'warn')
+    // Совет добавляет бит, а не перезаписывает параметр: иначе пропадут другие включённые биты
+    assert.match(c.fix, /\+8/)
     const pre_only = fake_params({ INS_RAW_LOG_OPT: 0 })
     assert.equal(by_id(checks.run_checks(good_info(), pre_only, good_vibe), 'pre_post').status, 'ok')
 })
@@ -266,7 +271,11 @@ test('run_checks: raw pre/post по INS_RAW_LOG_OPT', () => {
 test('run_checks: batch pre/post по INS_LOG_BAT_OPT', () => {
     const info = good_info({ messages: { ...good_info().messages, gyro_raw: false, gyro_batch: true } })
     assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 4 }), good_vibe), 'pre_post').status, 'ok')
-    assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 2 }), good_vibe), 'pre_post').status, 'warn')
+    const c = by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 2 }), good_vibe), 'pre_post')
+    assert.equal(c.status, 'warn')
+    assert.match(c.fix, /\+4/)
+    // Только до фильтров — норма, оценка «станет» строится расчётом
+    assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 0 }), good_vibe), 'pre_post').status, 'ok')
 })
 
 test('run_checks: источник трекинга — ESC ok, RPM ok, только газ warn', () => {
@@ -280,6 +289,10 @@ test('run_checks: полёт — нет газа fail, короткий warn', (
     assert.equal(by_id(checks.run_checks(good_info({ flight: null }), good_params, good_vibe), 'flight').status, 'fail')
     const short = good_info({ flight: { start: 5, end: 25, duration_s: 20, mean_throttle: 0.33 } })
     assert.equal(by_id(checks.run_checks(short, good_params, good_vibe), 'flight').status, 'warn')
+    // Без CTUN и RATE газ вообще не определить — текст говорит об этом, а не о «нулевом газе»
+    const no_source = by_id(checks.run_checks(good_info({ flight: null, throttle_source: null }), good_params, good_vibe), 'flight')
+    assert.equal(no_source.status, 'fail')
+    assert.match(no_source.text, /CTUN и RATE/)
 })
 
 test('run_checks: вибрации — пороги 30/60 и clipping', () => {
@@ -290,6 +303,14 @@ test('run_checks: вибрации — пороги 30/60 и clipping', () => {
     const clip = { ...good_vibe, clip: 5 }
     assert.equal(by_id(checks.run_checks(good_info(), good_params, clip), 'clipping').status, 'warn')
     assert.equal(by_id(checks.run_checks(good_info(), good_params, null), 'vibe').status, 'warn')
+    // Рядом с порогом уровень печатается с одной десятичной: 59.6 — warn, и не показывается как «60»
+    const near = by_id(checks.run_checks(good_info(), good_params, { ...good_vibe, level: 59.6 }), 'vibe')
+    assert.equal(near.status, 'warn')
+    assert.match(near.text, /59\.6/)
+    // Некорректный уровень (NaN) — warn без исключения, clipping проверяется как обычно
+    const broken = checks.run_checks(good_info(), good_params, { ...good_vibe, level: NaN })
+    assert.equal(by_id(broken, 'vibe').status, 'warn')
+    assert.equal(by_id(broken, 'clipping').status, 'ok')
 })
 
 test('run_checks: газ висения против MOT_THST_HOVER', () => {
@@ -309,7 +330,23 @@ test('run_checks: газ висения ниже предела обучения
     assert.match(c.text, /0\.125/)
 })
 
+test('run_checks: газ висения — расхождение считается к достижимому обученному значению', () => {
+    // Средний газ ниже предела: обучение дало бы ровно 0.125, и MOT_THST_HOVER = 0.125 — норма, а не расхождение
+    const low = good_info({ flight: { start: 5, end: 100, duration_s: 95, mean_throttle: 0.05 } })
+    const at_limit = by_id(checks.run_checks(low, fake_params({ MOT_THST_HOVER: 0.125, MOT_HOVER_LEARN: 0 }), good_vibe), 'hover_throttle')
+    assert.equal(at_limit.status, 'ok')
+    assert.match(at_limit.text, /0\.125/)
+    // Обучение включено, но значение далеко от газа: висения в AltHold было мало
+    const learning = by_id(checks.run_checks(good_info(), fake_params({ MOT_THST_HOVER: 0.5, MOT_HOVER_LEARN: 2 }), good_vibe), 'hover_throttle')
+    assert.equal(learning.status, 'warn')
+    assert.match(learning.fix, /AltHold/)
+})
+
 test('checks_summary: счётчики', () => {
     const s = checks.checks_summary([{ status: 'ok' }, { status: 'warn' }, { status: 'warn' }])
     assert.deepEqual(s, { status: 'warn', ok: 1, warn: 2, fail: 0 })
+})
+
+test('checks_summary: пустой список — ok с нулевыми счётчиками', () => {
+    assert.deepEqual(checks.checks_summary([]), { status: 'ok', ok: 0, warn: 0, fail: 0 })
 })
