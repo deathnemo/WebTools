@@ -33,6 +33,7 @@ function fake_log({ messages = {}, params = [] } = {}) {
             if (msg.instances) {
                 if (instance == null) throw new TypeError("сообщение с экземплярами читается только через get_instance")
                 const data = msg.instances[instance]
+                if (data == null) return undefined
                 return field ? data[field] : data
             }
             return field ? msg[field] : msg
@@ -99,6 +100,16 @@ test('throttle_series: CTUN.ThO предпочтительнее RATE.AOut', () 
     assert.equal(core_log.throttle_series(fake_log()), null)
 })
 
+test('throttle_series: CTUN без поля ThO — берём RATE.AOut; без обоих полей — null', () => {
+    const log = fake_log({ messages: {
+        CTUN: { TimeUS: [0, 1e6], Alt: [1, 2] },
+        RATE: { TimeUS: [0, 1e6], AOut: [0.5, 0.6] }
+    } })
+    assert.deepEqual(core_log.throttle_series(log), { time: [0, 1], throttle: [0.5, 0.6], source: 'RATE.AOut' })
+    const no_fields = fake_log({ messages: { CTUN: { TimeUS: [0] }, RATE: { TimeUS: [0] } } })
+    assert.equal(core_log.throttle_series(no_fields), null)
+})
+
 test('percentile: 95-й процентиль', () => {
     const values = Array.from({ length: 100 }, (_, i) => i + 1)
     assert.equal(core_log.percentile(values, 0.95), 95)
@@ -119,8 +130,31 @@ test('vibe_summary: по экземплярам IMU — p95 и максимум 
     assert.equal(vibe.imus[1].clip, 1)
     assert.equal(vibe.max, 45)
     assert.equal(vibe.clip, 4)
-    assert.ok(vibe.level >= 35 && vibe.level <= 45)
+    assert.equal(vibe.level, 45)
     assert.equal(core_log.vibe_summary(fake_log()), null)
+})
+
+test('vibe_summary: старый формат VIBE без экземпляров — один IMU, clip = сумма Clip0..Clip2', () => {
+    const log = fake_log({ messages: { VIBE: {
+        TimeUS: [0, 1e6, 2e6], VibeX: [10, 12, 11], VibeY: [5, 7, 6], VibeZ: [30, 35, 33],
+        Clip0: [0, 1, 2], Clip1: [0, 0, 1], Clip2: [0, 0, 0]
+    } } })
+    const vibe = core_log.vibe_summary(log)
+    assert.equal(vibe.imus.length, 1)
+    assert.equal(vibe.imus[0].imu, 0)
+    assert.equal(vibe.imus[0].max, 35)
+    assert.equal(vibe.imus[0].clip, 3)
+    assert.equal(vibe.clip, 3)
+})
+
+test('vibe_summary: VIBE по экземплярам без поля Clip — clip равен 0, без исключения', () => {
+    const log = fake_log({ messages: { VIBE: { instances: {
+        0: { TimeUS: [0, 1e6], VibeX: [10, 12], VibeY: [5, 7], VibeZ: [30, 35] }
+    } } } })
+    const vibe = core_log.vibe_summary(log)
+    assert.equal(vibe.imus[0].clip, 0)
+    assert.equal(vibe.clip, 0)
+    assert.equal(vibe.max, 35)
 })
 
 test('vibe_summary: длинный ряд VIBE (часы полёта) не переполняет стек', () => {
@@ -152,6 +186,8 @@ test('log_info: аппарат, длительность, окно полёта,
     assert.equal(info.board, 'CubeOrange')
     assert.equal(info.filter_version, 2)
     assert.equal(info.duration_s, 60)
+    assert.equal(info.time_start, 0)
+    assert.equal(info.time_end, 60)
     assert.equal(info.throttle_source, 'CTUN.ThO')
     assert.equal(info.flight.start, 6)
     assert.equal(info.flight.end, 54)
@@ -166,4 +202,6 @@ test('log_info: без полёта и без ATT', () => {
     assert.equal(info.vehicle, 'Plane')
     assert.equal(info.flight, null)
     assert.equal(info.duration_s, 2)
+    assert.equal(info.time_start, 0)
+    assert.equal(info.time_end, 2)
 })

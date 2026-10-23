@@ -55,10 +55,16 @@ function log_messages(log) {
 // Ряд «газ» 0–1 для окна полёта: CTUN.ThO (выход газа), иначе RATE.AOut
 function throttle_series(log) {
     if ("CTUN" in log.messageTypes) {
-        return { time: us_to_s(log.get("CTUN", "TimeUS")), throttle: Array.from(log.get("CTUN", "ThO")), source: "CTUN.ThO" }
+        const ThO = log.get("CTUN", "ThO")
+        if (ThO != null) {
+            return { time: us_to_s(log.get("CTUN", "TimeUS")), throttle: Array.from(ThO), source: "CTUN.ThO" }
+        }
     }
     if ("RATE" in log.messageTypes) {
-        return { time: us_to_s(log.get("RATE", "TimeUS")), throttle: Array.from(log.get("RATE", "AOut")), source: "RATE.AOut" }
+        const AOut = log.get("RATE", "AOut")
+        if (AOut != null) {
+            return { time: us_to_s(log.get("RATE", "TimeUS")), throttle: Array.from(AOut), source: "RATE.AOut" }
+        }
     }
     return null
 }
@@ -106,7 +112,7 @@ function percentile(values, fraction) {
     if (values.length == 0) {
         return null
     }
-    const sorted = Array.from(values).sort((a, b) => a - b)
+    const sorted = Float64Array.from(values).sort()
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]
 }
 
@@ -139,14 +145,26 @@ function vibe_summary(log) {
         }
         const y = log.get_instance("VIBE", key, "VibeY")
         const z = log.get_instance("VIBE", key, "VibeZ")
+        // Clip — счётчик нарастающим итогом (с 4.1); в старых логах три счётчика Clip0..Clip2
         const clip = log.get_instance("VIBE", key, "Clip")
+        let clip_count = 0
+        if (clip != null) {
+            clip_count = max_of(clip)
+        } else {
+            for (const name of ["Clip0", "Clip1", "Clip2"]) {
+                const old = log.get_instance("VIBE", key, name)
+                if (old != null) {
+                    clip_count += max_of(old)
+                }
+            }
+        }
         const p95 = { x: percentile(x, 0.95), y: percentile(y, 0.95), z: percentile(z, 0.95) }
         imus.push({
             imu: (key == null) ? 0 : Number(key),
             p95,
             level: Math.max(p95.x, p95.y, p95.z),
             max: Math.max(max_of(x), max_of(y), max_of(z)),
-            clip: max_of(clip),
+            clip: clip_count,
         })
     }
     if (imus.length == 0) {
@@ -161,15 +179,20 @@ function vibe_summary(log) {
 }
 
 // Сводная информация о логе. version — результат get_version_and_board(log) из Libraries/LogHelpers.js
-function log_info(log, version) {
+function log_info(log, version = {}) {
     const messages = log_messages(log)
 
-    // Длительность по первому подходящему сообщению с TimeUS (без экземпляров: такие читаются через get)
+    // Границы и длительность по первому подходящему сообщению с TimeUS (без экземпляров: такие читаются через get).
+    // time_start/time_end — абсолютные секунды лога, по ним страница задаёт границы графиков
+    let time_start = null
+    let time_end = null
     let duration_s = null
     for (const name of ["ATT", "RATE", "CTUN"]) {
         if (name in log.messageTypes) {
             const t = log.get(name, "TimeUS")
             if (t.length > 1) {
+                time_start = t[0] * US2S
+                time_end = t[t.length - 1] * US2S
                 duration_s = (t[t.length - 1] - t[0]) * US2S
                 break
             }
@@ -185,6 +208,8 @@ function log_info(log, version) {
         fw_string: version.fw_string ?? null,
         board: version.flight_controller ?? null,
         filter_version: version.filter_version ?? null,
+        time_start,
+        time_end,
         duration_s,
         messages,
         throttle_source: throttle?.source ?? null,
