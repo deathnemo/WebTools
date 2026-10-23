@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Мастер настройки</title>
+<link rel="icon" href="../images/AP_favicon.png">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 
@@ -53,6 +54,8 @@
   --shadow:none;
 }
 *{box-sizing:border-box}
+/* Атрибут hidden должен побеждать display правил секций и блоков */
+[hidden]{display:none!important}
 body{margin:0; background:var(--bg); color:var(--ink);
   font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif; font-size:14px; line-height:1.55}
 .wrap{max-width:1400px; margin:0 auto; padding:24px 16px 64px; display:flex; flex-direction:column; gap:20px}
