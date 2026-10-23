@@ -205,3 +205,111 @@ test('log_info: без полёта и без ATT', () => {
     assert.equal(info.time_start, 0)
     assert.equal(info.time_end, 2)
 })
+
+const checks = require('../TuneWizard/core/checks.js')
+
+// Сведения о хорошем логе Copter; тесты переопределяют нужные поля
+function good_info(over = {}) {
+    return {
+        vehicle: 'Copter', fw_string: 'ArduCopter V4.6.0', board: 'CubeOrange', filter_version: 2, duration_s: 120,
+        messages: { pid: true, rate: true, gyro_raw: true, gyro_batch: false, esc: true, rpm: false, vibe: true, ctun: true, att: true, pos: true, ftn: false },
+        throttle_source: 'CTUN.ThO',
+        flight: { start: 5, end: 100, duration_s: 95, mean_throttle: 0.33 },
+        ...over
+    }
+}
+function fake_params(values) {
+    return { get: (name) => (name in values) ? values[name] : null, has: (name) => name in values }
+}
+const good_params = fake_params({ MOT_THST_HOVER: 0.35, MOT_HOVER_LEARN: 2, INS_RAW_LOG_OPT: 8, INS_GYRO_FILTER: 40 })
+const good_vibe = { imus: [{ imu: 0, level: 12, max: 20, clip: 0 }], level: 12, max: 20, clip: 0 }
+
+function by_id(list, id) {
+    const found = list.find((c) => c.id === id)
+    assert.ok(found, `нет проверки ${id}`)
+    return found
+}
+
+test('run_checks: хороший лог — все проверки ok', () => {
+    const list = checks.run_checks(good_info(), good_params, good_vibe)
+    for (const c of list) assert.equal(c.status, 'ok', `${c.id}: ${c.text}`)
+    assert.equal(checks.checks_summary(list).status, 'ok')
+})
+
+test('run_checks: не Copter — fail, итог fail', () => {
+    const list = checks.run_checks(good_info({ vehicle: 'Plane' }), good_params, good_vibe)
+    assert.equal(by_id(list, 'vehicle').status, 'fail')
+    assert.equal(checks.checks_summary(list).status, 'fail')
+})
+
+test('run_checks: PID — ok / warn (только RATE) / fail', () => {
+    const only_rate = good_info({ messages: { ...good_info().messages, pid: false, rate: true } })
+    assert.equal(by_id(checks.run_checks(only_rate, good_params, good_vibe), 'pid_log').status, 'warn')
+    const none = good_info({ messages: { ...good_info().messages, pid: false, rate: false } })
+    assert.equal(by_id(checks.run_checks(none, good_params, good_vibe), 'pid_log').status, 'fail')
+})
+
+test('run_checks: нет данных гироскопа — fail с подсказкой', () => {
+    const info = good_info({ messages: { ...good_info().messages, gyro_raw: false, gyro_batch: false } })
+    const c = by_id(checks.run_checks(info, good_params, good_vibe), 'gyro_log')
+    assert.equal(c.status, 'fail')
+    assert.match(c.fix, /INS_LOG_BAT_MASK/)
+})
+
+test('run_checks: raw pre/post по INS_RAW_LOG_OPT', () => {
+    const post_only = fake_params({ INS_RAW_LOG_OPT: 4 })
+    assert.equal(by_id(checks.run_checks(good_info(), post_only, good_vibe), 'pre_post').status, 'warn')
+    const pre_only = fake_params({ INS_RAW_LOG_OPT: 0 })
+    assert.equal(by_id(checks.run_checks(good_info(), pre_only, good_vibe), 'pre_post').status, 'ok')
+})
+
+test('run_checks: batch pre/post по INS_LOG_BAT_OPT', () => {
+    const info = good_info({ messages: { ...good_info().messages, gyro_raw: false, gyro_batch: true } })
+    assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 4 }), good_vibe), 'pre_post').status, 'ok')
+    assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 2 }), good_vibe), 'pre_post').status, 'warn')
+})
+
+test('run_checks: источник трекинга — ESC ok, RPM ok, только газ warn', () => {
+    const rpm = good_info({ messages: { ...good_info().messages, esc: false, rpm: true } })
+    assert.equal(by_id(checks.run_checks(rpm, good_params, good_vibe), 'tracking').status, 'ok')
+    const throttle = good_info({ messages: { ...good_info().messages, esc: false, rpm: false } })
+    assert.equal(by_id(checks.run_checks(throttle, good_params, good_vibe), 'tracking').status, 'warn')
+})
+
+test('run_checks: полёт — нет газа fail, короткий warn', () => {
+    assert.equal(by_id(checks.run_checks(good_info({ flight: null }), good_params, good_vibe), 'flight').status, 'fail')
+    const short = good_info({ flight: { start: 5, end: 25, duration_s: 20, mean_throttle: 0.33 } })
+    assert.equal(by_id(checks.run_checks(short, good_params, good_vibe), 'flight').status, 'warn')
+})
+
+test('run_checks: вибрации — пороги 30/60 и clipping', () => {
+    const warn = { ...good_vibe, level: 45 }
+    assert.equal(by_id(checks.run_checks(good_info(), good_params, warn), 'vibe').status, 'warn')
+    const fail = { ...good_vibe, level: 70 }
+    assert.equal(by_id(checks.run_checks(good_info(), good_params, fail), 'vibe').status, 'fail')
+    const clip = { ...good_vibe, clip: 5 }
+    assert.equal(by_id(checks.run_checks(good_info(), good_params, clip), 'clipping').status, 'warn')
+    assert.equal(by_id(checks.run_checks(good_info(), good_params, null), 'vibe').status, 'warn')
+})
+
+test('run_checks: газ висения против MOT_THST_HOVER', () => {
+    const far = fake_params({ MOT_THST_HOVER: 0.5, MOT_HOVER_LEARN: 0 })
+    const c = by_id(checks.run_checks(good_info(), far, good_vibe), 'hover_throttle')
+    assert.equal(c.status, 'warn')
+    assert.match(c.fix, /MOT_HOVER_LEARN/)
+    const close = fake_params({ MOT_THST_HOVER: 0.31 })
+    assert.equal(by_id(checks.run_checks(good_info(), close, good_vibe), 'hover_throttle').status, 'ok')
+})
+
+test('run_checks: газ висения ниже предела обучения 0.125 — предупреждение упоминает предел', () => {
+    const info = good_info({ flight: { start: 5, end: 100, duration_s: 95, mean_throttle: 0.11 } })
+    const params = fake_params({ MOT_THST_HOVER: 0.3, MOT_HOVER_LEARN: 0 })
+    const c = by_id(checks.run_checks(info, params, good_vibe), 'hover_throttle')
+    assert.equal(c.status, 'warn')
+    assert.match(c.text, /0\.125/)
+})
+
+test('checks_summary: счётчики', () => {
+    const s = checks.checks_summary([{ status: 'ok' }, { status: 'warn' }, { status: 'warn' }])
+    assert.deepEqual(s, { status: 'warn', ok: 1, warn: 2, fail: 0 })
+})
