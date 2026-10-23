@@ -111,7 +111,7 @@ function percentile(values, fraction) {
 }
 
 // Максимум массива циклом: разворачивать длинные ряды в аргументы Math.max нельзя (переполнение стека)
-function array_max(values) {
+function max_of(values) {
     let max = -Infinity
     for (let i = 0; i < values.length; i++) {
         if (values[i] > max) {
@@ -145,8 +145,8 @@ function vibe_summary(log) {
             imu: (key == null) ? 0 : Number(key),
             p95,
             level: Math.max(p95.x, p95.y, p95.z),
-            max: Math.max(array_max(x), array_max(y), array_max(z)),
-            clip: array_max(clip),
+            max: Math.max(max_of(x), max_of(y), max_of(z)),
+            clip: max_of(clip),
         })
     }
     if (imus.length == 0) {
@@ -164,9 +164,9 @@ function vibe_summary(log) {
 function log_info(log, version) {
     const messages = log_messages(log)
 
-    // Длительность по первому подходящему сообщению с TimeUS
+    // Длительность по первому подходящему сообщению с TimeUS (без экземпляров: такие читаются через get)
     let duration_s = null
-    for (const name of ["ATT", "RATE", "CTUN", "IMU"]) {
+    for (const name of ["ATT", "RATE", "CTUN"]) {
         if (name in log.messageTypes) {
             const t = log.get(name, "TimeUS")
             if (t.length > 1) {
