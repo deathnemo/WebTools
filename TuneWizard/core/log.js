@@ -110,33 +110,48 @@ function percentile(values, fraction) {
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]
 }
 
+// Максимум массива циклом: разворачивать длинные ряды в аргументы Math.max нельзя (переполнение стека)
+function array_max(values) {
+    let max = -Infinity
+    for (let i = 0; i < values.length; i++) {
+        if (values[i] > max) {
+            max = values[i]
+        }
+    }
+    return max
+}
+
 // Сводка VIBE по экземплярам IMU: p95 и максимум по осям, число событий clipping.
+// VIBE пишется по экземплярам, и парсер отдаёт такие сообщения только через get_instance.
 // Clip в логе — счётчик нарастающим итогом, поэтому берём максимум.
 function vibe_summary(log) {
     if (!("VIBE" in log.messageTypes)) {
         return null
     }
-    const VIBE = log.get("VIBE")
-    const by_imu = {}
-    for (let i = 0; i < VIBE.TimeUS.length; i++) {
-        const s = by_imu[VIBE.IMU[i]] ??= { x: [], y: [], z: [], max: -Infinity, clip: 0 }
-        s.x.push(VIBE.VibeX[i])
-        s.y.push(VIBE.VibeY[i])
-        s.z.push(VIBE.VibeZ[i])
-        // Максимум считаем на ходу: разворачивать длинные ряды в аргументы Math.max нельзя (переполнение стека)
-        s.max = Math.max(s.max, VIBE.VibeX[i], VIBE.VibeY[i], VIBE.VibeZ[i])
-        s.clip = Math.max(s.clip, VIBE.Clip[i])
-    }
-    const imus = Object.entries(by_imu).map(([imu, s]) => {
-        const p95 = { x: percentile(s.x, 0.95), y: percentile(s.y, 0.95), z: percentile(s.z, 0.95) }
-        return {
-            imu: Number(imu),
+    // Старый лог без экземпляров читается как один IMU через get_instance(name, null, field)
+    const instances = log.messageTypes.VIBE.instances
+    const keys = instances ? Object.keys(instances) : [null]
+    const imus = []
+    for (const key of keys) {
+        const x = log.get_instance("VIBE", key, "VibeX")
+        if ((x == null) || (x.length == 0)) {
+            continue
+        }
+        const y = log.get_instance("VIBE", key, "VibeY")
+        const z = log.get_instance("VIBE", key, "VibeZ")
+        const clip = log.get_instance("VIBE", key, "Clip")
+        const p95 = { x: percentile(x, 0.95), y: percentile(y, 0.95), z: percentile(z, 0.95) }
+        imus.push({
+            imu: (key == null) ? 0 : Number(key),
             p95,
             level: Math.max(p95.x, p95.y, p95.z),
-            max: s.max,
-            clip: s.clip,
-        }
-    })
+            max: Math.max(array_max(x), array_max(y), array_max(z)),
+            clip: array_max(clip),
+        })
+    }
+    if (imus.length == 0) {
+        return null
+    }
     return {
         imus,
         level: Math.max(...imus.map((s) => s.level)),

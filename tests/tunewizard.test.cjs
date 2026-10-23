@@ -4,7 +4,11 @@ const assert = require('node:assert/strict')
 
 const core_log = require('../TuneWizard/core/log.js')
 
-// Поддельный лог: messages = { ИМЯ: { поле: массив } }, params = [[имя, значение, TimeUS], ...]
+// Поддельный лог с интерфейсом парсера.
+// messages = { ИМЯ: { поле: массив } } — сообщение без экземпляров;
+//            { ИМЯ: { instances: { 0: { поле: массив }, 1: {…} } } } — с экземплярами (как VIBE, ESC, IMU):
+//            такие сообщения настоящий парсер отдаёт только через get_instance, а get() на них падает.
+// params = [[имя, значение, TimeUS], ...]
 function fake_log({ messages = {}, params = [] } = {}) {
   const types = { ...messages }
   if (params.length > 0) {
@@ -14,15 +18,24 @@ function fake_log({ messages = {}, params = [] } = {}) {
       Value: params.map((p) => p[1])
     }
   }
+  const messageTypes = {}
+  for (const [name, msg] of Object.entries(types)) {
+    messageTypes[name] = msg.instances ? { instances: Object.fromEntries(Object.keys(msg.instances).map((k) => [k, {}])) } : {}
+  }
   return {
-    messageTypes: Object.fromEntries(Object.keys(types).map((name) => [name, {}])),
+    messageTypes,
     get(name, field) {
-      const msg = types[name]
-      if (msg == null) return undefined
-      return field ? msg[field] : msg
+      return this.get_instance(name, null, field)
     },
     get_instance(name, instance, field) {
-      return this.get(name, field)
+      const msg = types[name]
+      if (msg == null) return undefined
+      if (msg.instances) {
+        if (instance == null) throw new TypeError("сообщение с экземплярами читается только через get_instance")
+        const data = msg.instances[instance]
+        return field ? data[field] : data
+      }
+      return field ? msg[field] : msg
     }
   }
 }
@@ -93,14 +106,10 @@ test('percentile: 95-й процентиль', () => {
 })
 
 test('vibe_summary: по экземплярам IMU — p95 и максимум по осям, clipping', () => {
-  const log = fake_log({ messages: { VIBE: {
-    TimeUS: [0, 1e6, 2e6, 3e6],
-    IMU: [0, 1, 0, 1],
-    VibeX: [10, 20, 12, 22],
-    VibeY: [5, 6, 7, 8],
-    VibeZ: [30, 40, 35, 45],
-    Clip: [0, 0, 3, 1]       // нарастающий итог: IMU0 дошёл до 3, IMU1 до 1
-  } } })
+  const log = fake_log({ messages: { VIBE: { instances: {
+    0: { TimeUS: [0, 2e6], VibeX: [10, 12], VibeY: [5, 7], VibeZ: [30, 35], Clip: [0, 3] },
+    1: { TimeUS: [1e6, 3e6], VibeX: [20, 22], VibeY: [6, 8], VibeZ: [40, 45], Clip: [0, 1] }
+  } } } })
   const vibe = core_log.vibe_summary(log)
   assert.equal(vibe.imus.length, 2)
   assert.equal(vibe.imus[0].imu, 0)
@@ -116,14 +125,13 @@ test('vibe_summary: по экземплярам IMU — p95 и максимум 
 
 test('vibe_summary: длинный ряд VIBE (часы полёта) не переполняет стек', () => {
   const n = 200000
-  const log = fake_log({ messages: { VIBE: {
+  const log = fake_log({ messages: { VIBE: { instances: { 0: {
     TimeUS: Array.from({ length: n }, (_, i) => i * 1e5),
-    IMU: new Array(n).fill(0),
     VibeX: new Array(n).fill(10),
     VibeY: new Array(n).fill(10),
     VibeZ: Array.from({ length: n }, (_, i) => (i == n - 1) ? 50 : 20),
     Clip: new Array(n).fill(0)
-  } } })
+  } } } } })
   const vibe = core_log.vibe_summary(log)
   assert.equal(vibe.max, 50)
   assert.equal(vibe.level, 20)
