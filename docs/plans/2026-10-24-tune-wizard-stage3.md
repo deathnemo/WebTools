@@ -146,7 +146,8 @@ function lowpass_ctx(base, notch, kd) { … }   // base = { gyro, env, tracking,
 // Оценка варианта values (имена lowpass_param_names) → null, если у экземпляра нет FFT или Z1, иначе {
 //   values, warnings,
 //   gyro: { band_dB, lag_ms: { 10, 30 }, spectrum, pre_spectrum } — evaluate_candidate({ ...ctx.notch, INS_GYRO_FILTER }),
-//   dterm: { bins, roll: { dB, spectrum }, pitch: { dB, spectrum } } — шум D-составляющей; у оси без Kd — null,
+//   dterm: { bins, roll: { dB, spectrum }, pitch: { dB, spectrum } } — шум D-составляющей; у оси без Kd или с Kd 0 — null,
+//   kd: { roll, pitch } — копия ctx.kd (страница и lowpass_flags различают «нет в логе» и «D выключен»),
 //   lag_ms: { roll: { P: { 10, 30 }, D: { 10, 30 } }, pitch: { … } }
 // }. Состояние gyro не меняется
 function evaluate_lowpass(values, ctx) { … }
@@ -166,16 +167,19 @@ function evaluate_lowpass(values, ctx) { … }
 // step (0.05 Гц, как в filters_lag_ms — get_phase считает спад больше 45° за шаг переносом фазы), средняя по окнам
 // интервала амплитуда и развёрнутая фаза, умноженные на FLTE (путь P) и FLTE·FLTD (путь D).
 // → { freq, P: { amp_dB, phase_deg }, D: { amp_dB, phase_deg } }; null без FFT
-function lowpass_bode(values, ctx, axis, step = 0.05) { … }
+function lowpass_bode(values, ctx, step = 0.05) { … }   // после ревью: обе оси одним вызовом →
+//   { freq, gyro: { amp_dB, phase_deg }, roll: { P, D }, pitch: { P, D } }; null при loop_rate или step не > 0
 
 // Отметки варианта против лога: noisier — что шумнее больше чем на max_noise_increase_dB ("gyro", "roll", "pitch");
-// slower — пути, где задержка на старшей из lag_freqs_hz больше лога на max_lag_increase_ms ("roll P", "roll D", …);
+// slower — пути, где задержка на старшей из lag_freqs_hz (lowpass_lag_hz()) больше лога на max_lag_increase_ms —
+// объекты { axis: "roll" | "pitch", path: "P" | "D" }; d_off_axes — оси с Kd 0 у варианта и у лога (путь D не проверяется);
 // incomplete — нет оценки или оценки лога, нечисловая полоса гироскопа. Проверки отказывают при сомнении:
 // !(разница ≤ порога); ось без Kd у обоих — без отметки шума, но в incomplete_axes.
-// → { noisier: [...], slower: [...], incomplete, incomplete_axes: [...] }
+// → { noisier: [...], slower: [{ axis, path }], incomplete, incomplete_axes: [...], d_off_axes: [...] }
 function lowpass_flags(evaluation, log, rules = lowpass_rules) { … }
 
-// Предупреждения о том, чего модель не учитывает: notch-фильтры ПИД ATC_RAT_*_NTF/NEF ≠ 0 → строка на ось
+// Предупреждения о том, чего модель не учитывает: notch ошибки ПИД ATC_RAT_RLL/PIT_NEF ≠ 0 (NTF — на цели, без строки);
+// быстрый поток контура FSTRATE_ENABLE > 0 (ПИД на частоте гироскопа / FSTRATE_DIV, модель — на SCHED_LOOP_RATE)
 function lowpass_model_warnings(params) { … }
 ```
 
@@ -197,7 +201,7 @@ function lowpass_model_warnings(params) { … }
 - `lowpass_bode`: при `FLTE 0` путь P совпадает с гироскопной частью; разность фаз путей D и P на 30 Гц = фаза `pid_lowpass_response(FLTD)` (±1e-6);
 - после `evaluate_lowpass` массивы `FFT.H` и `FFT.bode.H` в gyro — те же объекты и значения.
 
-**Замер** на логе пользователя (скрипт в scratchpad, в репозиторий не коммитить): 3 варианта оцениваются под Node быстрее 1 с; `lowpass_bode` одной оси — быстрее 0.5 с. Числа — в отчёт задачи. Ожидание на логе (notch лога, 10″): «Как в логе» — путь P на 30 Гц ≈ 7.0 мс, путь D ≈ 10.6 мс; «Лог + правило /2» (`FLTD` 20) — путь D больше на ≈ 0.8 мс, шум D ниже.
+**Замер** на логе пользователя (скрипт в scratchpad, в репозиторий не коммитить): 3 варианта оцениваются под Node быстрее 1 с; `lowpass_bode` одной оси — быстрее 0.5 с. Числа — в отчёт задачи. Замер (задача 2, notch лога, 10″): «Как в логе» — путь P на 30 Гц 9.92 мс, путь D 13.44 мс (notch на каждый мотор, `INS_HNTCH_OPTS 6`; первая прикидка 7.0 / 10.6 мс считала один notch на гармонику); «Лог + правило /2» (`FLTD` 20) — путь D +0.83 мс, шум D −2.5 дБ; 3 варианта — около 0.1 с, бодэ обеих осей — около 65 мс.
 
 **Коммит:** `TuneWizard: шаг 3 — оценка вариантов: шум D, задержка путей P и D, бодэ` (+ трейлер), push.
 
@@ -230,6 +234,14 @@ function lowpass_model_warnings(params) { … }
 - Метрики `#metrics3`: значения формы против лога — шум гироскопа, шум D крена/тангажа, задержка путей P/D на 10 и 30 Гц.
 - «Принять» → `state.steps[3] = { accepted: значения формы, candidate_id ("prop" | "half" | "log" | "custom"), prop_in, metrics, flags, evaluated_at }`; вердикт «Принято» или «Принято, но хуже лога: …» (`warn`); затем `set_step(4)`, если шаг 4 доступен.
 - Все расчёты — под `loading_call` с `try/catch` (как `step2_run`), ошибка — в `#verdict3`.
+
+**Уточнения по итогам задач 1–2** (API ядра уже есть в `core/lowpass.js`):
+- Размер винта из поля: пустое поле → `null`; есть ли вариант «по размеру» и нужна ли просьба «введите размер» — по `prop_valid(p)`; предупреждение у поля — `prop_size_warning(p)` (вызывать с числом).
+- У каждого варианта `same_as` — id совпавших с ним и выброшенных вариантов: если «По размеру винта» совпал с логом, в таблице одна строка «Как в логе», а вердикт говорит «значения по размеру винта совпадают с логом — менять нечего».
+- У варианта `prop` — `accel_from_log` и `formula_accel` (значения формулы в единицах лога): вердикт «пределы ускорения оставлены из лога (похоже на AutoTune), по формуле было бы …». Если `prop` слился с логом и этих полей нет — посчитать через `prop_values(p).accel_cdegss` × `scale` / 100.
+- Отметки `lowpass_flags`: `noisier` (`"gyro"`, `"roll"`, `"pitch"`), `slower` — `{ axis, path }`, `incomplete`, `incomplete_axes` («нет Kd в логе — неполные данные»), `d_off_axes` («D выключен», не ошибка); частота задержки для подписей — `lowpass_lag_hz()`.
+- `lowpass_model_warnings(params)` — строки в `#warnings3`.
+- Бодэ — `lowpass_bode(values, ctx)` даёт обе оси сразу (`{ freq, gyro, roll: { P, D }, pitch: { P, D } }`); бодэ лога считать один раз на расчёт и хранить в `step3`.
 
 **Проверка руками** (`python -m http.server --bind 127.0.0.1`, `http://127.0.0.1:8000/TuneWizard/`): лог пользователя, шаг 3, размер 10″ — три варианта, рекомендован «По размеру винта (10″)» (`INS_GYRO_FILTER 42`, `FLTD/FLTT 21`), пределы ускорения из лога; правка `ATC_RAT_RLL_FLTD` → строка «Свой». Ошибок консоли нет. `npm run lint`, `npm test`, `npm run test:tunewizard` (шаги 0–2 не сломаны).
 
@@ -276,6 +288,6 @@ function lowpass_model_warnings(params) { … }
 ## Что сознательно не вошло в этап 3
 
 - `MOT_THST_EXPO`, напряжения батареи, `ATC_THR_MIX_MAN`, `MOT_THST_HOVER`, `ACRO_YAW_P` из Mission Planner — решение пользователя: аппарат уже летает.
-- Notch-фильтры ПИД (`ATC_RAT_*_NTF/NEF`, `FILTn_*`) в модели — только предупреждение, если включены.
+- Notch-фильтр ошибки ПИД (`ATC_RAT_*_NEF`, `FILTn_*`) и быстрый поток контура (`FSTRATE_ENABLE`) в модели — только предупреждение, если включены.
 - Файл `.param` шага 3 — итоговый файл соберёт сводка на этапе 5.
 - Спектр D-составляющей из `PIDR/P/Y` (записанный) — этап 4 (перенос PIDReview).
