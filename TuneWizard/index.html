@@ -11,9 +11,7 @@
 <script src="../modules/plotly.js/dist/plotly.min.js"></script>
 
 <script type="text/javascript" src="../Libraries/LogHelpers.js"></script>
-<script type="text/javascript" src="../Libraries/Param_Helpers.js"></script>
 <script type="text/javascript" src="../Libraries/LoadingOverlay.js"></script>
-<script type="text/javascript" src="../Libraries/Plotly_helpers.js"></script>
 
 <script type="text/javascript" src="core/log.js"></script>
 <script type="text/javascript" src="core/checks.js"></script>
@@ -92,18 +90,25 @@ button:focus-visible,input:focus-visible,label.pickbtn:focus-visible{outline:2px
 .wizbar button[aria-current="step"]{background:var(--accent-soft); box-shadow:inset 0 -2px 0 var(--accent)}
 .wizbar button[aria-current="step"] .n{color:var(--accent)}
 .wizbar button:disabled .t{color:var(--ink-3)}
-@media (max-width:900px){.wizbar{grid-template-columns:repeat(3,minmax(0,1fr))} .wizbar button{border-bottom:1px solid var(--line)}}
+@media (max-width:900px){
+  .wizbar{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .wizbar button{border-bottom:1px solid var(--line)}
+  .wizbar button:nth-child(3n){border-right:0}
+  .wizbar button .t{overflow-wrap:anywhere}
+}
 
 /* Карточки и поля */
 .lab{display:flex; flex-direction:column; gap:12px; background:var(--surface); border:1px solid var(--line); padding:14px; box-shadow:var(--shadow)}
 .row{display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap}
-.fld{display:flex; flex-direction:column; gap:5px; min-width:0}
+.fld{position:relative; display:flex; flex-direction:column; gap:5px; min-width:0}
 /* :not(.pickbtn): кнопка выбора файла — тоже label внутри .fld, но оформляется как кнопка */
 .fld label:not(.pickbtn){font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3)}
 .fld input[type=number]{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:14px; padding:7px 10px; width:110px;
   border:1px solid var(--line); background:var(--sunk); color:var(--ink)}
 .fld input:disabled{opacity:.45}
-input[type=file]{display:none}
+/* Поле файла скрыто визуально, но доступно с клавиатуры: фокус на нём подсвечивает кнопку-label рядом */
+input[type=file]{position:absolute; width:1px; height:1px; opacity:0; overflow:hidden; pointer-events:none}
+input[type=file]:focus-visible + .pickbtn{outline:2px solid var(--low); outline-offset:2px}
 .unit{text-transform:none}
 .note{border-left:2px solid var(--line); padding-left:13px; color:var(--ink-3); font-size:13px; max-width:100ch}
 
@@ -135,7 +140,8 @@ input[type=file]{display:none}
 #loading h1{color:var(--ink)}
 
 @media print{
-  :root{--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none}
+  /* Три селектора одной специфичности с правилами тёмной темы: при печати побеждают как более поздние */
+  :root, :root[data-theme], :root:not([data-theme]){--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none}
   .themebar,.wizbar,button,label.pickbtn{display:none!important}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot{break-inside:avoid}
@@ -166,8 +172,8 @@ input[type=file]{display:none}
     <div class="row">
       <div class="fld">
         <label for="fileItem">Файл .bin</label>
-        <label class="pickbtn" for="fileItem" id="fileLabel">Выбрать лог…</label>
         <input id="fileItem" type="file" accept=".bin" onchange="read_file(this)">
+        <label class="pickbtn" for="fileItem" id="fileLabel">Выбрать лог…</label>
       </div>
       <div class="fld">
         <label for="TimeStart">Начало анализа, <span class="unit">с</span></label>

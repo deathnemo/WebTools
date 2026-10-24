@@ -189,8 +189,9 @@ function log_info(log, version = {}) {
     let duration_s = null
     for (const name of ["ATT", "RATE", "CTUN"]) {
         if (name in log.messageTypes) {
+            // Сообщение может быть объявлено без единой строки: поля нет, get возвращает undefined
             const t = log.get(name, "TimeUS")
-            if (t.length > 1) {
+            if ((t != null) && (t.length > 1)) {
                 time_start = t[0] * US2S
                 time_end = t[t.length - 1] * US2S
                 duration_s = (t[t.length - 1] - t[0]) * US2S

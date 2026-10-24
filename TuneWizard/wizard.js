@@ -23,7 +23,7 @@ const state = {
 
 // ---------- Тема ----------
 
-function token(name) {
+function css_token(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
 }
 
@@ -68,23 +68,25 @@ function init_theme() {
 
 // Цвета линий графиков из токенов: главная, вторая, хорошо, плохо
 function plot_colors() {
-    return [token("--accent"), token("--low"), token("--ok"), token("--high")]
+    return [css_token("--accent"), css_token("--low"), css_token("--ok"), css_token("--high")]
 }
 
 // Общая часть layout Plotly под текущую тему
 function plot_layout_theme() {
-    const font = { family: '"IBM Plex Mono", ui-monospace, monospace', size: 11, color: token("--ink-2") }
+    const font = { family: '"IBM Plex Mono", ui-monospace, monospace', size: 11, color: css_token("--ink-2") }
     return {
-        paper_bgcolor: token("--surface"),
-        plot_bgcolor: token("--surface"),
+        paper_bgcolor: css_token("--surface"),
+        plot_bgcolor: css_token("--surface"),
         font,
         axis: {
-            gridcolor: token("--line-soft"),
-            linecolor: token("--line"),
-            zerolinecolor: token("--line"),
+            gridcolor: css_token("--line-soft"),
+            linecolor: css_token("--line"),
+            zerolinecolor: css_token("--line"),
             tickfont: font,
             title: { font },
         },
+        // Ползунок диапазона под осью X: фон и рамка тоже из токенов, иначе в тёмной теме он остаётся светлым
+        rangeslider: { bgcolor: css_token("--surface-2"), bordercolor: css_token("--line") },
     }
 }
 
@@ -116,7 +118,7 @@ function setup_flight_plot() {
         paper_bgcolor: theme.paper_bgcolor,
         plot_bgcolor: theme.plot_bgcolor,
         font: theme.font,
-        xaxis: { ...theme.axis, title: { text: "Время, с", font: theme.font }, domain: [0.07, 0.93], zeroline: false, showline: true, mirror: true, rangeslider: {} },
+        xaxis: { ...theme.axis, title: { text: "Время, с", font: theme.font }, domain: [0.07, 0.93], zeroline: false, showline: true, mirror: true, rangeslider: theme.rangeslider },
         showlegend: false,
         margin: { b: 50, l: 50, r: 50, t: 20 },
     }
@@ -165,7 +167,8 @@ function restyle_plots() {
     flight_data.layout.paper_bgcolor = theme.paper_bgcolor
     flight_data.layout.plot_bgcolor = theme.plot_bgcolor
     flight_data.layout.font = theme.font
-    Object.assign(flight_data.layout.xaxis, theme.axis, { title: { text: "Время, с", font: theme.font } })
+    // range оси X при этом сохраняется: Object.assign только дописывает поля темы
+    Object.assign(flight_data.layout.xaxis, theme.axis, { title: { text: "Время, с", font: theme.font }, rangeslider: theme.rangeslider })
     for (let i = 0; i < flight_data.data.length; i++) {
         flight_data.data[i].line.color = colors[i]
         const key = (i == 0) ? "yaxis" : "yaxis" + (i + 1)
@@ -194,8 +197,14 @@ function set_interval(start, end) {
 }
 
 function interval_input_changed() {
-    const start = parseFloat(document.getElementById("TimeStart").value)
-    const end = parseFloat(document.getElementById("TimeEnd").value)
+    let start = Math.floor(parseFloat(document.getElementById("TimeStart").value))
+    let end = Math.ceil(parseFloat(document.getElementById("TimeEnd").value))
+    // Сначала зажать в границы лога, потом проверять порядок: иначе конец за пределами лога
+    // срезался бы уже в set_interval после проверки, и интервал мог бы инвертироваться
+    if (state.settings.min != null) {
+        start = Math.max(start, state.settings.min)
+        end = Math.min(end, state.settings.max)
+    }
     if (!(end > start)) {
         set_interval(state.settings.start, state.settings.end)
         return
@@ -278,8 +287,17 @@ function read_file(input) {
     reader.onload = function () {
         loading_call(async () => {
             state.file_name = file.name
-            await load(reader.result)
+            try {
+                await load(reader.result)
+            } catch (e) {
+                // Ошибка парсера или данных: показать в вердикте, а не оставлять оверлей
+                console.error(e)
+                show_verdict("fail", "Не удалось прочитать лог: " + e.message)
+            }
         })
+    }
+    reader.onerror = function () {
+        show_verdict("fail", "Не удалось прочитать файл: " + (reader.error ? reader.error.message : "ошибка чтения"))
     }
     reader.readAsArrayBuffer(file)
 }
@@ -301,8 +319,15 @@ function reset() {
     state.checks = null
     state.settings = { start: 0, end: 0, min: null, max: null, window_size: state.settings.window_size }
     state.steps = []
+    document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
+    }
+    for (const id of ["TimeStart", "TimeEnd"]) {
+        const input = document.getElementById(id)
+        input.value = 0
+        input.removeAttribute("min")
+        input.removeAttribute("max")
     }
     document.getElementById("log_verdict").hidden = true
     document.getElementById("log_info").hidden = true
@@ -311,6 +336,12 @@ function reset() {
         trace.x = []
         trace.y = []
     }
+    // Пустой график перерисовать сразу, чтобы прошлый полёт не оставался на экране; диапазон — снова авто
+    if (flight_data.layout.xaxis) {
+        delete flight_data.layout.xaxis.range
+        flight_data.layout.xaxis.autorange = true
+    }
+    restyle_plots()
     update_wizbar()
 }
 
@@ -347,16 +378,23 @@ async function load(buffer) {
     console.log("Загрузка заняла " + Math.round(performance.now() - start) + " мс")
 }
 
-function stat(key, value, accent) {
-    return '<div class="stat' + (accent ? " stat--accent" : "") + '"><span class="stat__k">' + key + '</span><span class="stat__v">' + value + '</span></div>'
+// Экранирование текста для innerHTML: строки из лога (прошивка, плата) могут содержать < и &
+function html_escape(text) {
+    return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]))
+}
+
+function stat_tile(key, value, accent) {
+    return '<div class="stat' + (accent ? " stat--accent" : "") + '"><span class="stat__k">' + html_escape(key) + '</span><span class="stat__v">' + html_escape(value) + '</span></div>'
 }
 
 function format_seconds(s) {
     if (s == null) {
         return "—"
     }
-    const m = Math.floor(s / 60)
-    const sec = Math.round(s - m * 60)
+    // Сначала округлить всё, потом делить: иначе 59.6 с давало бы «0 мин 60 с»
+    const t = Math.round(s)
+    const m = Math.floor(t / 60)
+    const sec = t % 60
     return (m > 0) ? m + " мин " + sec + " с" : sec + " с"
 }
 
@@ -365,15 +403,15 @@ function render_info() {
     const params = state.params
     const flight = info.flight
     const html = [
-        stat("Аппарат", info.vehicle ?? "—", info.vehicle === "Copter"),
-        stat("Прошивка", info.fw_string ?? "—"),
-        stat("Плата", info.board ?? "—"),
-        stat("Длительность лога", format_seconds(info.duration_s)),
-        stat("Полёт с газом", flight ? format_seconds(flight.duration_s) : "нет"),
-        stat("Средний газ", (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
-        stat("INS_GYRO_FILTER", params.get("INS_GYRO_FILTER") ?? "—"),
-        stat("SCHED_LOOP_RATE", params.get("SCHED_LOOP_RATE") ?? "—"),
-        stat("Версия фильтра", info.filter_version ?? "—"),
+        stat_tile("Аппарат", info.vehicle ?? "—", info.vehicle === "Copter"),
+        stat_tile("Прошивка", info.fw_string ?? "—"),
+        stat_tile("Плата", info.board ?? "—"),
+        stat_tile("Длительность лога", format_seconds(info.duration_s)),
+        stat_tile("Полёт с газом", flight ? format_seconds(flight.duration_s) : "нет"),
+        stat_tile("Средний газ", (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
+        stat_tile("INS_GYRO_FILTER", params.get("INS_GYRO_FILTER") ?? "—"),
+        stat_tile("SCHED_LOOP_RATE", params.get("SCHED_LOOP_RATE") ?? "—"),
+        stat_tile("Версия фильтра", info.filter_version ?? "—"),
     ]
     const box = document.getElementById("log_info")
     box.innerHTML = html.join("")
@@ -385,8 +423,8 @@ function render_checks() {
     const box = document.getElementById("log_checks")
     box.innerHTML = state.checks.map((c) =>
         '<div class="check check--' + c.status + '"><span class="check__s">' + labels[c.status] + '</span>' +
-        '<div class="check__b"><h3>' + c.title + '</h3><p>' + c.text + '</p>' +
-        (c.fix ? '<p class="fix"><b>Что сделать:</b> ' + c.fix + '</p>' : "") + '</div></div>'
+        '<div class="check__b"><h3>' + html_escape(c.title) + '</h3><p>' + html_escape(c.text) + '</p>' +
+        (c.fix ? '<p class="fix"><b>Что сделать:</b> ' + html_escape(c.fix) + '</p>' : "") + '</div></div>'
     ).join("")
     box.hidden = false
 
@@ -401,21 +439,31 @@ function render_checks() {
 
 function plot_flight() {
     const log = state.log
+    // log.get возвращает undefined для сообщения без строк или без поля: каждый ряд рисуем только целиком
     if ("ATT" in log.messageTypes) {
-        const time = us_to_s(log.get("ATT", "TimeUS"))
-        flight_data.data[0].x = time
-        flight_data.data[0].y = log.get("ATT", "Roll")
-        flight_data.data[1].x = time
-        flight_data.data[1].y = log.get("ATT", "Pitch")
+        const TimeUS = log.get("ATT", "TimeUS")
+        const Roll = log.get("ATT", "Roll")
+        const Pitch = log.get("ATT", "Pitch")
+        if ((TimeUS != null) && (Roll != null) && (Pitch != null)) {
+            const time = us_to_s(TimeUS)
+            flight_data.data[0].x = time
+            flight_data.data[0].y = Roll
+            flight_data.data[1].x = time
+            flight_data.data[1].y = Pitch
+        }
     }
     const throttle = throttle_series(log)
-    if (throttle != null) {
+    if ((throttle != null) && (throttle.time != null) && (throttle.throttle != null)) {
         flight_data.data[2].x = throttle.time
         flight_data.data[2].y = throttle.throttle
     }
     if ("POS" in log.messageTypes) {
-        flight_data.data[3].x = us_to_s(log.get("POS", "TimeUS"))
-        flight_data.data[3].y = log.get("POS", "RelHomeAlt")
+        const TimeUS = log.get("POS", "TimeUS")
+        const RelHomeAlt = log.get("POS", "RelHomeAlt")
+        if ((TimeUS != null) && (RelHomeAlt != null)) {
+            flight_data.data[3].x = us_to_s(TimeUS)
+            flight_data.data[3].y = RelHomeAlt
+        }
     }
 
     // Границы данных: абсолютные секунды лога из log_info, иначе по нарисованным рядам

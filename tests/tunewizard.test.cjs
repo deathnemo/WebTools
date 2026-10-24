@@ -206,6 +206,15 @@ test('log_info: без полёта и без ATT', () => {
     assert.equal(info.time_end, 2)
 })
 
+test('log_info: ATT объявлен, но без строк (нет полей) — длительность из RATE, без исключения', () => {
+    // Парсер отдаёт undefined для поля сообщения без строк; поддельный лог ведёт себя так же
+    const log = fake_log({ messages: { ATT: {}, RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0, 0, 0] } } })
+    const info = core_log.log_info(log, copter_version)
+    assert.equal(info.duration_s, 3)
+    assert.equal(info.time_start, 0)
+    assert.equal(info.time_end, 3)
+})
+
 const checks = require('../TuneWizard/core/checks.js')
 
 // Сведения о хорошем логе Copter; тесты переопределяют нужные поля
