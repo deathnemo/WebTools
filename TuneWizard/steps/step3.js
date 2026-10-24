@@ -739,10 +739,11 @@ function step3_run(fn) {
 
 // Пересчёт правок полей (step3_flush_edits) — сразу, в том же обработчике и без оверлея: «Применить вариант» и
 // «Принять» досчитывают правки в обработчике click и тут же читают таблицу и форму, а оверлей съел бы щелчок по
-// кнопке. Цена на тестовом логе (205 окон FFT): смена размера — оценка вариантов ≈ 0.1 с; новые значения формы —
-// оценка строки «Свой» ≈ 0.03 с и её бодэ для графика ≈ 0.08 с; повторные значения берут бодэ из кэша (step3_bode).
-// Оценка и бодэ растут с числом окон FFT. Если нужен расчёт шага 1, он идёт под оверлеем (step3_run), а кнопки
-// тогда не действуют
+// кнопке. Цена на тестовом логе (205 окон FFT): смена размера — оценка вариантов ≈ 0.1 с, а если выбрана строка
+// «По размеру винта», ещё бодэ её новых значений для графика ≈ 0.08 с (смена 10 → 12″ целиком ≈ 0.2 с); новые
+// значения формы — оценка строки «Свой» ≈ 0.03 с и её бодэ ≈ 0.08 с; повторные значения берут бодэ из кэша
+// (step3_bode). Оценка и бодэ растут с числом окон FFT. Если нужен расчёт шага 1, он идёт под оверлеем (step3_run),
+// а кнопки тогда не действуют
 function step3_run_edit(fn) {
     if (step1_ready()) {
         step3_try(fn)
@@ -1436,17 +1437,15 @@ function step3_selected_title(row) {
     return step3_type_names.sel + ": " + row.title
 }
 
-// Почему у оси нет D-составляющей: kd — Kd оси из оценки лога (evaluate_lowpass → kd). Текст причины или null, если
-// Kd есть; без D-составляющей у оси нет спектра D и пути D на графиках (в таблице путь D без Kd в логе считается)
+// D оси выключен: kd — Kd оси из оценки лога (evaluate_lowpass → kd). Текст причины, если Kd = 0, иначе null. Только
+// тогда в бодэ нет пути D: задержка пути D от Kd не зависит, и без Kd в логе её считают таблица и lowpass_flags
+function step3_d_off_reason(axis, kd) {
+    return (kd === 0) ? "D выключен (ATC_RAT_" + lowpass_pid_axes[axis].param + "_D = 0)" : null
+}
+
+// Почему у оси нет спектра D-составляющей: D выключен (step3_d_off_reason) или Kd нет в логе; null — Kd есть
 function step3_d_absent_reason(axis, kd) {
-    const name = "ATC_RAT_" + lowpass_pid_axes[axis].param + "_D"
-    if (kd === 0) {
-        return "D выключен (" + name + " = 0)"
-    }
-    if (!Number.isFinite(kd)) {
-        return "в логе нет " + name
-    }
-    return null
+    return step3_d_off_reason(axis, kd) ?? (Number.isFinite(kd) ? null : "в логе нет ATC_RAT_" + lowpass_pid_axes[axis].param + "_D")
 }
 
 // Подпись-причина под графиком: пустой список — подпись скрыта
@@ -1516,11 +1515,28 @@ function dterm3_redraw(row, log) {
     render_plot("DTerm3")
 }
 
-// Бодэ значений values для графика на контексте оценки расчёта. lowpass_bode дорогой (≈ 80 мс на тестовом логе,
-// растёт с числом окон FFT), поэтому кэш по candidate_key значений: повторный выбор строки и смена размера винта
-// (бодэ от него не зависит) берут готовое. Кэш сбрасывается со сменой контекста оценки (step3.context_key, объект
-// данных гироскопа), а в нём остаются только значения строк таблицы — правки формы его не раздувают. null — нет
-// контекста оценки
+// Бодэ для графика от bode3_min_hz (логарифмическая ось 0 Гц не покажет, а ниже 1 Гц фильтры не действуют):
+// lowpass_bode → то же строение с массивами от первой частоты не ниже bode3_min_hz; null — null
+function step3_bode_trim(bode) {
+    if (bode == null) {
+        return null
+    }
+    const found = bode.freq.findIndex((f) => f >= bode3_min_hz)
+    const from = (found >= 0) ? found : bode.freq.length
+    const cut = (part) => ({ amp_dB: part.amp_dB.slice(from), phase_deg: part.phase_deg.slice(from) })
+    const trimmed = { freq: bode.freq.slice(from), gyro: cut(bode.gyro) }
+    for (const axis of Object.keys(lowpass_pid_axes)) {
+        trimmed[axis] = { P: cut(bode[axis].P), D: cut(bode[axis].D) }
+    }
+    return trimmed
+}
+
+// Бодэ значений values для графика на контексте оценки расчёта, обрезанное от bode3_min_hz (step3_bode_trim) один раз
+// при записи в кэш: у трасс остаются те же массивы, и Plotly.react не пересчитывает неизменённые трассы. lowpass_bode
+// дорогой (≈ 80 мс на тестовом логе, растёт с числом окон FFT), поэтому кэш по candidate_key значений: повторный
+// выбор строки и смена размера винта (бодэ от него не зависит) берут готовое. Кэш сбрасывается со сменой контекста
+// оценки (step3.context_key, объект данных гироскопа), а в нём остаются только значения строк таблицы — правки формы
+// его не раздувают. null — нет контекста оценки
 function step3_bode(values) {
     if (step3.ctx == null) {
         return null
@@ -1538,30 +1554,29 @@ function step3_bode(values) {
                 map.delete(old)
             }
         }
-        map.set(key, lowpass_bode(values, step3.ctx))
+        map.set(key, step3_bode_trim(lowpass_bode(values, step3.ctx)))
     }
     return map.get(key)
 }
 
 // Бодэ путей P и D оси, выбранной радио «Крен / Тангаж»: амплитуда и фаза лога и выбранной строки от bode3_min_hz
-// (логарифмическая ось); путь D оси без D-составляющей не рисуется — причина в подписи #bode3_absent; вертикали на
-// частотах задержки — при данных. Вызывать при step3_plots_ready()
+// (логарифмическая ось, массивы из кэша step3_bode); путь D оси с выключенным D (Kd = 0) не рисуется — причина
+// в подписи #bode3_absent; вертикали на частотах задержки — при данных. Вызывать при step3_plots_ready()
 function bode3_redraw() {
     const p = plot("Bode3")
     const axis = radio_value("bode3_axis") ?? "roll"
     const row = step3_selected_row()
     const sources = { log: step3_bode(step3_log_candidate().values), sel: (row != null) ? step3_bode(row.values) : null }
-    const d_absent = step3_d_absent_reason(axis, step3.evaluations.log.kd[axis])
+    const d_off = step3_d_off_reason(axis, step3.evaluations.log.kd[axis])
     for (let s = 0; s < bode3_parts.length; s++) {
         for (let k = 0; k < bode3_paths.length; k++) {
             const path = bode3_paths[k]
             for (let t = 0; t < step3_trace_types.length; t++) {
                 const type = step3_trace_types[t]
-                const bode = ((path === "D") && (d_absent != null)) ? null : sources[type]
-                const from = (bode != null) ? bode.freq.findIndex((f) => f >= bode3_min_hz) : -1
+                const bode = ((path === "D") && (d_off != null)) ? null : sources[type]
                 const trace = p.data[bode3_trace_index(s, k, t)]
-                trace.x = (from >= 0) ? bode.freq.slice(from) : []
-                trace.y = (from >= 0) ? bode[axis][path][bode3_parts[s].field].slice(from) : []
+                trace.x = bode?.freq ?? []
+                trace.y = (bode != null) ? bode[axis][path][bode3_parts[s].field] : []
                 if ((type === "sel") && (row != null)) {
                     trace.name = "путь " + path + " · " + step3_selected_title(row)
                     trace.meta = trace.name
@@ -1570,7 +1585,7 @@ function bode3_redraw() {
             }
         }
     }
-    step3_absent_note("bode3_absent", (d_absent != null) ? ["Пути D " + step3_axis_names[axis].gen + " нет: " + d_absent + "."] : [])
+    step3_absent_note("bode3_absent", (d_off != null) ? ["Пути D " + step3_axis_names[axis].gen + " нет: " + d_off + "."] : [])
     const drawn = p.data.some((trace) => trace.x.length > 0)
     for (const shape of p.layout.shapes) {
         shape.visible = drawn
