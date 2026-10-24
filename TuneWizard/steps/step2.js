@@ -366,18 +366,21 @@ function step2_form_tidy() {
     }
 }
 
-// Размер маски HMNCS в битах — как update_hidden_params FilterReview: 32, если в логе есть INS_RAW_LOG_OPT
-// или версия фильтра не ниже 3, иначе 8
+// Размер маски HMNCS в битах (hmncs_bits, core/params.js) для текущего лога и версии фильтра
 function step2_harmonics_bits() {
-    const raw_log_opt = (state.params != null) && (state.params.get("INS_RAW_LOG_OPT") != null)
-    return (raw_log_opt || ((state.env?.filter_version ?? 1) >= 3)) ? 32 : 8
+    return hmncs_bits(state.params, state.env?.filter_version ?? 1)
 }
 
-// Значения как float32 — так их хранит прошивка: 0.7 из файла .param и 0.699999988 из лога — одно значение
+// Значение как float32 — так прошивка хранит параметры: 0.7 из файла .param и 0.699999988 из лога — одно значение.
+// Битовые маски — целые до 2^32, во float32 они потеряли бы младшие биты: их не округляем
+function step2_fround_value(name, value) {
+    return is_bitmask_param(name) ? value : Math.fround(value)
+}
+
 function step2_fround(values) {
     const out = {}
     for (const [name, value] of Object.entries(values)) {
-        out[name] = Math.fround(value)
+        out[name] = step2_fround_value(name, value)
     }
     return out
 }
@@ -434,7 +437,7 @@ function step2_param_read() {
     step2_mark_changed()
 }
 
-// Значения формы: объект имя → число float32 (маски — через parameter_get_value). Пустое или нечисловое поле —
+// Значения формы: объект имя → число float32, маски — целые (через parameter_get_value). Пустое или нечисловое поле —
 // значение из лога: проверяется сам текст поля, потому что parameter_get_value у 8-битной маски даёт из NaN
 // число 0 (NaN & 0xFF). ESCMSK при версии фильтра ниже 4 — 0, как в values_from_log
 function values_from_form() {
@@ -443,7 +446,7 @@ function values_from_form() {
     for (const name of step2_param_names()) {
         const field = document.getElementById(name)
         const typed = (field != null) && Number.isFinite(parseFloat(field.value))
-        values[name] = Math.fround(typed ? parameter_get_value(name) : log_values[name])
+        values[name] = step2_fround_value(name, typed ? parameter_get_value(name) : log_values[name])
     }
     if ((state.env?.filter_version ?? 1) < 4) {
         for (const names of notch_param_names()) {
@@ -463,7 +466,7 @@ function step2_mark_changed() {
     const values = values_from_form()
     for (const p of document.querySelectorAll("#notch_form p.param")) {
         const name = p.dataset.name
-        p.classList.toggle("changed", values[name] !== Math.fround(log_values[name]))
+        p.classList.toggle("changed", values[name] !== step2_fround_value(name, log_values[name]))
     }
     const stale = (step2.current != null) && (step2_key(values) !== step2.current.key)
     document.getElementById("notch_recalc").classList.toggle("primary", stale)
@@ -773,11 +776,7 @@ function step2_save_param() {
         if (esc_masks.includes(name) && ((state.env?.filter_version ?? 1) < 4)) {
             continue
         }
-        let value = values[name]
-        if (harmonics.includes(name) && (bits < 32) && (value >= 2**(bits - 1))) {
-            value -= 2**bits
-        }
-        out[name] = value
+        out[name] = harmonics.includes(name) ? mask_signed(values[name], bits) : values[name]
     }
     saveAs(new Blob([param_file_text(out)], { type: "text/plain;charset=utf-8" }), "notch.param")
     const hint = step2_second_notch_hint(values)

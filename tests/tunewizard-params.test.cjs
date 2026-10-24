@@ -62,3 +62,42 @@ test('parse_param_file: строки без числового значения 
     const text = 'INS_HNTCH_FREQ\nINS_HNTCH_BW,\nINS_HNTCH_ATT,abc\nINS_HNTCH_REF,-0.5\n'
     assert.deepEqual(parse_param_file(text), { INS_HNTCH_REF: -0.5 })
 })
+
+// Параметры без лога: values = { имя: значение }
+function fake_params(values) {
+    return { get: (name) => (name in values) ? values[name] : null }
+}
+
+test('is_bitmask_param: маски notch — HMNCS, OPTS, ESCMSK', () => {
+    for (const name of ['INS_HNTCH_HMNCS', 'INS_HNTC2_OPTS', 'INS_HNTCH_ESCMSK']) {
+        assert.equal(is_bitmask_param(name), true, name)
+    }
+    for (const name of ['INS_HNTCH_FREQ', 'INS_HNTCH_FM_RAT', 'INS_GYRO_FILTER', 'SCHED_LOOP_RATE']) {
+        assert.equal(is_bitmask_param(name), false, name)
+    }
+})
+
+test('hmncs_bits: 32 бита при INS_RAW_LOG_OPT в логе или версии фильтра от 3, иначе 8 (update_hidden_params)', () => {
+    assert.equal(hmncs_bits(fake_params({}), 2), 8)
+    assert.equal(hmncs_bits(fake_params({}), 3), 32)
+    assert.equal(hmncs_bits(fake_params({ INS_RAW_LOG_OPT: 0 }), 1), 32)
+})
+
+test('mask_unsigned: int8-маска из лога без знака, как parameter_get_value (−128 → 128)', () => {
+    assert.equal(mask_unsigned(-128, 8), 128, 'гармоника 8 в int8')
+    assert.equal(mask_unsigned(-123, 8), 133, 'гармоники 1, 2, 3, 8: 0b10000101 = 133')
+    assert.equal(mask_unsigned(-1, 8), 255)
+    assert.equal(mask_unsigned(5, 8), 5)
+    assert.equal(mask_unsigned(-128, 32), -128, '32-битная маска не меняется')
+    assert.equal(mask_unsigned(2**31 + 1, 32), 2**31 + 1)
+})
+
+test('mask_signed: 8-битная маска со старшим битом пишется со знаком; круг unsigned ↔ signed', () => {
+    assert.equal(mask_signed(128, 8), -128)
+    assert.equal(mask_signed(133, 8), -123)
+    assert.equal(mask_signed(127, 8), 127)
+    assert.equal(mask_signed(200, 32), 200, '32-битная маска не меняется')
+    for (let v = -128; v < 128; v++) {
+        assert.equal(mask_signed(mask_unsigned(v, 8), 8), v)
+    }
+})

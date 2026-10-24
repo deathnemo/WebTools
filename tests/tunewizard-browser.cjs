@@ -343,6 +343,20 @@ async function main() {
         assert.match(await page.textContent('#candidates2 tbody'), /гарм\. 1, 3/, 'маски вариантов словами (HMNCS 5 — гармоники 1 и 3)')
         assert.match(await page.textContent('#candidates2 thead'), /Шум после фильтров на пиках, дБ/, 'общий заголовок столбцов пиков')
         assert.match(await page.textContent('#notch_form .inlog[data-for="INS_HNTC2_FREQ"]'), /^в логе нет \(взято 80\)$/, 'параметр без записи в логе — с умолчанием')
+        // 8-битная HMNCS (нет INS_RAW_LOG_OPT, версия фильтра ниже 3): int8 −128 из лога — гармоника 8, а не 8–16
+        const hmncs_int8 = await page.evaluate(() => {
+            const get = state.params.get
+            const version = state.env.filter_version
+            try {
+                state.params.get = (name) => (name === 'INS_HNTCH_HMNCS') ? -128 : ((name === 'INS_RAW_LOG_OPT') ? null : get(name))
+                state.env.filter_version = 2
+                return values_from_log().INS_HNTCH_HMNCS
+            } finally {
+                state.params.get = get
+                state.env.filter_version = version
+            }
+        })
+        assert.equal(hmncs_int8, 128, 'int8-маска гармоник из лога без знака')
 
         // Ветка вердикта: автоподбор не удался, но есть вариант второго notch — неудача приставкой к обычному тексту
         const fit_failed = await page.evaluate(() => {

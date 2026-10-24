@@ -27,7 +27,8 @@ function spec_trace_index(s, t, a) {
 
 // Значения параметров фильтров из лога; отсутствующих в логе — умолчания формы FilterReview (reset, FR 461–483,
 // и поля INS_GYRO_FILTER = 20, SCHED_LOOP_RATE = 400 в его index.html). ESCMSK при версии фильтра ниже 4
-// обнуляется, как в update_hidden_params FilterReview
+// обнуляется, как в update_hidden_params FilterReview. 8-битная HMNCS (hmncs_bits) — без знака, как её читает
+// parameter_get_value в FilterReview: int8 −128 (гармоника 8) → 128, иначе load_filters включил бы гармоники 8–16
 function values_from_log() {
     const values = {
         INS_GYRO_FILTER: state.params.get("INS_GYRO_FILTER") ?? 20,
@@ -42,6 +43,7 @@ function values_from_log() {
         if (state.env.filter_version < 4) {
             values[names.esc_mask] = 0
         }
+        values[names.harmonics] = mask_unsigned(values[names.harmonics], hmncs_bits(state.params, state.env.filter_version))
     }
     return values
 }

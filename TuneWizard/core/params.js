@@ -5,6 +5,10 @@
 // из Libraries/Param_Helpers.js). Разбор — как load_parameters FilterReview: разделители запятая, пробелы,
 // табуляция и «=», так что читаются и файлы Mission Planner («ИМЯ,ЗНАЧЕНИЕ»), и MAVProxy («ИМЯ ЗНАЧЕНИЕ»).
 //
+// Битовые маски (INS_*_HMNCS, OPTS, ESCMSK) — целые: прошивка хранит маску размера bits, и при 8 битах маска
+// со старшим битом записана со знаком (int8: гармоника 8 → −128). Перевод в беззнаковое и обратно — как
+// parameter_get_value (Libraries/ParameterMetadata.js) и запись .param в FilterReview.
+//
 // Нужны глобалы страницы: Libraries/Param_Helpers.js (get_param_download_text).
 
 // Текст файла параметров: values — объект имя → число
@@ -36,4 +40,34 @@ function parse_param_file(text) {
         values[fields[0]] = value
     }
     return values
+}
+
+// Параметр — битовая маска notch (INS_*_HMNCS, INS_*_OPTS, INS_*_ESCMSK): целое, без округления до float32
+function is_bitmask_param(name) {
+    return /_(HMNCS|OPTS|ESCMSK)$/.test(name)
+}
+
+// Размер маски INS_*_HMNCS в битах — как update_hidden_params FilterReview: 32, если в логе есть INS_RAW_LOG_OPT
+// или версия фильтра не ниже 3, иначе 8. params — параметры лога (get(name) → число или null)
+function hmncs_bits(params, filter_version) {
+    return ((params.get("INS_RAW_LOG_OPT") != null) || (filter_version >= 3)) ? 32 : 8
+}
+
+// Маска размера bits без знака — как parameter_get_value: отрицательное (int8 −128) + 2^bits, затем лишние биты
+// отбрасываются. 32-битная маска не меняется (parameter_get_value её тоже не трогает)
+function mask_unsigned(value, bits) {
+    if (bits >= 32) {
+        return value
+    }
+    const size = 2**bits
+    return ((value < 0) ? value + size : value) % size
+}
+
+// Маска размера bits со знаком — для записи .param, как её хранит прошивка: значение со старшим битом − 2^bits
+function mask_signed(value, bits) {
+    if (bits >= 32) {
+        return value
+    }
+    const unsigned = mask_unsigned(value, bits)
+    return (unsigned >= 2**(bits - 1)) ? unsigned - 2**bits : unsigned
 }
