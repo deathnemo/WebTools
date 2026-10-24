@@ -1,8 +1,9 @@
 // Тесты низкочастотных фильтров шага 3 мастера настройки (TuneWizard/core/lowpass.js): формулы Mission Planner
 // по размеру винта (включая округление C# и RoundTo), имена и единицы пределов ускорения для 4.6 и новых
 // версий, значения лога с заводскими по умолчанию, распознавание заводских пределов и набор вариантов; модель ПИД
-// без гироскопа — фильтр первого порядка и его задержка, производная, отметки вариантов, предупреждения модели
-// (оценка на синтетическом гироскопе — в tests/tunewizard-steps.test.cjs).
+// без гироскопа — фильтр первого порядка и его задержка, производная (обе — и против разностных уравнений
+// AC_PID::update_all во времени), отметки вариантов, предупреждения модели (оценка на синтетическом гироскопе —
+// в tests/tunewizard-steps.test.cjs).
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-steps.test.cjs).
 const test = require('node:test')
@@ -409,8 +410,10 @@ test('prop_size_warning: пусто — нет предупреждения, в�
 
 // ---------- Модель ПИД: фильтр первого порядка, производная, отметки вариантов ----------
 
-// Независимая модель фильтра первого порядка ArduPilot (AC_PID.cpp, calc_lowpass_alpha_dt) своей комплексной
-// арифметикой: H = alpha / (1 − (1 − alpha)·e^(−jω)), ω = 2π·f / rate. Возвращает { re, im, phase } (фаза в радианах)
+// Та же формула фильтра первого порядка ArduPilot (AC_PID.cpp, calc_lowpass_alpha_dt), записанная в тесте отдельно:
+// H = alpha / (1 − (1 − alpha)·e^(−jω)), ω = 2π·f / rate. Алгебраически повторяет код и ловит только опечатки в нём;
+// независимая проверка — разностные уравнения update_all во времени (simulate_update_all ниже).
+// Возвращает { re, im, phase } (фаза в радианах)
 function first_order(fc, rate, f) {
     const dt = 1 / rate
     const alpha = dt / (dt + 1 / (2 * Math.PI * fc))
@@ -422,12 +425,55 @@ function first_order(fc, rate, f) {
     return { ...h, phase: Math.atan2(h.im, h.re) }
 }
 
-test('pid_lowpass_response: без фильтра (fc ≤ 0) — H = 1; иначе alpha / (1 − (1 − alpha)·z⁻¹)', () => {
-    for (const fc of [0, -5, null, undefined, NaN]) {
+// Установившийся отклик разностных уравнений AC_PID::update_all (AC_PID.cpp) на синус ошибки частоты f при контуре
+// rate: _error += aE·(e − _error); derivative = (_error − error_last) / dt; _derivative += aD·(derivative − _derivative),
+// alpha — calc_lowpass_alpha_dt (fc ≤ 0 → 1). Прогон 60 с; амплитуда и фаза — корреляцией с sin и cos по второй
+// половине (30 с — целое число периодов при целой f). Возвращает { E: { amp, phase }, D: { amp, phase } } — ошибка
+// после FLTE и производная после FLTD, фаза в радианах относительно входа
+function simulate_update_all(flte, fltd, f, rate) {
+    const dt = 1 / rate
+    const alpha = (fc) => (fc > 0) ? dt / (dt + 1 / (2 * Math.PI * fc)) : 1
+    const aE = alpha(flte)
+    const aD = alpha(fltd)
+    const N = rate * 60
+    let error = 0
+    let derivative = 0
+    const sum = { E: [0, 0], D: [0, 0] }
+    for (let n = 0; n < N; n++) {
+        const wt = 2 * Math.PI * f * n * dt
+        const error_last = error
+        error += aE * (Math.sin(wt) - error)
+        derivative += aD * ((error - error_last) / dt - derivative)
+        if (n >= N / 2) {
+            sum.E[0] += error * Math.sin(wt)
+            sum.E[1] += error * Math.cos(wt)
+            sum.D[0] += derivative * Math.sin(wt)
+            sum.D[1] += derivative * Math.cos(wt)
+        }
+    }
+    // A·sin(ωt + φ): корреляция с sin — A·cos φ·M/2, с cos — A·sin φ·M/2
+    const M = N / 2
+    const steady = (s) => ({ amp: 2 * Math.hypot(s[0], s[1]) / M, phase: Math.atan2(s[1], s[0]) })
+    return { E: steady(sum.E), D: steady(sum.D) }
+}
+
+// Разность фаз a − b, свёрнутая в (−π, π]
+function phase_diff(a, b) {
+    return Math.atan2(Math.sin(a - b), Math.cos(a - b))
+}
+
+test('pid_lowpass_response: fc ≤ 0 — без фильтра (H = 1), нечисловая частота — NaN; иначе alpha / (1 − (1 − alpha)·z⁻¹)', () => {
+    for (const fc of [0, -5, -Infinity]) {
         for (const f of [0, 10, 30, 199]) {
             assert.deepEqual(pid_lowpass_response(fc, 400, f), [1, 0], 'fc ' + fc + ', ' + f + ' Гц')
         }
         assert.equal(pid_lowpass_lag_ms(fc, 400, 30), 0, 'без фильтра задержки нет: fc ' + fc)
+    }
+    // Нечисловая частота (нет параметра, NaN): отказ при сомнении — H и задержка NaN, вариант отметится
+    for (const fc of [null, undefined, NaN, '20']) {
+        const h = pid_lowpass_response(fc, 400, 30)
+        assert.ok(Number.isNaN(h[0]) && Number.isNaN(h[1]), 'fc ' + fc + ': ' + h)
+        assert.ok(Number.isNaN(pid_lowpass_lag_ms(fc, 400, 30)), 'задержка при fc ' + fc)
     }
     for (const [fc, rate, f] of [[20, 400, 30], [30, 400, 10], [15, 400, 167], [10, 1000, 50]]) {
         const [re, im] = pid_lowpass_response(fc, rate, f)
@@ -444,7 +490,7 @@ test('pid_lowpass_lag_ms: 20 Гц на 30 и 10 Гц, 30 Гц на 30 Гц пр�
     near(pid_lowpass_lag_ms(20, 400, 30), 4.3531, '20 Гц на 30 Гц')
     near(pid_lowpass_lag_ms(20, 400, 10), 7.1117, '20 Гц на 10 Гц')
     near(pid_lowpass_lag_ms(30, 400, 30), 3.5223, '30 Гц на 30 Гц')
-    // Независимо: −фаза / (2π·f) · 1000 по своей модели
+    // −фаза / (2π·f) · 1000 по той же формуле, записанной в тесте
     for (const [fc, f] of [[20, 30], [20, 10], [30, 30], [12.5, 30], [45, 10]]) {
         const ref = -first_order(fc, 400, f).phase / (2 * Math.PI * f) * 1000
         assert.ok(Math.abs(pid_lowpass_lag_ms(fc, 400, f) - ref) < 1e-12, fc + ' Гц на ' + f + ' Гц')
@@ -467,55 +513,104 @@ test('derivative_gain2: |(1 − z⁻¹)/dt|² при dt = 1 / loop_rate', () => 
     assert.ok(Math.abs(derivative_gain2(1, 400) / (2 * Math.PI) ** 2 - 1) < 1e-4)
 })
 
-// Поддельная оценка варианта для lowpass_flags: шум гироскопа, шум D крена и тангажа (null — оси без Kd) и задержка
-// путей P и D на 10 и 30 Гц (одна на обе оси, на 10 Гц — на 2 мс больше)
-function fake_lowpass_eval({ gyro = -40, roll = -20, pitch = -21, P = 7, D = 10.5 } = {}) {
+test('модель ПИД сходится с разностными уравнениями AC_PID::update_all во времени: пути P и D, амплитуда и фаза', () => {
+    // FLTE, FLTD, частота синуса, контур: сочетания с фильтрами и без, у частоты Найквиста, рыскание-подобный FLTE 2 Гц
+    const cases = [[0, 30, 30, 400], [10, 20, 30, 400], [15, 15, 167, 400], [0, 0, 100, 400], [20, 30, 10, 400],
+                   [2, 0, 5, 400], [25, 12.5, 199, 400], [40, 20, 120, 1000]]
+    for (const [flte, fltd, f, rate] of cases) {
+        const label = 'FLTE ' + flte + ', FLTD ' + fltd + ', ' + f + ' Гц, контур ' + rate
+        const sim = simulate_update_all(flte, fltd, f, rate)
+        const he = pid_lowpass_response(flte, rate, f)
+        const hd = pid_lowpass_response(fltd, rate, f)
+        // Путь P: ошибка после FLTE — |H_E| и arg H_E; задержка — pid_lowpass_lag_ms
+        assert.ok(Math.abs(sim.E.amp - Math.hypot(he[0], he[1])) < 1e-4, label + ': амплитуда E ' + sim.E.amp)
+        assert.ok(Math.abs(phase_diff(sim.E.phase, Math.atan2(he[1], he[0]))) < 1e-4, label + ': фаза E')
+        if (flte > 0) {
+            const lag = -sim.E.phase / (2 * Math.PI * f) * 1000
+            assert.ok(Math.abs(lag - pid_lowpass_lag_ms(flte, rate, f)) < 1e-4, label + ': задержка FLTE ' + lag)
+        }
+        // Путь D: |H_E|·√derivative_gain2·|H_D|, фаза — FLTE + производная (π/2 − π·f/rate) + FLTD
+        const amp_D = Math.hypot(he[0], he[1]) * Math.sqrt(derivative_gain2(f, rate)) * Math.hypot(hd[0], hd[1])
+        assert.ok(Math.abs(sim.D.amp / amp_D - 1) < 1e-4, label + ': амплитуда D ' + sim.D.amp + ' против ' + amp_D)
+        const phase_D = Math.atan2(he[1], he[0]) + (Math.PI / 2 - Math.PI * f / rate) + Math.atan2(hd[1], hd[0])
+        assert.ok(Math.abs(phase_diff(sim.D.phase, phase_D)) < 1e-4, label + ': фаза D ' + phase_diff(sim.D.phase, phase_D))
+    }
+})
+
+test('lowpass_axis_filters: FLTE и FLTD оси из значений варианта', () => {
+    const values = { ATC_RAT_RLL_FLTE: 1, ATC_RAT_RLL_FLTD: 2, ATC_RAT_PIT_FLTE: 3, ATC_RAT_PIT_FLTD: 4, ATC_RAT_YAW_FLTE: 5 }
+    assert.deepEqual(lowpass_axis_filters(values, 'roll'), { flte: 1, fltd: 2 })
+    assert.deepEqual(lowpass_axis_filters(values, 'pitch'), { flte: 3, fltd: 4 })
+    assert.deepEqual(lowpass_axis_filters({}, 'roll'), { flte: undefined, fltd: undefined }, 'нет в значениях')
+})
+
+test('lowpass_lag_hz: старшая из частот задержки, а не последняя в списке', () => {
+    assert.equal(lowpass_lag_hz(), 30)
+    assert.equal(lowpass_lag_hz({ ...lowpass_rules, lag_freqs_hz: [30, 10] }), 30)
+    assert.equal(lowpass_lag_hz({ ...lowpass_rules, lag_freqs_hz: [10, 50, 30] }), 50)
+})
+
+// Поддельная оценка варианта для lowpass_flags: шум гироскопа, шум D крена и тангажа (null — шума D нет, dterm оси
+// null), Kd осей и задержки путей на 30 Гц — у тангажа свои, чтобы перепутанные оси ловились; на 10 Гц задержка
+// на 2 мс больше
+function fake_lowpass_eval({ gyro = -40, roll = -20, pitch = -21, roll_P = 7, roll_D = 10.5, pitch_P = 7.5, pitch_D = 11,
+                             kd = { roll: 0.003, pitch: 0.004 } } = {}) {
     const lag = (ms) => ({ 10: ms + 2, 30: ms })
     const dterm = (dB) => (dB === null) ? null : { dB, spectrum: [] }
     return {
         values: {},
         warnings: [],
-        gyro: { band_dB: gyro, lag_ms: lag(P), spectrum: null, pre_spectrum: null },
+        kd: { ...kd },
+        gyro: { band_dB: gyro, lag_ms: lag(roll_P), spectrum: null, pre_spectrum: null },
         dterm: { bins: [], roll: dterm(roll), pitch: dterm(pitch) },
-        lag_ms: { roll: { P: lag(P), D: lag(D) }, pitch: { P: lag(P), D: lag(D) } },
+        lag_ms: { roll: { P: lag(roll_P), D: lag(roll_D) }, pitch: { P: lag(pitch_P), D: lag(pitch_D) } },
     }
 }
 
-const no_lowpass_flags = { noisier: [], slower: [], incomplete: false, incomplete_axes: [] }
+const no_lowpass_flags = { noisier: [], slower: [], incomplete: false, incomplete_axes: [], d_off_axes: [] }
+const slower_path = (axis, path) => ({ axis, path })
 
-test('lowpass_flags: ровно на порогах +3 дБ и +1 мс — без отметки, чуть выше — с отметкой', () => {
+test('lowpass_flags: ровно на порогах +3 дБ и +1 мс — без отметки, чуть выше — с отметкой; оси не путаются', () => {
     const log = fake_lowpass_eval()
     assert.deepEqual(lowpass_flags(log, log), no_lowpass_flags, 'лог против себя')
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -37, roll: -17, pitch: -18, P: 8, D: 11.5 }), log), no_lowpass_flags,
-        'ровно +3 дБ и ровно +1 мс')
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -37, roll: -17, pitch: -18, roll_P: 8, roll_D: 11.5, pitch_P: 8.5, pitch_D: 12 }), log),
+        no_lowpass_flags, 'ровно +3 дБ и ровно +1 мс')
     // Лучше лога — без отметок
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -45, roll: -30, pitch: -30, P: 6, D: 9 }), log), no_lowpass_flags)
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -45, roll: -30, pitch: -30, roll_P: 6, roll_D: 9, pitch_P: 6, pitch_D: 9 }), log), no_lowpass_flags)
 
     assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -36.9999 }), log), { ...no_lowpass_flags, noisier: ['gyro'] })
     assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll: -16.9999 }), log), { ...no_lowpass_flags, noisier: ['roll'] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch: -17.9999 }), log), { ...no_lowpass_flags, noisier: ['pitch'] })
     assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -36.9999, roll: -16.9999, pitch: -17.9999 }), log),
         { ...no_lowpass_flags, noisier: ['gyro', 'roll', 'pitch'] })
-    // Путь P больше на 1.0001 мс, путь D — на 1 мс ровно (у пути D свой отсчёт от лога)
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ P: 8.0001, D: 11.5 }), log), { ...no_lowpass_flags, slower: ['roll P', 'pitch P'] })
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ D: 11.5001 }), log), { ...no_lowpass_flags, slower: ['roll D', 'pitch D'] })
-    // Задержка на 10 Гц не проверяется — только на старшей из lag_freqs_hz
+    // Каждый путь — от своего значения в логе
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll_P: 8.0001 }), log), { ...no_lowpass_flags, slower: [slower_path('roll', 'P')] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll_D: 11.5001 }), log), { ...no_lowpass_flags, slower: [slower_path('roll', 'D')] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch_P: 8.5001 }), log), { ...no_lowpass_flags, slower: [slower_path('pitch', 'P')] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch_D: 12.0001 }), log), { ...no_lowpass_flags, slower: [slower_path('pitch', 'D')] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll_P: 9, roll_D: 12, pitch_P: 9, pitch_D: 13 }), log).slower,
+        [slower_path('roll', 'P'), slower_path('roll', 'D'), slower_path('pitch', 'P'), slower_path('pitch', 'D')])
+
+    // Задержка на 10 Гц не проверяется — только на старшей из lag_freqs_hz (lowpass_lag_hz), где бы она ни стояла в списке
     const lag10 = fake_lowpass_eval()
     lag10.lag_ms.roll.P[10] += 5
     assert.deepEqual(lowpass_flags(lag10, log), no_lowpass_flags)
+    assert.deepEqual(lowpass_flags(lag10, log, { ...lowpass_rules, lag_freqs_hz: [30, 10] }), no_lowpass_flags)
+    assert.deepEqual(lowpass_flags(lag10, log, { ...lowpass_rules, lag_freqs_hz: [10] }).slower, [slower_path('roll', 'P')])
     // Пороги берутся из rules
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -38, P: 7.6 }), log, { ...lowpass_rules, max_noise_increase_dB: 1, max_lag_increase_ms: 0.5 }),
-        { ...no_lowpass_flags, noisier: ['gyro'], slower: ['roll P', 'pitch P'] })
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ gyro: -38, roll_P: 7.6 }), log, { ...lowpass_rules, max_noise_increase_dB: 1, max_lag_increase_ms: 0.5 }),
+        { ...no_lowpass_flags, noisier: ['gyro'], slower: [slower_path('roll', 'P')] })
 })
 
-test('lowpass_flags: при сомнении отмечает — NaN в шуме или задержке, нет оценки, ось без Kd', () => {
+test('lowpass_flags: при сомнении отмечает — NaN, нет оценки, пустая полоса D, шум D только у одного', () => {
     const log = fake_lowpass_eval()
-    // Нечисловой шум D и задержка — отметка
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch: NaN }), log).noisier, ['pitch'])
+    // Нечисловой шум D и задержка — отметка; ось при этом посчитана (не в incomplete_axes)
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch: NaN }), log), { ...no_lowpass_flags, noisier: ['pitch'] })
     assert.deepEqual(lowpass_flags(fake_lowpass_eval(), fake_lowpass_eval({ roll: NaN })).noisier, ['roll'], 'NaN у лога')
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ D: NaN }), log).slower, ['roll D', 'pitch D'])
+    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll_D: NaN }), log).slower, [slower_path('roll', 'D')])
     const no_lag = fake_lowpass_eval()
     delete no_lag.lag_ms.pitch
-    assert.deepEqual(lowpass_flags(no_lag, log).slower, ['pitch P', 'pitch D'], 'нет задержки оси')
+    assert.deepEqual(lowpass_flags(no_lag, log).slower, [slower_path('pitch', 'P'), slower_path('pitch', 'D')], 'нет задержки оси')
 
     // Нет оценки варианта или лога, нечисловая полоса гироскопа — incomplete, остальные проверки не делаются
     const no_band = { ...log, gyro: { ...log.gyro, band_dB: undefined } }
@@ -523,28 +618,60 @@ test('lowpass_flags: при сомнении отмечает — NaN в шум�
         assert.deepEqual(lowpass_flags(evaluation, against), { ...no_lowpass_flags, incomplete: true })
     }
 
-    // Ось без Kd у обоих — без отметки шума, но в incomplete_axes; задержка проверяется
-    const no_kd = fake_lowpass_eval({ roll: null })
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll: null }), no_kd), { ...no_lowpass_flags, incomplete_axes: ['roll'] })
-    assert.deepEqual(lowpass_flags(fake_lowpass_eval({ roll: null, pitch: null, D: 12 }), fake_lowpass_eval({ roll: null, pitch: null })),
-        { ...no_lowpass_flags, slower: ['roll D', 'pitch D'], incomplete_axes: ['roll', 'pitch'] })
-    // Шум D есть только у одного — сравнить не с чем: отметка и неполная ось
+    // Шум D только у одного — сравнить не с чем: отметка и неполная ось
     assert.deepEqual(lowpass_flags(fake_lowpass_eval({ pitch: null }), log), { ...no_lowpass_flags, noisier: ['pitch'], incomplete_axes: ['pitch'] })
     assert.deepEqual(lowpass_flags(log, fake_lowpass_eval({ pitch: null })), { ...no_lowpass_flags, noisier: ['pitch'], incomplete_axes: ['pitch'] })
+    // Пустая полоса D (dB null) — так же, у одного и у обоих
+    const empty = fake_lowpass_eval()
+    empty.dterm.roll = { dB: null, spectrum: [] }
+    assert.deepEqual(lowpass_flags(empty, log), { ...no_lowpass_flags, noisier: ['roll'], incomplete_axes: ['roll'] })
+    assert.deepEqual(lowpass_flags(empty, empty), { ...no_lowpass_flags, noisier: ['roll'], incomplete_axes: ['roll'] })
 })
 
-test('lowpass_model_warnings: notch-фильтры ПИД крена и тангажа (NTF/NEF ≠ 0) — строка на ось с именами', () => {
-    const one = lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NEF: 1, ATC_RAT_RLL_NTF: 0, ATC_RAT_PIT_NEF: 0, ATC_RAT_PIT_NTF: 0 }))
-    assert.equal(one.length, 1)
-    assert.match(one[0], /ATC_RAT_RLL_NEF = 1/)
-    assert.doesNotMatch(one[0], /NTF/, 'нулевые не перечисляются')
+test('lowpass_flags: Kd нет (null) — неполная ось, путь D проверяется; Kd = 0 (D выключен) — d_off_axes, путь D не проверяется', () => {
+    // Kd нет у обоих: без отметки шума, но в incomplete_axes; путь D проверяется
+    const no_kd = (changes = {}) => fake_lowpass_eval({ roll: null, kd: { roll: null, pitch: 0.004 }, ...changes })
+    assert.deepEqual(lowpass_flags(no_kd(), no_kd()), { ...no_lowpass_flags, incomplete_axes: ['roll'] })
+    assert.deepEqual(lowpass_flags(no_kd({ roll_D: 12 }), no_kd()), { ...no_lowpass_flags, slower: [slower_path('roll', 'D')], incomplete_axes: ['roll'] })
+    const none = (changes = {}) => fake_lowpass_eval({ roll: null, pitch: null, kd: { roll: undefined, pitch: NaN }, ...changes })
+    assert.deepEqual(lowpass_flags(none(), none()), { ...no_lowpass_flags, incomplete_axes: ['roll', 'pitch'] })
 
-    const both = lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NTF: 2, ATC_RAT_RLL_NEF: 1, ATC_RAT_PIT_NTF: 3 }))
-    assert.equal(both.length, 2, 'строка на ось: ' + both.join(' | '))
-    assert.match(both[0], /ATC_RAT_RLL_NTF = 2.*ATC_RAT_RLL_NEF = 1/)
-    assert.match(both[1], /ATC_RAT_PIT_NTF = 3/)
+    // D выключен у обоих: шум D не сравнивается, путь D этой оси не проверяется, путь P — проверяется
+    const off = (changes = {}) => fake_lowpass_eval({ roll: null, kd: { roll: 0, pitch: 0.004 }, ...changes })
+    assert.deepEqual(lowpass_flags(off(), off()), { ...no_lowpass_flags, d_off_axes: ['roll'] })
+    assert.deepEqual(lowpass_flags(off({ roll_D: 30 }), off()), { ...no_lowpass_flags, d_off_axes: ['roll'] }, 'путь D без D не важен')
+    assert.deepEqual(lowpass_flags(off({ roll_P: 8.0001, pitch_D: 12.0001 }), off()),
+        { ...no_lowpass_flags, slower: [slower_path('roll', 'P'), slower_path('pitch', 'D')], d_off_axes: ['roll'] })
+
+    // Kd = 0 только у одного — сравнивать не с чем: шум D отмечен, ось неполная, путь D проверяется
+    assert.deepEqual(lowpass_flags(off({ roll_D: 12 }), fake_lowpass_eval()),
+        { ...no_lowpass_flags, noisier: ['roll'], slower: [slower_path('roll', 'D')], incomplete_axes: ['roll'] })
+})
+
+test('lowpass_model_warnings: notch ошибки ПИД (NEF ≠ 0) — строка на ось; NTF не упоминается; быстрый поток контура', () => {
+    const one = lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NEF: 1, ATC_RAT_RLL_NTF: 0, ATC_RAT_PIT_NEF: 0, ATC_RAT_PIT_NTF: 0 }))
+    assert.deepEqual(one, ['Notch-фильтр ошибки ПИД крена (ATC_RAT_RLL_NEF = 1) стоит до FLTE и не учтён в шуме D и задержке'])
+
+    // NTF стоит на цели, как FLTT, — на метрики не влияет и строки не даёт
+    assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NTF: 2, ATC_RAT_PIT_NTF: 3 })), [])
+    assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NTF: 2, ATC_RAT_PIT_NEF: 3 })),
+        ['Notch-фильтр ошибки ПИД тангажа (ATC_RAT_PIT_NEF = 3) стоит до FLTE и не учтён в шуме D и задержке'])
+    assert.equal(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NEF: 1, ATC_RAT_PIT_NEF: 2 })).length, 2, 'строка на ось')
+    // Рыскания модель не касается
+    assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_YAW_NEF: 1 })), [])
+
+    // Быстрый поток контура скорости (Copter 4.7): ПИД на частоте гироскопа / FSTRATE_DIV
+    assert.deepEqual(lowpass_model_warnings(fake_params({ FSTRATE_ENABLE: 1, FSTRATE_DIV: 2 })),
+        ['Контур скорости в быстром потоке (FSTRATE_ENABLE = 1, FSTRATE_DIV = 2): модель считает свёртку и фильтры ПИД на SCHED_LOOP_RATE'])
+    assert.deepEqual(lowpass_model_warnings(fake_params({ FSTRATE_ENABLE: 3 })),
+        ['Контур скорости в быстром потоке (FSTRATE_ENABLE = 3): модель считает свёртку и фильтры ПИД на SCHED_LOOP_RATE'], 'без FSTRATE_DIV')
+    assert.deepEqual(lowpass_model_warnings(fake_params({ FSTRATE_ENABLE: 0, FSTRATE_DIV: 2 })), [])
+    const both = lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NEF: 1, FSTRATE_ENABLE: 1 }))
+    assert.equal(both.length, 2)
+    assert.match(both[0], /ATC_RAT_RLL_NEF/)
+    assert.match(both[1], /FSTRATE_ENABLE = 1/)
 
     assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NTF: 0, ATC_RAT_RLL_NEF: 0, ATC_RAT_PIT_NTF: 0, ATC_RAT_PIT_NEF: 0 })), [])
-    assert.deepEqual(lowpass_model_warnings(fake_params({})), [], 'параметров нет (прошивка без notch ПИД)')
+    assert.deepEqual(lowpass_model_warnings(fake_params({})), [], 'параметров нет (прошивка без notch ПИД и быстрого потока)')
     assert.deepEqual(lowpass_model_warnings(fake_params(user_log)), [])
 })
