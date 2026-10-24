@@ -19,6 +19,18 @@ const state = {
     settings: { start: 0, end: 0, min: null, max: null, window_size: 1024 },
     step: 0,
     steps: [],
+    // Шаги 1–2: настройки спектра (log_type и filter_version — от лога, остальное — выбор пользователя)
+    spectrum: { log_type: null, window_per_batch: 1, amplitude: "dB", frequency: "Hz", log_frequency: false, aliasing: "none", filter_version: null },
+    // Гироскоп и FFT (core/gyro.js), источники трекинга и логированные notch, фильтры (core/filters.js)
+    gyro: null,
+    tracking: null,
+    logged: null,
+    filters: null,
+    // { params, build_type, filter_version } для ядра; filter_version меняется на месте (его читают источники трекинга)
+    env: null,
+    // Содержимое и сам файл лога: File нужен для «Открыть в FilterReview»
+    log_buffer: null,
+    file: null,
 }
 
 // ---------- Тема ----------
@@ -183,11 +195,38 @@ function window_size_changed(input) {
 
 // ---------- Шаги ----------
 
+// Статус проверки шага 0 по id ("gyro_log", "pid_log"); null, если проверок нет
+function check_status(id) {
+    const check = (state.checks ?? []).find((c) => c.id === id)
+    return check ? check.status : null
+}
+
+// Шаг 0 доступен всегда; 1–3 — лог Copter с пригодными данными гироскопа; 4 — лог Copter с PID или RATE;
+// 5 (сводка) — любой загруженный лог
 function step_available(n) {
     if (n == 0) {
         return true
     }
-    return (state.info != null) && (state.info.vehicle === "Copter")
+    if (state.info == null) {
+        return false
+    }
+    if (n == 5) {
+        return true
+    }
+    if (state.info.vehicle !== "Copter") {
+        return false
+    }
+    if (n <= 3) {
+        return check_status("gyro_log") !== "fail"
+    }
+    return check_status("pid_log") !== "fail"
+}
+
+// Хук показа шага: шаги из steps/*.js готовят данные и графики своей секции
+function on_show_step(n) {
+    if ((n === 1) && (typeof step1_show === "function")) {
+        step1_show()
+    }
 }
 
 function set_step(n) {
@@ -199,6 +238,7 @@ function set_step(n) {
         section.hidden = Number(section.dataset.step) !== n
     }
     update_wizbar()
+    on_show_step(n)
     // Графики показанного шага дорисовать: скрытыми они не рисуются (политика в plots.js)
     show_plots(document.querySelector('section[data-step="' + n + '"]'))
 }
@@ -225,6 +265,9 @@ function init_wizard() {
         bar.appendChild(button)
     }
     setup_flight_plot()
+    if (typeof step1_init === "function") {
+        step1_init()
+    }
     set_step(0)
 }
 
@@ -240,7 +283,7 @@ function read_file(input) {
     reader.onload = function () {
         loading_call(async () => {
             try {
-                await load(reader.result)
+                await load(reader.result, file)
             } catch (e) {
                 // Ошибка парсера или данных: показать в вердикте, а не оставлять оверлей
                 console.error(e)
@@ -279,6 +322,18 @@ function reset() {
     state.checks = null
     state.settings = { start: 0, end: 0, min: null, max: null, window_size: state.settings.window_size }
     state.steps = []
+    state.spectrum.log_type = null
+    state.spectrum.filter_version = null
+    state.gyro = null
+    state.tracking = null
+    state.logged = null
+    state.filters = null
+    state.env = null
+    state.log_buffer = null
+    state.file = null
+    if (typeof step1_reset === "function") {
+        step1_reset()
+    }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
@@ -305,7 +360,8 @@ function reset() {
     update_wizbar()
 }
 
-async function load(buffer) {
+// buffer — содержимое лога, file — исходный File (для «Открыть в FilterReview»; может быть null)
+async function load(buffer, file = null) {
     await import_done
     const start = performance.now()
     reset()
@@ -323,6 +379,13 @@ async function load(buffer) {
     state.info = log_info(log, state.version)
     state.vibe = vibe_summary(log)
     state.checks = run_checks(state.info, state.params, state.vibe)
+    // Окружение ядра. Версия фильтра из VER.FV; без неё и при неизвестной версии — последняя (4). FilterReview
+    // при неизвестной версии тоже берёт последнюю, а без VER.FV оставляет 1.0 из reset — здесь сознательно 4
+    const fv = state.info.filter_version
+    state.env = { params: state.params, build_type: state.info.build_type, filter_version: [1, 2, 3, 4].includes(fv) ? fv : 4 }
+    state.spectrum.filter_version = state.env.filter_version
+    state.log_buffer = buffer
+    state.file = file
 
     document.title = "Мастер настройки: " + state.file_name
     document.getElementById("fileLabel").textContent = state.file_name

@@ -61,6 +61,10 @@ isolated copies and verifies that the targeted regression tests fail.
 
 `tunewizard.test.cjs` — тесты ядра `TuneWizard/core` под Node на поддельных логах с интерфейсом парсера
 (история параметров, окно полёта по газу, сводка VIBE, проверки пригодности лога). `npm run test:tunewizard`
-запускает `tunewizard-browser.cjs`: smoke-прогон шага 0 в настоящем браузере (Playwright, `CHROME_PATH` — путь
+запускает `tunewizard-browser.cjs`: smoke-прогон шагов 0–1 в настоящем браузере (Playwright, `CHROME_PATH` — путь
 к chrome.exe) на локальном логе (`TUNEWIZARD_LOG` или первый `.bin` в `TuneWizard/logs/`); без лога тест
-пропускается. Скриншоты пишутся в `TuneWizard/logs/screenshots/`.
+пропускается. Скриншоты пишутся в `TuneWizard/logs/screenshots/`. `tunewizard-core.test.cjs` и
+`tunewizard-steps.test.cjs` — перенесённая из FilterReview математика и метрики шагов (пики спектра), скрипты
+загружаются как на странице через `vm.runInThisContext`. `npm run test:tunewizard-compare` запускает
+`tunewizard-compare.cjs`: тот же лог в FilterReview и в мастере с одинаковыми интервалом, окном и шкалами,
+поэлементное сравнение среднего спектра и спектрограммы (допуск 1e-6).

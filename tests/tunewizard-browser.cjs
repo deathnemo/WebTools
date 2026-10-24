@@ -35,6 +35,31 @@ function step_buttons_disabled(page) {
     return page.evaluate(() => [...document.querySelectorAll('#wizbar button')].map((b) => b.disabled))
 }
 
+// Дождаться, пока оверлей загрузки (loading_call) скроется: расчёты шагов идут под ним
+function wait_overlay(page) {
+    return page.waitForFunction(() => document.getElementById('loading').style.visibility === 'hidden', null, { timeout: 180000 })
+}
+
+// Сводка графиков шага 1: трассы среднего спектра с данными, длина оси частот, видимые трассы, тепловая карта
+function step1_summary(page) {
+    return page.evaluate(() => {
+        const spectrum = document.getElementById('Spectrum1')
+        const with_data = spectrum.data.filter((t) => (t.y != null) && (t.y.length > 0))
+        const heat = document.getElementById('Spectrogram1').data[0]
+        return {
+            with_data: with_data.length,
+            x_len: with_data.length ? with_data[0].x.length : 0,
+            visible: spectrum.data.filter((t) => t.visible === true).map((t) => t.name),
+            yaxis: spectrum.layout.yaxis.title.text,
+            z_len: heat.z.length,
+            peaks: document.querySelectorAll('#peaks1 tbody tr').length,
+            verdict: document.getElementById('verdict1').textContent,
+            verdict_class: document.getElementById('verdict1').className,
+            window_size: document.getElementById('FFTWindow_size').value,
+        }
+    })
+}
+
 async function wait_for_server(page, url, server) {
     for (let i = 0; i < 40; i++) {
         if (server.exitCode != null) {
@@ -115,9 +140,8 @@ async function main() {
         assert.equal(await page.inputValue('#FFTWindow_size'), '2048', 'окно FFT округляется к степени двойки')
 
         // Шаги и тема с данными
+        // Проверка gyro_log и pid_log на реальном логе не fail — открыты все шаги
         assert.deepEqual(await step_buttons_disabled(page), [false, false, false, false, false, false], 'после загрузки лога Copter доступны все шаги')
-        await page.click('#wizbar button:nth-child(2)')
-        assert.deepEqual(await visible_steps(page), ['1'])
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
         await page.click('.themebar button[data-t="dark"]')
@@ -131,8 +155,66 @@ async function main() {
         await page.click('.themebar button[data-t="light"]')
         await page.screenshot({ path: path.join(shots, 'step0_light.png'), fullPage: true })
 
+        // Шаг 1: спектр, спектрограмма, пики и вердикт считаются при первом показе
+        await page.click('#wizbar button:nth-child(2)')
+        assert.deepEqual(await visible_steps(page), ['1'])
+        await wait_overlay(page)
+        const s1 = await step1_summary(page)
+        assert.ok(s1.with_data >= 3, 'в среднем спектре не меньше трёх трасс с данными: ' + s1.with_data)
+        assert.ok(s1.visible.length >= 3, 'видны трассы первичного гироскопа: ' + s1.visible.join(', '))
+        assert.equal(s1.yaxis, 'Амплитуда, дБ')
+        assert.ok(s1.z_len > 0, 'тепловая карта спектрограммы не пуста')
+        assert.ok(s1.peaks >= 1, 'в таблице пиков есть строки')
+        assert.match(s1.verdict, /Гц/, 'вердикт называет частоту')
+        assert.match(s1.verdict_class, /verdict--(ok|warn)/)
+        assert.equal(await page.isDisabled('#open_filterreview'), false, '«Открыть в FilterReview» доступна с загруженным логом')
+
+        // Шкала амплитуды перерисовывает без FFT
+        await page.check('#spec_amp_linear')
+        await wait_overlay(page)
+        assert.equal((await step1_summary(page)).yaxis, 'Амплитуда', 'линейная шкала')
+        await page.check('#spec_amp_dB')
+        await wait_overlay(page)
+        assert.equal((await step1_summary(page)).yaxis, 'Амплитуда, дБ')
+
+        // Окон на пакет 2: окно floor(1024/1.5) = 682 не степень двойки — вердикт fail без ошибок консоли (так же в FilterReview)
+        await page.fill('#spec_window_per_batch', '2')
+        await page.dispatchEvent('#spec_window_per_batch', 'change')
+        assert.match(await page.getAttribute('#spec_recalc', 'class') ?? '', /primary/, 'изменение панели подсвечивает «Пересчитать»')
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        const s2 = await step1_summary(page)
+        assert.match(s2.verdict_class, /verdict--fail/)
+        assert.match(s2.verdict, /степенью двойки/)
+        assert.equal(s2.with_data, 0, 'при ошибке FFT графики пусты')
+        // Окон на пакет 3: окно 1024/2 = 512 — ось частот короче
+        await page.fill('#spec_window_per_batch', '3')
+        await page.dispatchEvent('#spec_window_per_batch', 'change')
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        const s3 = await step1_summary(page)
+        assert.match(s3.verdict_class, /verdict--(ok|warn)/)
+        assert.ok(s3.x_len > 0 && s3.x_len !== s1.x_len, 'длина оси частот изменилась: ' + s1.x_len + ' → ' + s3.x_len)
+        assert.equal(s3.window_size, '512', 'окно batch показано в поле шага 0')
+        assert.doesNotMatch(await page.getAttribute('#spec_recalc', 'class') ?? '', /primary/, 'после пересчёта подсветки нет')
+        await page.fill('#spec_window_per_batch', '1')
+        await page.dispatchEvent('#spec_window_per_batch', 'change')
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        assert.equal((await step1_summary(page)).x_len, s1.x_len, 'одно окно на пакет — прежняя длина')
+
+        // Тема на шаге 1 и скриншоты
+        await page.click('.themebar button[data-t="dark"]')
+        assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.paper_bgcolor), surface, 'спектр перекрашен под тёмную тему')
+        await page.screenshot({ path: path.join(shots, 'step1_dark.png'), fullPage: true })
+        await page.click('.themebar button[data-t="light"]')
+        await page.screenshot({ path: path.join(shots, 'step1_light.png'), fullPage: true })
+        await page.click('#wizbar button:nth-child(1)')
+        assert.deepEqual(await visible_steps(page), ['0'])
+
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаг 0 пройден, проверок ' + statuses.length + ' (' + statuses.join(', ') + '), скриншоты в ' + shots)
+        console.log('tunewizard-browser: шаги 0–1 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+            ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

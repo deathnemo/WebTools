@@ -6,6 +6,7 @@
     "test:browser": "node tests/browser.cjs",
     "test:video": "node tests/video-browser.cjs",
     "test:tunewizard": "node tests/tunewizard-browser.cjs",
+    "test:tunewizard-compare": "node tests/tunewizard-compare.cjs",
     "lint": "eslint ."
   },
   "engines": {

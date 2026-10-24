@@ -30,8 +30,10 @@
 <script type="text/javascript" src="core/tracking/Logged.js"></script>
 <script type="text/javascript" src="core/filters.js"></script>
 <script type="text/javascript" src="core/spectrum.js"></script>
+<script type="text/javascript" src="core/metrics.js"></script>
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
+<script type="text/javascript" src="steps/step1.js"></script>
 
 <style>
 /* Токены оформления: светлая тема «Светлый технический», тёмная «Графит» (общие правила проектов, 23.10.2026) */
@@ -44,6 +46,7 @@
   --ok:#4D7C0F;    --ok-soft:rgba(77,124,15,.10);
   --high:#B91C1C;  --high-soft:rgba(185,28,28,.10);
   --shadow:0 1px 0 rgba(26,29,25,.05);
+  color-scheme:light;
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
@@ -55,6 +58,7 @@
     --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
     --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
     --shadow:none;
+    color-scheme:dark;
   }
 }
 :root[data-theme="dark"]{
@@ -66,6 +70,7 @@
   --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
   --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
   --shadow:none;
+  color-scheme:dark;
 }
 *{box-sizing:border-box}
 /* Атрибут hidden должен побеждать display правил секций и блоков */
@@ -127,6 +132,23 @@ input[type=file]{position:absolute; width:1px; height:1px; opacity:0; overflow:h
 input[type=file]:focus-visible + .pickbtn{outline:2px solid var(--low); outline-offset:2px}
 .unit{text-transform:none}
 .note{border-left:2px solid var(--line); padding-left:13px; color:var(--ink-3); font-size:13px; max-width:100ch}
+/* Группы переключателей: fieldset без рамки, подпись как у поля; подписи вариантов — обычным текстом */
+fieldset.fld{border:0; margin:0; padding:0}
+fieldset.fld legend{padding:0; margin-bottom:5px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3)}
+.opts{display:flex; gap:10px; flex-wrap:wrap; align-items:center; min-height:34px}
+.fld .opts label{font-family:"IBM Plex Sans",sans-serif; font-size:13px; letter-spacing:0; text-transform:none; color:var(--ink-2); display:inline-flex; align-items:center; gap:5px; cursor:pointer}
+.opts input{accent-color:var(--accent); margin:0}
+.opts input:disabled + span{opacity:.45}
+.lab h3{font-size:13px}
+.info{display:flex; flex-direction:column; gap:2px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; color:var(--ink-2)}
+
+/* Таблицы */
+.tablewrap{overflow-x:auto; border:1px solid var(--line); background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:13px}
+th,td{text-align:left; padding:7px 12px; border-bottom:1px solid var(--line-soft)}
+th{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3)}
+td.num{font-family:"IBM Plex Mono",ui-monospace,monospace}
+tr:last-child td{border-bottom:0}
 
 /* Плитки */
 .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); border:1px solid var(--line); background:var(--surface)}
@@ -157,10 +179,10 @@ input[type=file]:focus-visible + .pickbtn{outline:2px solid var(--low); outline-
 
 @media print{
   /* Три селектора одной специфичности с правилами тёмной темы: при печати побеждают как более поздние */
-  :root, :root[data-theme], :root:not([data-theme]){--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none}
+  :root, :root[data-theme], :root:not([data-theme]){--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none; color-scheme:light}
   .themebar,.wizbar,button,label.pickbtn{display:none!important}
   body{background:#fff; color:#111}
-  .lab,.stats,.checks,.plot{break-inside:avoid}
+  .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
 }
 </style>
 </head>
@@ -204,7 +226,7 @@ input[type=file]:focus-visible + .pickbtn{outline:2px solid var(--low); outline-
         <input id="FFTWindow_size" type="number" min="64" step="1" value="1024" disabled onchange="window_size_changed(this)">
       </div>
     </div>
-    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки.</p>
+    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1.</p>
   </div>
 
   <div class="verdict" id="log_verdict" hidden></div>
@@ -216,7 +238,113 @@ input[type=file]:focus-visible + .pickbtn{outline:2px solid var(--low); outline-
 </section>
 
 <section data-step="1" hidden>
-  <div class="head"><span class="eyebrow">01 · Спектр до фильтров</span><h2>Шаг появится на этапе 2</h2></div>
+  <div class="head"><span class="eyebrow">01 · Спектр до фильтров</span><h2>Шум гироскопа до фильтров</h2></div>
+  <p class="lede">Средний спектр за интервал анализа шага 0, спектрограмма по времени и заметные пики шума с их происхождением: гармоники моторов или резонансы рамы. Расчёт тот же, что в FilterReview.</p>
+
+  <div class="lab" id="spec_panel">
+    <h3>Настройки спектра</h3>
+    <div class="row">
+      <fieldset class="fld">
+        <legend>Тип лога</legend>
+        <div class="opts">
+          <label><input type="radio" name="spec_log" id="spec_log_batch" value="batch" disabled><span>batch (ISBH)</span></label>
+          <label><input type="radio" name="spec_log" id="spec_log_raw" value="raw" disabled><span>raw (GYR)</span></label>
+        </div>
+      </fieldset>
+      <div class="fld" id="spec_batch_field">
+        <label for="spec_window_per_batch">Окон на пакет</label>
+        <input id="spec_window_per_batch" type="number" min="1" step="1" value="1">
+      </div>
+      <fieldset class="fld">
+        <legend>Версия фильтра</legend>
+        <div class="opts">
+          <label><input type="radio" name="spec_fv" id="spec_fv_1" value="1"><span>1</span></label>
+          <label><input type="radio" name="spec_fv" id="spec_fv_2" value="2"><span>2</span></label>
+          <label><input type="radio" name="spec_fv" id="spec_fv_3" value="3"><span>3</span></label>
+          <label><input type="radio" name="spec_fv" id="spec_fv_4" value="4"><span>4</span></label>
+        </div>
+      </fieldset>
+      <div class="fld">
+        <button type="button" id="spec_recalc">Пересчитать</button>
+      </div>
+    </div>
+    <div class="row">
+      <fieldset class="fld">
+        <legend>Амплитуда</legend>
+        <div class="opts">
+          <label><input type="radio" name="spec_amp" id="spec_amp_linear" value="linear"><span>линейная</span></label>
+          <label><input type="radio" name="spec_amp" id="spec_amp_dB" value="dB" checked><span>дБ</span></label>
+          <label><input type="radio" name="spec_amp" id="spec_amp_PSD" value="PSD"><span>PSD</span></label>
+        </div>
+      </fieldset>
+      <fieldset class="fld">
+        <legend>Частота</legend>
+        <div class="opts">
+          <label><input type="radio" name="spec_freq" id="spec_freq_Hz" value="Hz" checked><span>Гц</span></label>
+          <label><input type="radio" name="spec_freq" id="spec_freq_RPM" value="RPM"><span>RPM</span></label>
+          <label><input type="checkbox" id="spec_freq_log"><span>логарифмическая ось</span></label>
+        </div>
+      </fieldset>
+      <fieldset class="fld">
+        <legend>Алиасинг к SCHED_LOOP_RATE</legend>
+        <div class="opts">
+          <label><input type="radio" name="spec_alias" id="spec_alias_none" value="none" checked><span>нет</span></label>
+          <label><input type="radio" name="spec_alias" id="spec_alias_fold" value="fold"><span>свернуть</span></label>
+          <label><input type="radio" name="spec_alias" id="spec_alias_only" value="only"><span>только свёрнутое</span></label>
+        </div>
+      </fieldset>
+      <div class="fld">
+        <button type="button" id="open_filterreview" disabled>Открыть в FilterReview</button>
+      </div>
+    </div>
+    <p class="note" id="spec_raw_note" hidden>Окно FFT raw-лога задаётся на шаге 0.</p>
+    <div class="info" id="spec_info"></div>
+    <p class="note">Тип лога, число окон на пакет и версия фильтра применяются кнопкой «Пересчитать»; шкалы и алиасинг — сразу. Линии включаются и выключаются щелчком по легенде графика.</p>
+  </div>
+
+  <div class="verdict" id="verdict1" hidden></div>
+  <p class="note" id="warnings1" hidden></p>
+
+  <div class="head"><span class="eyebrow">Средний спектр</span><h2>Гироскопы по осям: до фильтров, после и оценка «после»</h2></div>
+  <div id="Spectrum1" class="plot"></div>
+
+  <div class="head"><span class="eyebrow">Спектрограмма</span><h2>Спектр по времени</h2></div>
+  <div class="row">
+    <fieldset class="fld">
+      <legend>Гироскоп</legend>
+      <div class="opts">
+        <label><input type="radio" name="spec_sg_inst" id="spec_sg_inst0" value="0" disabled><span>1</span></label>
+        <label><input type="radio" name="spec_sg_inst" id="spec_sg_inst1" value="1" disabled><span>2</span></label>
+        <label><input type="radio" name="spec_sg_inst" id="spec_sg_inst2" value="2" disabled><span>3</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="fld">
+      <legend>Данные</legend>
+      <div class="opts">
+        <label><input type="radio" name="spec_sg_data" id="spec_sg_pre" value="pre" disabled><span>до фильтров</span></label>
+        <label><input type="radio" name="spec_sg_data" id="spec_sg_post" value="post" disabled><span>после</span></label>
+        <label><input type="radio" name="spec_sg_data" id="spec_sg_est" value="est" disabled><span>оценка «после»</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="fld">
+      <legend>Ось</legend>
+      <div class="opts">
+        <label><input type="radio" name="spec_sg_axis" id="spec_sg_x" value="x" checked><span>X</span></label>
+        <label><input type="radio" name="spec_sg_axis" id="spec_sg_y" value="y"><span>Y</span></label>
+        <label><input type="radio" name="spec_sg_axis" id="spec_sg_z" value="z"><span>Z</span></label>
+      </div>
+    </fieldset>
+  </div>
+  <div id="Spectrogram1" class="plot"></div>
+
+  <div class="head"><span class="eyebrow">Пики</span><h2>Заметные пики шума</h2></div>
+  <div class="tablewrap" id="peaks1" hidden>
+    <table>
+      <thead><tr><th>Частота, Гц</th><th>Уровень, дБ</th><th>Над шумом, дБ</th><th>Источник</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="note" id="peaks1_note" hidden></p>
 </section>
 <section data-step="2" hidden>
   <div class="head"><span class="eyebrow">02 · Гармонический notch</span><h2>Шаг появится на этапе 2</h2></div>
