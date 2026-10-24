@@ -25,18 +25,18 @@
 **Шаг 1. Тест (сначала падает).** `tests/tunewizard-lowpass.test.cjs` загружает скрипты как `tests/tunewizard-steps.test.cjs` (тот же список плюс `TuneWizard/core/lowpass.js` последним) и проверяет:
 
 - `round_half_even`: 2.5 → 2, 3.5 → 4, −2.5 → −2, 41.998 → 42 (C# `Math.Round` по умолчанию — к чётному).
-- `mp_round_to(116659.8, -2)` → 116600, `mp_round_to(27000, -2)` → 27000 (Mission Planner `RoundTo`: `v − v % 100`).
+- `mp_round_to(116659.8, -2)` → 116700, `mp_round_to(27000, -2)` → 27000, `mp_round_to(24750, -2)` → 24800 (Mission Planner `RoundTo`: `v += 50`, затем `v − v % 100` — округление до сотен половиной вверх).
 - `prop_values(p)` — ровно значения Mission Planner:
 
 | p | `INS_GYRO_FILTER` | `FLTT/FLTD` | `ACCEL_R/P`, сантиград./с² | `ACCEL_Y`, сантиград./с² |
 |---|---|---|---|---|
 | 5 | 75 | 37.5 | 168600 | 31500 |
-| 10 | 42 | 21 | 116600 | 27000 |
-| 12.5 | 35 | 17.5 | 95700 | 24700 |
+| 10 | 42 | 21 | 116700 | 27000 |
+| 12.5 | 35 | 17.5 | 95800 | 24800 |
 | 20 | 23 | 11.5 | 50500 | 18000 |
-| 30 | 20 | 10 | 21700 | 9000 |
+| 30 | 20 | 10 | 21800 | 9000 |
 
-  и у всех: `INS_ACCEL_FILTER 10`, `ATC_RAT_RLL/PIT_FLTE 0`, `ATC_RAT_YAW_FLTE 2`, `ATC_RAT_YAW_FLTD 0`, `ATC_RAT_YAW_FLTT = FLTT`. Отдельным утверждением — расхождения с таблицей wiki записаны (5″ 75 против 80, 10″ 42 против 40, `ACCEL_Y` 10″ 270 против 200 °/с²) — тест фиксирует, что берём Mission Planner.
+  и у всех: `INS_ACCEL_FILTER 10`, `ATC_RAT_RLL/PIT_FLTE 0`, `ATC_RAT_YAW_FLTE 2`, `ATC_RAT_YAW_FLTD 0`, `ATC_RAT_YAW_FLTT = FLTT`. Отдельным утверждением — расхождения с таблицей wiki записаны (5″ 75 против 80, 10″ 42 против 40, `ACCEL_R/P` 10″ 1167 против 1100, `ACCEL_Y` 10″ 270 против 200 °/с²) — тест фиксирует, что берём Mission Planner.
 - `prop_from_gyro_filter(40)` ≈ 10.5989 (±1e-3), `prop_from_gyro_filter(0)` и `(-5)` → `null`; `prop_values(prop_from_gyro_filter(42)).INS_GYRO_FILTER` = 42.
 - `accel_names(params)`: в логе есть `ATC_ACCEL_R_MAX` → `{ r: "ATC_ACCEL_R_MAX", p: "ATC_ACCEL_P_MAX", y: "ATC_ACCEL_Y_MAX", scale: 100, units: "cdeg/s/s" }`; иначе (новые версии) → `{ r: "ATC_ACC_R_MAX", …, scale: 1, units: "deg/s/s" }`.
 - `lowpass_param_names(params)` — порядок: `INS_GYRO_FILTER`, `INS_ACCEL_FILTER`, `ATC_RAT_RLL_FLTT`, `ATC_RAT_RLL_FLTE`, `ATC_RAT_RLL_FLTD`, то же `PIT`, `YAW`, затем пределы ускорения r, p, y под именами из `accel_names`.
@@ -45,7 +45,7 @@
 - `lowpass_candidates(log_values, prop_in, names)`:
   - без размера (`null`, `NaN`, ≤ 0) → `["log", "half"]`;
   - с размером 10″ на значениях лога пользователя → `["log", "prop", "half"]`; у `prop` пределы ускорения — из лога (не заводские), у `half` — `INS_GYRO_FILTER` лога, `FLTT/FLTD` крена и тангажа и `FLTT` рыскания = `max(10, INS_GYRO_FILTER / 2)` = 20, остальное как в логе;
-  - заводские пределы → у `prop` пределы по формуле (10″: 116600 и 27000 при `scale` 100; 1166 и 270 при `scale` 1);
+  - заводские пределы → у `prop` пределы по формуле (10″: 116700 и 27000 при `scale` 100; 1167 и 270 при `scale` 1);
   - одинаковые наборы остаются один раз (лог уже по правилу /2 → `half` исчезает), сравнение по `candidate_key` от `Math.fround`-значений.
 - `prop_size_warning(p)`: 2 → текст «вне 3–40″», 10 → `null`, `null` → `null`.
 
@@ -87,7 +87,7 @@ const LOWPASS_AXES = ["RLL", "PIT", "YAW"]
 // Math.Round из C# (по умолчанию — к чётному): так округляет Mission Planner
 function round_half_even(value) { … }
 
-// RoundTo(value, precision) из Mission Planner: при precision < 0 — value − value % 10^|precision|
+// RoundTo(value, precision) из Mission Planner: при precision < 0 — m = 10^|precision|, v = value + m/2, v − v % m
 function mp_round_to(value, precision) { … }
 
 // Значения по размеру винта p (дюймы) [MP]: INS_GYRO_FILTER, INS_ACCEL_FILTER, FLTT/FLTE/FLTD трёх осей
