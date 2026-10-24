@@ -88,14 +88,21 @@ function user_log_with(changes) {
     return values
 }
 
-test('round_half_even: середина округляется к чётному, как Math.Round в C#', () => {
-    assert.equal(round_half_even(2.5), 2)
-    assert.equal(round_half_even(3.5), 4)
-    assert.equal(round_half_even(-2.5), -2)
-    assert.equal(round_half_even(0.5), 0)
-    assert.equal(round_half_even(41.998), 42)
-    assert.equal(round_half_even(2.4999), 2)
-    assert.equal(round_half_even(2.5001), 3)
+// Варианты по значениям лога values (объект имя → значение) и размеру винта prop
+function candidates_for(values, prop) {
+    const params = fake_params(values)
+    return lowpass_candidates(lowpass_log_values(params), prop, lowpass_accel_names(params))
+}
+
+test('mp_round_half_even: середина округляется к чётному, как Math.Round в C#', () => {
+    assert.equal(mp_round_half_even(2.5), 2)
+    assert.equal(mp_round_half_even(3.5), 4)
+    assert.equal(mp_round_half_even(-2.5), -2)
+    assert.equal(mp_round_half_even(-3.5), -4)
+    assert.equal(mp_round_half_even(0.5), 0)
+    assert.equal(mp_round_half_even(41.998), 42)
+    assert.equal(mp_round_half_even(2.4999), 2)
+    assert.equal(mp_round_half_even(2.5001), 3)
 })
 
 test('mp_round_to: RoundTo Mission Planner — до сотен половиной вверх, при precision ≥ 0 — Math.Round C#', () => {
@@ -105,6 +112,14 @@ test('mp_round_to: RoundTo Mission Planner — до сотен половино�
     assert.equal(mp_round_to(24749.9, -2), 24700)
     assert.equal(mp_round_to(2.5, 0), 2, 'precision = 0 — к чётному')
     assert.equal(mp_round_to(1.25, 1), 1.2, 'precision > 0 — к чётному в знаке precision')
+})
+
+test('prop_valid: размер винта — положительное конечное число', () => {
+    assert.equal(prop_valid(10), true)
+    assert.equal(prop_valid(0.5), true)
+    for (const p of [0, -1, NaN, Infinity, -Infinity, null, undefined, '10']) {
+        assert.equal(prop_valid(p), false, String(p))
+    }
 })
 
 test('prop_values: ровно значения Mission Planner на 5 / 10 / 12.5 / 20 / 30″', () => {
@@ -157,20 +172,35 @@ test('prop_values: нижние границы формул — 20 Гц гиро
     assert.deepEqual(values.accel_cdegss, { r: 10000, p: 10000, y: 8000 })
 })
 
-test('prop_from_gyro_filter: обратная формула, без клампа и округления; null при hz ≤ 0', () => {
+test('prop_values: на 4–40″ шагом 0.5″ все значения конечные', () => {
+    for (let p = 4; p <= 40; p += 0.5) {
+        const { accel_cdegss, ...filters } = prop_values(p)
+        for (const [name, value] of Object.entries({ ...filters, ...accel_cdegss })) {
+            assert.ok(Number.isFinite(value), p + '″: ' + name + ' = ' + value)
+        }
+    }
+})
+
+test('lowpass_pid_filter_hz: max(10, INS_GYRO_FILTER / 2)', () => {
+    assert.equal(lowpass_pid_filter_hz(42), 21)
+    assert.equal(lowpass_pid_filter_hz(20), 10)
+    assert.equal(lowpass_pid_filter_hz(16), 10)
+})
+
+test('prop_from_gyro_filter: обратная формула, без клампа и округления; null, если hz не положительное конечное', () => {
     assert.ok(Math.abs(prop_from_gyro_filter(40) - 10.5989) <= 1e-3, '40 Гц → ' + prop_from_gyro_filter(40))
-    assert.equal(prop_from_gyro_filter(0), null)
-    assert.equal(prop_from_gyro_filter(-5), null)
-    assert.equal(prop_from_gyro_filter(null), null)
+    for (const hz of [0, -5, null, NaN, Infinity, -Infinity]) {
+        assert.equal(prop_from_gyro_filter(hz), null, String(hz))
+    }
     assert.equal(prop_values(prop_from_gyro_filter(42)).INS_GYRO_FILTER, 42)
 })
 
-test('accel_names: имена и единицы пределов ускорения по логу — 4.6 и новые версии', () => {
-    assert.deepEqual(accel_names(fake_params(user_log)),
+test('lowpass_accel_names: имена и единицы пределов ускорения по логу — 4.6 и новые версии', () => {
+    assert.deepEqual(lowpass_accel_names(fake_params(user_log)),
         { r: 'ATC_ACCEL_R_MAX', p: 'ATC_ACCEL_P_MAX', y: 'ATC_ACCEL_Y_MAX', scale: 100, units: 'cdeg/s/s' })
-    assert.deepEqual(accel_names(fake_params({ ATC_ACC_R_MAX: 1100 })),
+    assert.deepEqual(lowpass_accel_names(fake_params({ ATC_ACC_R_MAX: 1100 })),
         { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s' })
-    assert.deepEqual(accel_names(fake_params({})),
+    assert.deepEqual(lowpass_accel_names(fake_params({})),
         { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s' })
 })
 
@@ -206,34 +236,31 @@ test('lowpass_log_values: значения лога как float32, отсутс
     assert.equal(old.ATC_ACCEL_Y_MAX, 27000)
 })
 
-test('accel_is_default: заводские 1100 / 270 °/с² × scale с допуском 0.5·scale', () => {
-    const old_names = accel_names(fake_params(user_log))
-    const new_names = accel_names(fake_params({}))
+test('lowpass_accel_is_default: заводские 1100 / 270 °/с² × scale с допуском 0.5·scale', () => {
+    const old_names = lowpass_accel_names(fake_params(user_log))
+    const new_names = lowpass_accel_names(fake_params({}))
     const old_values = (r, p, y) => ({ ATC_ACCEL_R_MAX: r, ATC_ACCEL_P_MAX: p, ATC_ACCEL_Y_MAX: y })
     const new_values = (r, p, y) => ({ ATC_ACC_R_MAX: r, ATC_ACC_P_MAX: p, ATC_ACC_Y_MAX: y })
 
-    assert.equal(accel_is_default(old_values(110000, 110000, 27000), old_names), true)
-    assert.equal(accel_is_default(old_values(90000, 90000, Math.fround(50045.7)), old_names), false)
-    assert.equal(accel_is_default(new_values(1100, 1100, 270), new_names), true)
+    assert.equal(lowpass_accel_is_default(old_values(110000, 110000, 27000), old_names), true)
+    assert.equal(lowpass_accel_is_default(old_values(90000, 90000, Math.fround(50045.7)), old_names), false)
+    assert.equal(lowpass_accel_is_default(new_values(1100, 1100, 270), new_names), true)
 
     // Допуск и каждая ось по отдельности
-    assert.equal(accel_is_default(old_values(110050, 109950, 27050), old_names), true, 'ровно на допуске')
-    assert.equal(accel_is_default(old_values(110051, 110000, 27000), old_names), false, 'R за допуском')
-    assert.equal(accel_is_default(old_values(110000, 109000, 27000), old_names), false, 'только P другой')
-    assert.equal(accel_is_default(old_values(110000, 110000, 27100), old_names), false, 'только Y другой')
-    assert.equal(accel_is_default(new_values(1100.4, 1100, 269.6), new_names), true)
-    assert.equal(accel_is_default(new_values(1100, 1100, 271), new_names), false)
+    assert.equal(lowpass_accel_is_default(old_values(110050, 109950, 27050), old_names), true, 'ровно на допуске')
+    assert.equal(lowpass_accel_is_default(old_values(110051, 110000, 27000), old_names), false, 'R за допуском')
+    assert.equal(lowpass_accel_is_default(old_values(110000, 109000, 27000), old_names), false, 'только P другой')
+    assert.equal(lowpass_accel_is_default(old_values(110000, 110000, 27100), old_names), false, 'только Y другой')
+    assert.equal(lowpass_accel_is_default(new_values(1100.4, 1100, 269.6), new_names), true)
+    assert.equal(lowpass_accel_is_default(new_values(1100, 1100, 271), new_names), false)
 
     // Значения с другими именами (лог старый, names новые) — не заводские
-    assert.equal(accel_is_default(old_values(110000, 110000, 27000), new_names), false)
+    assert.equal(lowpass_accel_is_default(old_values(110000, 110000, 27000), new_names), false)
 })
 
 test('lowpass_candidates: без размера винта — «как в логе» и «лог + правило /2»', () => {
-    const params = fake_params(user_log)
-    const log_values = lowpass_log_values(params)
-    const names = accel_names(params)
-    for (const prop of [null, undefined, NaN, 0, -10]) {
-        const candidates = lowpass_candidates(log_values, prop, names)
+    for (const prop of [null, undefined, NaN, 0, -10, Infinity, -Infinity]) {
+        const candidates = candidates_for(user_log, prop)
         assert.deepEqual(candidates.map((c) => c.id), ['log', 'half'], 'размер ' + prop)
     }
 })
@@ -241,10 +268,11 @@ test('lowpass_candidates: без размера винта — «как в ло�
 test('lowpass_candidates: 10″ на логе пользователя — лог, по размеру винта (пределы из лога), правило /2', () => {
     const params = fake_params(user_log)
     const log_values = lowpass_log_values(params)
-    const names = accel_names(params)
+    const names = lowpass_accel_names(params)
     const candidates = lowpass_candidates(log_values, 10, names)
     assert.deepEqual(candidates.map((c) => c.id), ['log', 'prop', 'half'])
     assert.deepEqual(candidates.map((c) => c.title), ['Как в логе', 'По размеру винта (10″)', 'Лог + правило /2'])
+    assert.deepEqual(candidates.map((c) => c.same_as), [[], [], []], 'совпадений нет')
 
     const [log, prop, half] = candidates
     const expected_names = lowpass_param_names(params)
@@ -261,6 +289,8 @@ test('lowpass_candidates: 10″ на логе пользователя — ло�
         ATC_RAT_YAW_FLTT: 21, ATC_RAT_YAW_FLTE: 2, ATC_RAT_YAW_FLTD: 0,
         ATC_ACCEL_R_MAX: 90000, ATC_ACCEL_P_MAX: 90000, ATC_ACCEL_Y_MAX: Math.fround(50045.70703125),
     })
+    assert.equal(prop.accel_from_log, true)
+    assert.deepEqual(prop.formula_accel, { r: 116700, p: 116700, y: 27000 }, 'формула — для справки, в единицах лога')
 
     // Лог + правило /2: INS_GYRO_FILTER лога, FLTT/FLTD крена и тангажа и FLTT рыскания = max(10, 40 / 2), остальное — лог
     assert.deepEqual(half.values, {
@@ -274,57 +304,74 @@ test('lowpass_candidates: 10″ на логе пользователя — ло�
 })
 
 test('lowpass_candidates: правило /2 не опускается ниже 10 Гц', () => {
-    const params = fake_params(user_log_with({ INS_GYRO_FILTER: 16 }))
-    const half = lowpass_candidates(lowpass_log_values(params), null, accel_names(params)).find((c) => c.id === 'half')
+    const half = candidates_for(user_log_with({ INS_GYRO_FILTER: 16 }), null).find((c) => c.id === 'half')
     assert.equal(half.values.INS_GYRO_FILTER, 16)
     assert.equal(half.values.ATC_RAT_RLL_FLTD, 10)
     assert.equal(half.values.ATC_RAT_YAW_FLTT, 10)
 })
 
+test('lowpass_candidates: фильтр гироскопа выключен в логе — без «лог + правило /2»', () => {
+    const off = user_log_with({ INS_GYRO_FILTER: 0 })
+    assert.deepEqual(candidates_for(off, null).map((c) => c.id), ['log'])
+    assert.deepEqual(candidates_for(off, 10).map((c) => c.id), ['log', 'prop'])
+})
+
 test('lowpass_candidates: заводские пределы в логе — у «по размеру винта» пределы по формуле', () => {
     // Старые имена, сантиградусы/с²
-    const old_params = fake_params(user_log_with({ ATC_ACCEL_R_MAX: 110000, ATC_ACCEL_P_MAX: 110000, ATC_ACCEL_Y_MAX: 27000 }))
-    const old_prop = lowpass_candidates(lowpass_log_values(old_params), 10, accel_names(old_params)).find((c) => c.id === 'prop')
+    const old_prop = candidates_for(user_log_with({ ATC_ACCEL_R_MAX: 110000, ATC_ACCEL_P_MAX: 110000, ATC_ACCEL_Y_MAX: 27000 }), 10)
+        .find((c) => c.id === 'prop')
     assert.equal(old_prop.values.ATC_ACCEL_R_MAX, 116700)
     assert.equal(old_prop.values.ATC_ACCEL_P_MAX, 116700)
     assert.equal(old_prop.values.ATC_ACCEL_Y_MAX, 27000)
+    assert.equal(old_prop.accel_from_log, false)
+    assert.deepEqual(old_prop.formula_accel, { r: 116700, p: 116700, y: 27000 })
 
     // Новые имена, °/с²: значение Mission Planner делится на 100
-    const new_params = fake_params(user_log_with({
+    const new_log = user_log_with({
         ATC_ACCEL_R_MAX: null, ATC_ACCEL_P_MAX: null, ATC_ACCEL_Y_MAX: null,
         ATC_ACC_R_MAX: 1100, ATC_ACC_P_MAX: 1100, ATC_ACC_Y_MAX: 270,
-    }))
-    const new_names = accel_names(new_params)
-    const new_prop = lowpass_candidates(lowpass_log_values(new_params), 10, new_names).find((c) => c.id === 'prop')
+    })
+    const new_prop = candidates_for(new_log, 10).find((c) => c.id === 'prop')
     assert.equal(new_prop.values.ATC_ACC_R_MAX, 1167)
     assert.equal(new_prop.values.ATC_ACC_P_MAX, 1167)
     assert.equal(new_prop.values.ATC_ACC_Y_MAX, 270)
-    assert.deepEqual(Object.keys(new_prop.values), lowpass_param_names(new_params))
+    assert.equal(new_prop.accel_from_log, false)
+    assert.deepEqual(new_prop.formula_accel, { r: 1167, p: 1167, y: 270 })
+    assert.deepEqual(Object.keys(new_prop.values), lowpass_param_names(fake_params(new_log)))
 
     // Размер как ввёл пользователь — в заголовке
-    const p12 = lowpass_candidates(lowpass_log_values(new_params), 12.5, new_names).find((c) => c.id === 'prop')
+    const p12 = candidates_for(new_log, 12.5).find((c) => c.id === 'prop')
     assert.equal(p12.title, 'По размеру винта (12.5″)')
-    assert.equal(p12.values.ATC_ACC_R_MAX, Math.fround(958))
-    assert.equal(p12.values.ATC_ACC_Y_MAX, Math.fround(248))
+    assert.equal(p12.values.ATC_ACC_R_MAX, 958)
+    assert.equal(p12.values.ATC_ACC_Y_MAX, 248)
 })
 
-test('lowpass_candidates: одинаковые наборы остаются один раз, сравнение по float32', () => {
+test('lowpass_candidates: одинаковые наборы остаются один раз, у оставшегося — same_as', () => {
     // Лог уже по правилу /2 → «лог + правило /2» совпадает с логом
-    const params = fake_params(user_log_with({ ATC_RAT_RLL_FLTD: 20, ATC_RAT_PIT_FLTD: 20 }))
-    const names = accel_names(params)
-    const log_values = lowpass_log_values(params)
-    assert.deepEqual(lowpass_candidates(log_values, null, names).map((c) => c.id), ['log'])
-    assert.deepEqual(lowpass_candidates(log_values, 10, names).map((c) => c.id), ['log', 'prop'])
+    const by_rule = user_log_with({ ATC_RAT_RLL_FLTD: 20, ATC_RAT_PIT_FLTD: 20 })
+    const without_prop = candidates_for(by_rule, null)
+    assert.deepEqual(without_prop.map((c) => c.id), ['log'])
+    assert.deepEqual(without_prop[0].same_as, ['half'])
+    const with_prop = candidates_for(by_rule, 10)
+    assert.deepEqual(with_prop.map((c) => c.id), ['log', 'prop'])
+    assert.deepEqual(with_prop.map((c) => c.same_as), [['half'], []])
 
     // Лог совпадает с «по размеру винта» 12.5″: FLTT/FLTD 17.5 и INS_GYRO_FILTER 35 — остаётся «как в логе»,
     // правило /2 даёт те же 17.5 — тоже исчезает
-    const p12 = fake_params(user_log_with({
+    const p12 = candidates_for(user_log_with({
         INS_GYRO_FILTER: 35, INS_ACCEL_FILTER: 10,
         ATC_RAT_RLL_FLTT: 17.5, ATC_RAT_RLL_FLTD: 17.5,
         ATC_RAT_PIT_FLTT: 17.5, ATC_RAT_PIT_FLTD: 17.5,
         ATC_RAT_YAW_FLTT: 17.5, ATC_RAT_YAW_FLTE: 2,
-    }))
-    assert.deepEqual(lowpass_candidates(lowpass_log_values(p12), 12.5, accel_names(p12)).map((c) => c.id), ['log'])
+    }), 12.5)
+    assert.deepEqual(p12.map((c) => c.id), ['log'])
+    assert.deepEqual(p12[0].same_as, ['prop', 'half'])
+
+    // «Лог + правило /2» совпадает с «по размеру винта» 10″, а лог отличается (FLTT 20, FLTD 30): половина
+    // INS_GYRO_FILTER 42 — 21, как у формулы
+    const half_is_prop = candidates_for(user_log_with({ INS_GYRO_FILTER: 42, ATC_RAT_YAW_FLTE: 2 }), 10)
+    assert.deepEqual(half_is_prop.map((c) => c.id), ['log', 'prop'])
+    assert.deepEqual(half_is_prop.map((c) => c.same_as), [[], ['half']])
 
     // Значения вариантов — float32, даже если log_values не прошли через lowpass_log_values: лог с FLTT/FLTD
     // float32(20.1) и INS_GYRO_FILTER 40.2 (double); правило /2 даёт 20.1 (double), во float32 — то же, что в логе,
@@ -337,7 +384,7 @@ test('lowpass_candidates: одинаковые наборы остаются о�
         ATC_RAT_PIT_FLTT: Math.fround(20.1), ATC_RAT_PIT_FLTD: Math.fround(20.1),
         ATC_RAT_YAW_FLTT: Math.fround(20.1),
     }
-    const raw_candidates = lowpass_candidates(raw, 10, accel_names(params_user))
+    const raw_candidates = lowpass_candidates(raw, 10, lowpass_accel_names(params_user))
     assert.deepEqual(raw_candidates.map((c) => c.id), ['log', 'prop'])
     assert.equal(raw_candidates[0].values.INS_GYRO_FILTER, Math.fround(40.2))
     for (const candidate of raw_candidates) {
@@ -347,14 +394,12 @@ test('lowpass_candidates: одинаковые наборы остаются о�
     }
 })
 
-test('prop_size_warning: пусто — нет предупреждения, вне 3–40″ — текст', () => {
-    assert.match(prop_size_warning(2), /3–40″/)
-    assert.match(prop_size_warning(41), /3–40″/)
-    assert.match(prop_size_warning(0), /3–40″/)
-    assert.match(prop_size_warning(-1), /3–40″/)
-    assert.match(prop_size_warning(NaN), /3–40″/)
+test('prop_size_warning: пусто — нет предупреждения, вне 4–40″ и не число — текст', () => {
+    for (const p of [2, 3, 41, 0, -1, NaN, Infinity, -Infinity]) {
+        assert.match(prop_size_warning(p), /4–40″/, String(p))
+    }
     assert.equal(prop_size_warning(10), null)
-    assert.equal(prop_size_warning(3), null)
+    assert.equal(prop_size_warning(4), null)
     assert.equal(prop_size_warning(40), null)
     assert.equal(prop_size_warning(null), null)
     assert.equal(prop_size_warning(undefined), null)
