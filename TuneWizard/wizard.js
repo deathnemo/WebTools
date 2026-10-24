@@ -283,22 +283,21 @@ function read_file(input) {
     if (file == null) {
         return
     }
+    state.file_name = file.name
     const reader = new FileReader()
     reader.onload = function () {
         loading_call(async () => {
-            state.file_name = file.name
             try {
                 await load(reader.result)
             } catch (e) {
-                // Ошибка парсера или данных: сбросить состояние и показать в вердикте, а не оставлять оверлей
+                // Ошибка парсера или данных: показать в вердикте, а не оставлять оверлей
                 console.error(e)
-                reset()
-                show_verdict("fail", "Не удалось прочитать лог «" + state.file_name + "»: " + e.message)
+                load_failed("Не удалось прочитать лог «" + state.file_name + "»: " + e.message)
             }
         })
     }
     reader.onerror = function () {
-        show_verdict("fail", "Не удалось прочитать файл: " + (reader.error ? reader.error.message : "ошибка чтения"))
+        load_failed("Не удалось прочитать файл «" + state.file_name + "»: " + (reader.error ? reader.error.message : "ошибка чтения"))
     }
     reader.readAsArrayBuffer(file)
 }
@@ -308,6 +307,14 @@ function show_verdict(status, text) {
     verdict.className = "verdict verdict--" + status
     verdict.textContent = text
     verdict.hidden = false
+}
+
+// Единый путь ошибки загрузки: сбросить полусостояние, назвать причину и очистить поле выбора,
+// чтобы повторный выбор того же файла снова вызвал change
+function load_failed(message) {
+    reset()
+    show_verdict("fail", message)
+    document.getElementById("fileItem").value = ""
 }
 
 function reset() {
@@ -354,7 +361,7 @@ async function load(buffer) {
     const log = new DataflashParser()
     log.processData(buffer, [])
     if (!("PARM" in log.messageTypes)) {
-        show_verdict("fail", "В файле нет параметров (PARM): это не лог ArduPilot или он повреждён")
+        load_failed("В файле «" + state.file_name + "» нет параметров (PARM): это не лог ArduPilot или он повреждён")
         return
     }
 

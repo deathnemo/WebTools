@@ -35,8 +35,11 @@ function step_buttons_disabled(page) {
     return page.evaluate(() => [...document.querySelectorAll('#wizbar button')].map((b) => b.disabled))
 }
 
-async function wait_for_server(page, url) {
+async function wait_for_server(page, url, server) {
     for (let i = 0; i < 40; i++) {
+        if (server.exitCode != null) {
+            throw new Error('http.server завершился с кодом ' + server.exitCode + ' (занят порт ' + port + ' или нет python?)')
+        }
         try {
             await page.goto(url, { waitUntil: 'networkidle' })
             return
@@ -54,14 +57,17 @@ async function main() {
         return
     }
     const python = process.platform === 'win32' ? 'python' : 'python3'
-    const server = spawn(python, ['-m', 'http.server', '--bind', '127.0.0.1', String(port)], { cwd: repo, stdio: 'ignore' })
-    const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || undefined })
     const problems = []
+    let server = null
+    let browser = null
     try {
+        server = spawn(python, ['-m', 'http.server', '--bind', '127.0.0.1', String(port)], { cwd: repo, stdio: 'ignore' })
+        server.on('error', (e) => problems.push('http.server: ' + e.message))
+        browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || undefined })
         const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
         page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()) })
         page.on('pageerror', (e) => problems.push('pageerror: ' + e.message))
-        await wait_for_server(page, 'http://127.0.0.1:' + port + '/TuneWizard/')
+        await wait_for_server(page, 'http://127.0.0.1:' + port + '/TuneWizard/', server)
 
         // Каркас до загрузки
         assert.equal(await page.locator('#wizbar button').count(), 6, 'шесть кнопок шагов')
@@ -82,7 +88,12 @@ async function main() {
         assert.match(await page.title(), /Мастер настройки: /)
         assert.match(await page.locator('#log_verdict').getAttribute('class'), /verdict--(ok|warn|fail)/)
         assert.ok((await page.locator('#log_info .stat').count()) >= 9, 'плитки сведений')
-        assert.equal(await page.locator('#log_checks .check').count(), 9, 'девять проверок')
+        const count = await page.locator('#log_checks .check').count()
+        assert.ok(count >= 7 && count <= 9, 'от 7 до 9 проверок (clipping и газ висения зависят от лога)')
+        const titles = await page.evaluate(() => [...document.querySelectorAll('#log_checks .check h3')].map((h) => h.textContent))
+        for (const title of ['Аппарат', 'Сообщения PID', 'Данные гироскопа', 'Источник трекинга notch', 'Полёт', 'Вибрации']) {
+            assert.ok(titles.includes(title), 'есть проверка «' + title + '»')
+        }
         const statuses = await page.evaluate(() => [...document.querySelectorAll('#log_checks .check')].map((c) => c.className.replace('check check--', '')))
         for (const status of statuses) {
             assert.ok(['ok', 'warn', 'fail'].includes(status), 'статус проверки: ' + status)
@@ -122,9 +133,19 @@ async function main() {
 
         assert.deepEqual(problems, [], 'ошибки консоли')
         console.log('tunewizard-browser: шаг 0 пройден, проверок ' + statuses.length + ' (' + statuses.join(', ') + '), скриншоты в ' + shots)
+    } catch (e) {
+        // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
+        if (problems.length) {
+            console.error('Сообщения консоли:', problems)
+        }
+        throw e
     } finally {
-        await browser.close()
-        server.kill()
+        if (browser) {
+            await browser.close()
+        }
+        if (server) {
+            server.kill()
+        }
     }
 }
 
