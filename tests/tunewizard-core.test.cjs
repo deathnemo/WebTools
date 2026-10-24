@@ -37,6 +37,7 @@ load_page_scripts([
     'TuneWizard/core/tracking/Logged.js',
     'TuneWizard/core/filters.js',
     'TuneWizard/core/spectrum.js',
+    'TuneWizard/core/autofit.js',
 ])
 
 // Параметры без лога: values = { имя: значение }
@@ -84,11 +85,20 @@ function fake_log({ messages = {}, params = [] } = {}) {
 // Сообщения batch-логирования: экземпляр 0 типа type (1 — гироскоп, 0 — акселерометр), N пакетов по samples
 // отсчётов на rate Гц, синусоида freq Гц амплитудой amp рад/с по X, тишина по Y, Z; масштаб mul = 1000.
 // Лог кончается ровно на границе пакета, и upstream-загрузчик теряет последний пакет
-// (см. пометку upstream у "Sequence incomplete" в core/gyro.js): загружается N−1 пакетов, пока это не исправит задача 8
-function batch_messages({ batches = 4, samples = 1024, rate = 1000, freq = 100, amp = 2, type = 1 } = {}) {
+// (см. пометку upstream у "Sequence incomplete" в core/gyro.js): загружается N−1 пакетов, пока это не исправит задача 8.
+// Необязательно: tones = [[частота, амплитуда], ...] — сумма синусоид вместо одной; y_ratio — доля той же суммы по Y;
+// noise — СКО детерминированного белого шума по всем трём осям. Без них фикстура прежняя
+function batch_messages({ batches = 4, samples = 1024, rate = 1000, freq = 100, amp = 2, type = 1, tones = [[freq, amp]], y_ratio = 0, noise = 0 } = {}) {
     const ISBH = { N: [], type: [], instance: [], smp_cnt: [], mul: [], SampleUS: [], smp_rate: [] }
     const ISBD = { N: [], seqno: [], x: [], y: [], z: [] }
     const scale = 1000
+    // Шум с фиксированным зерном: LCG из Numerical Recipes, равномерный на ±√3·noise — СКО ровно noise
+    let seed = 1
+    const white = () => {
+        if (noise == 0) return 0
+        seed = (seed * 1664525 + 1013904223) >>> 0
+        return noise * Math.sqrt(3) * (2 * seed / 2 ** 32 - 1)
+    }
     for (let b = 0; b < batches; b++) {
         ISBH.N.push(b); ISBH.type.push(type); ISBH.instance.push(0); ISBH.smp_cnt.push(samples)
         ISBH.mul.push(scale); ISBH.SampleUS.push(b * samples / rate * 1e6 + 10e6); ISBH.smp_rate.push(rate)
@@ -96,9 +106,10 @@ function batch_messages({ batches = 4, samples = 1024, rate = 1000, freq = 100, 
             const x = [], y = [], z = []
             for (let k = 0; k < 32; k++) {
                 const n = m * 32 + k
-                x.push(Math.round(scale * amp * Math.sin(2 * Math.PI * freq * n / rate)))
-                y.push(0)
-                z.push(0)
+                const s = tones.reduce((sum, [f, a]) => sum + a * Math.sin(2 * Math.PI * f * n / rate), 0)
+                x.push(Math.round(scale * (s + white())))
+                y.push(Math.round(scale * (y_ratio * s + white())))
+                z.push(Math.round(scale * white()))
             }
             ISBD.N.push(b); ISBD.seqno.push(m); ISBD.x.push(x); ISBD.y.push(y); ISBD.z.push(z)
         }
@@ -637,4 +648,110 @@ test('tracking_lines: ESC по моторам — линии склеены че
     assert.deepEqual(lines[0].harmonics[1].freq, [200, 200, 200, NaN, 100, 100, 100, NaN], 'вторая гармоника: 2·50 = 100 ≥ 60, клампа нет')
     assert.deepEqual(lines[0].logged, [{ harmonic: 1, time: [0, 1], freq: [10, 20] }, { harmonic: 2, time: [0, 1], freq: [20, 40] }], 'логированные линии без клампа')
     assert.deepEqual(lines[1], { enabled: false, name: null, harmonics: [], logged: [] })
+})
+
+// Фикстура автоподбора: batch-лог с тонами 60, 120 и 180 Гц (гармоники 1–3 частоты 60 Гц) амплитудой 2, 1 и 0.5 рад/с
+// по X и вполовину по Y поверх белого шума СКО 0.3 рад/с; esc_rpm — ESC-телеметрия четырёх моторов с постоянными
+// оборотами, aout — RATE.AOut с постоянным газом. Отсчёты трекинга каждые 0.1 с с 9 по 20 с накрывают пакеты (10…13.1 с).
+// Шум нужен по существу: без него ошибка квантования (mul = 1000) у сигнала с периодом 50 отсчётов даёт линии
+// на всех кратных 20 Гц, подбор принимает их за гармоники 4–7 (превышение 35–60 дБ), и ослабление упирается в 50 дБ
+function autofit_setup({ esc_rpm = null, aout = null } = {}) {
+    const messages = batch_messages({ tones: [[60, 2], [120, 1], [180, 0.5]], y_ratio: 0.5, noise: 0.3 })
+    const TimeUS = Array.from({ length: 111 }, (_, i) => 9e6 + i * 1e5)
+    if (esc_rpm != null) {
+        messages.ESC = { instances: {} }
+        for (let i = 0; i < 4; i++) {
+            messages.ESC.instances[i] = { TimeUS, RPM: TimeUS.map(() => esc_rpm) }
+        }
+    }
+    if (aout != null) {
+        messages.RATE = { TimeUS, AOut: TimeUS.map(() => aout) }
+    }
+    const log = fake_log({ messages, params: gyro_params() })
+    const env = env_for(log)
+    const gyro = load_gyro(log, env, { log_type: null })
+    gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
+    const tracking = create_tracking(log, env, gyro)
+    interpolate_tracking(tracking, gyro)
+    return { gyro, tracking, range: [0, 1e9] }
+}
+
+test('auto_fit_esc: тоны на гармониках 1–3 частоты ESC 60 Гц → режим 3, гармоники 1–3, частота 0.8·60', () => {
+    const { gyro, tracking, range } = autofit_setup({ esc_rpm: 3600 })
+    const r = auto_fit_esc(gyro, tracking, range, 0)
+    assert.equal(r.error, undefined)
+    assert.equal(r.name, 'ESC-телеметрия')
+    assert.equal(r.mode, 3)
+    assert.equal(r.ref, 1)
+    assert.equal(r.min_ratio, 1)
+    assert.equal(r.harmonics & 7, 7, 'гармоники 1–3')
+    assert.equal(r.harmonics, 7, 'на гармониках 4–7 только шум: превышение 1–2 дБ, меньше порога 6 дБ')
+    // Ослабление — превышение пика 60 Гц над медианой шума. Пик: 60 Гц лежит в 0.44 бина от центра, окно Ханна
+    // оставляет там 0.881 амплитуды, и бин даёт A·0.5·0.881 — 0.881 по X и 0.44 по Y, мощность ≈ 0.97.
+    // Шум: (2/N)²·σ²·Σw² = 1.5·σ²/N на ось, по трём осям 3·1.5·0.09/1024 ≈ 3.96e−4. 10·lg(0.97/3.96e−4) ≈ 33.9 дБ
+    assert.ok(r.attenuation >= 10 && r.attenuation <= 50)
+    assert.ok(Math.abs(r.attenuation - 34) <= 2, 'ослабление ' + r.attenuation)
+    assert.equal(r.freq, Math.round(60 * 0.8), 'обороты постоянны: перцентиль 5 % — те же 60 Гц')
+    assert.equal(r.multi_source, true, 'четыре мотора')
+})
+
+test('auto_fit_esc: ESC 70 Гц при тех же тонах — сильнейший пик на 0.86× вне кратных, ошибка про полюса', () => {
+    const { gyro, tracking, range } = autofit_setup({ esc_rpm: 4200 })
+    const r = auto_fit_esc(gyro, tracking, range, 0)
+    assert.match(r.error, /полюс/)
+    assert.match(r.error, /0\.8[56]×/, '60/70 ≈ 0.857 частоты ESC')
+})
+
+test('auto_fit_throttle: газ 0.25 без ESC → режим 1, основная 60 Гц, опора 0.25; без газа по моторам и при нулевом газе — ошибки', () => {
+    const { gyro, tracking, range } = autofit_setup({ aout: 0.25 })
+    assert.deepEqual(auto_fit_throttle(gyro, tracking, range, true), { error: 'нет газа по моторам' }, 'без RCOU газа по моторам нет')
+    const r = auto_fit_throttle(gyro, tracking, range, false)
+    assert.equal(r.error, undefined)
+    assert.equal(r.name, 'газ')
+    assert.equal(r.mode, 1)
+    assert.ok(Math.abs(r.freq - 60) <= 1, 'частота ' + r.freq)
+    assert.ok(Math.abs(r.ref - 0.25) < 1e-6, 'опора ' + r.ref)
+    assert.equal(r.harmonics & 1, 1)
+    assert.equal(r.multi_source, false)
+    // Газ постоянный — все окна на опорном газе, и нижний предел floor(20·0.8)/20 = 0.8 от основной
+    assert.equal(r.min_ratio, 0.8)
+
+    const zero = autofit_setup({ aout: 0 })
+    assert.deepEqual(auto_fit_throttle(zero.gyro, zero.tracking, zero.range, false), { error: 'газ равен нулю в интервале анализа' })
+})
+
+test('auto_fit: ESC в приоритете, без ESC — газ и причины отказа, без данных до фильтров — ошибка', () => {
+    const both = autofit_setup({ esc_rpm: 3600, aout: 0.25 })
+    const with_esc = auto_fit(both.gyro, both.tracking, both.range, 0)
+    assert.equal(with_esc.result.name, 'ESC-телеметрия')
+    assert.deepEqual(with_esc.errors, [])
+
+    const thr = autofit_setup({ aout: 0.25 })
+    const fallback = auto_fit(thr.gyro, thr.tracking, thr.range, 0)
+    assert.equal(fallback.result.name, 'газ')
+    assert.equal(fallback.result.mode, 1)
+    assert.deepEqual(fallback.errors, ['нет ESC-телеметрии', 'нет газа по моторам'])
+
+    const none = autofit_setup()
+    assert.deepEqual(auto_fit(none.gyro, none.tracking, none.range, 0), { result: null, errors: ['нет ESC-телеметрии', 'нет газа по моторам', 'нет газа'] })
+
+    const no_pre = { result: null, errors: ['Для автоподбора нужны данные гироскопа до фильтров'] }
+    assert.deepEqual(auto_fit(null, thr.tracking, thr.range, 0), no_pre)
+    assert.deepEqual(auto_fit({ have_pre: false }, thr.tracking, thr.range, 0), no_pre)
+})
+
+test('auto_fit_values: INS_HNTCH_* по результату, OPTS без битов 1/16/64, бит 2 по multi_source, ESCMSK не трогается', () => {
+    const { gyro, tracking, range } = autofit_setup({ esc_rpm: 3600 })
+    const r = auto_fit_esc(gyro, tracking, range, 0)
+    const values = auto_fit_values(r, { INS_HNTCH_OPTS: 1 | 16 | 4, INS_HNTCH_ESCMSK: 5 })
+    assert.equal(values.INS_HNTCH_ENABLE, 1)
+    assert.equal(values.INS_HNTCH_BW, Math.round(r.freq * 0.5))
+    assert.equal(values.INS_HNTCH_OPTS & (1 | 16 | 64), 0, 'по одному notch на гармонику')
+    assert.equal(values.INS_HNTCH_OPTS & 2, 2, 'несколько моторов — multi source')
+    assert.equal(values.INS_HNTCH_OPTS & 4, 4, 'прочие биты сохранены')
+    assert.equal('INS_HNTCH_ESCMSK' in values, false)
+    assert.deepEqual(values, { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_FREQ: 48, INS_HNTCH_BW: 24, INS_HNTCH_ATT: r.attenuation,
+                               INS_HNTCH_REF: 1, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 7, INS_HNTCH_OPTS: 6 })
+    // Один источник — бит 2 снимается
+    assert.equal(auto_fit_values({ ...r, multi_source: false }, { INS_HNTCH_OPTS: 2 | 8 }).INS_HNTCH_OPTS, 8)
 })
