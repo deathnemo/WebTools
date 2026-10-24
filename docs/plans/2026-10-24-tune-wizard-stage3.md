@@ -10,7 +10,7 @@
 
 **Соглашения:** русский язык в коде, комментариях, интерфейсе и сообщениях; 4 пробела, без `;`, объявления функций, стиль соседнего кода. Коммит на задачу с трейлером `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; ничего из `TuneWizard/logs/`; `modules/ardupilot` не коммитить (вложенный репозиторий, `git add` только по именам файлов). Ветка `tune-wizard-stage3` (от `main` = `a487477`); после каждой задачи `git push origin tune-wizard-stage3`. В upstream ArduPilot ничего не отправлять.
 
-**Общая глобальная область страницы.** Все скрипты страницы делят одну лексическую область (см. план этапа 2): новые глобальные имена — только с префиксами `lowpass_`, `prop_`, `pid_lowpass_`, `step3`, `lpf_`, `spec3_`, `dterm3_`, `bode3_`; перед добавлением имени — `grep` по `Libraries/` и `TuneWizard/`. Тесты ядра загружают скрипты через `vm.runInThisContext` в порядке страницы (помощник `load_page_scripts` в `tests/tunewizard-steps.test.cjs`).
+**Общая глобальная область страницы.** Все скрипты страницы делят одну лексическую область (см. план этапа 2): новые глобальные имена — только с префиксами `lowpass_`, `prop_`, `mp_` (повторение кода Mission Planner), `pid_lowpass_`, `step3`, `lpf_`, `spec3_`, `dterm3_`, `bode3_`; перед добавлением имени — `grep` по `Libraries/` и `TuneWizard/`. Тесты ядра загружают скрипты через `vm.runInThisContext` в порядке страницы (помощник `load_page_scripts` в `tests/tunewizard-steps.test.cjs`).
 
 **Проверки (везде):** `npm run lint`; `npm test`; браузерные — `CHROME_PATH="C:/Users/taa03/AppData/Local/Google/Chrome/Application/chrome.exe" npm run test:tunewizard` и `npm run test:tunewizard-compare`. Node — `"/c/Program Files/nodejs/node.exe"` (в Git Bash: `export PATH="/c/Program Files/nodejs:$PATH"`).
 
@@ -24,7 +24,7 @@
 
 **Шаг 1. Тест (сначала падает).** `tests/tunewizard-lowpass.test.cjs` загружает скрипты как `tests/tunewizard-steps.test.cjs` (тот же список плюс `TuneWizard/core/lowpass.js` последним) и проверяет:
 
-- `round_half_even`: 2.5 → 2, 3.5 → 4, −2.5 → −2, 41.998 → 42 (C# `Math.Round` по умолчанию — к чётному).
+- `mp_round_half_even`: 2.5 → 2, 3.5 → 4, −2.5 → −2, 41.998 → 42 (C# `Math.Round` по умолчанию — к чётному).
 - `mp_round_to(116659.8, -2)` → 116700, `mp_round_to(27000, -2)` → 27000, `mp_round_to(24750, -2)` → 24800 (Mission Planner `RoundTo`: `v += 50`, затем `v − v % 100` — округление до сотен половиной вверх).
 - `prop_values(p)` — ровно значения Mission Planner:
 
@@ -38,16 +38,16 @@
 
   и у всех: `INS_ACCEL_FILTER 10`, `ATC_RAT_RLL/PIT_FLTE 0`, `ATC_RAT_YAW_FLTE 2`, `ATC_RAT_YAW_FLTD 0`, `ATC_RAT_YAW_FLTT = FLTT`. Отдельным утверждением — расхождения с таблицей wiki записаны (5″ 75 против 80, 10″ 42 против 40, `ACCEL_R/P` 10″ 1167 против 1100, `ACCEL_Y` 10″ 270 против 200 °/с²) — тест фиксирует, что берём Mission Planner.
 - `prop_from_gyro_filter(40)` ≈ 10.5989 (±1e-3), `prop_from_gyro_filter(0)` и `(-5)` → `null`; `prop_values(prop_from_gyro_filter(42)).INS_GYRO_FILTER` = 42.
-- `accel_names(params)`: в логе есть `ATC_ACCEL_R_MAX` → `{ r: "ATC_ACCEL_R_MAX", p: "ATC_ACCEL_P_MAX", y: "ATC_ACCEL_Y_MAX", scale: 100, units: "cdeg/s/s" }`; иначе (новые версии) → `{ r: "ATC_ACC_R_MAX", …, scale: 1, units: "deg/s/s" }`.
-- `lowpass_param_names(params)` — порядок: `INS_GYRO_FILTER`, `INS_ACCEL_FILTER`, `ATC_RAT_RLL_FLTT`, `ATC_RAT_RLL_FLTE`, `ATC_RAT_RLL_FLTD`, то же `PIT`, `YAW`, затем пределы ускорения r, p, y под именами из `accel_names`.
+- `lowpass_accel_names(params)`: в логе есть `ATC_ACCEL_R_MAX` → `{ r: "ATC_ACCEL_R_MAX", p: "ATC_ACCEL_P_MAX", y: "ATC_ACCEL_Y_MAX", scale: 100, units: "cdeg/s/s" }`; иначе (новые версии) → `{ r: "ATC_ACC_R_MAX", …, scale: 1, units: "deg/s/s" }`.
+- `lowpass_param_names(params)` — порядок: `INS_GYRO_FILTER`, `INS_ACCEL_FILTER`, `ATC_RAT_RLL_FLTT`, `ATC_RAT_RLL_FLTE`, `ATC_RAT_RLL_FLTD`, то же `PIT`, `YAW`, затем пределы ускорения r, p, y под именами из `lowpass_accel_names`.
 - `lowpass_log_values(params)` — значения лога, отсутствующие — заводские (раздел 2 дизайна): `INS_GYRO_FILTER 20`, `INS_ACCEL_FILTER 20`, `FLTT 20`, `FLTD 20`, `FLTE` крен/тангаж 0, рыскание 2.5, пределы 1100/270 °/с² × `scale`. Значения — `Math.fround` (как хранит прошивка).
-- `accel_is_default(log_values, names)`: 110000/27000 при `scale` 100 → `true`; 90000/90000/50045.7 → `false`; новые имена 1100/270 → `true`.
+- `lowpass_accel_is_default(log_values, names)`: 110000/27000 при `scale` 100 → `true`; 90000/90000/50045.7 → `false`; новые имена 1100/270 → `true`.
 - `lowpass_candidates(log_values, prop_in, names)`:
   - без размера (`null`, `NaN`, ≤ 0) → `["log", "half"]`;
   - с размером 10″ на значениях лога пользователя → `["log", "prop", "half"]`; у `prop` пределы ускорения — из лога (не заводские), у `half` — `INS_GYRO_FILTER` лога, `FLTT/FLTD` крена и тангажа и `FLTT` рыскания = `max(10, INS_GYRO_FILTER / 2)` = 20, остальное как в логе;
   - заводские пределы → у `prop` пределы по формуле (10″: 116700 и 27000 при `scale` 100; 1167 и 270 при `scale` 1);
   - одинаковые наборы остаются один раз (лог уже по правилу /2 → `half` исчезает), сравнение по `candidate_key` от `Math.fround`-значений.
-- `prop_size_warning(p)`: 2 → текст «вне 3–40″», 10 → `null`, `null` → `null`.
+- `prop_size_warning(p)`: 2 → текст с «4–40″» (ниже ≈ 4″ формулы выходят за диапазоны метаданных), 10 → `null`, `null` → `null`.
 
 Запуск: `node --test tests/tunewizard-lowpass.test.cjs` — падает (`lowpass_rules is not defined`).
 
@@ -85,7 +85,7 @@ const lowpass_rules = {
 const LOWPASS_AXES = ["RLL", "PIT", "YAW"]
 
 // Math.Round из C# (по умолчанию — к чётному): так округляет Mission Planner
-function round_half_even(value) { … }
+function mp_round_half_even(value) { … }
 
 // RoundTo(value, precision) из Mission Planner: при precision < 0 — m = 10^|precision|, v = value + m/2, v − v % m
 function mp_round_to(value, precision) { … }
@@ -98,11 +98,11 @@ function prop_values(p) { … }
 function prop_from_gyro_filter(hz) { … }
 
 // Имена и единицы пределов ускорения по логу: ATC_ACCEL_*_MAX (сантиградусы/с², 4.6 и раньше) или ATC_ACC_*_MAX (°/с²)
-function accel_names(params) { … }
+function lowpass_accel_names(params) { … }
 
 function lowpass_param_names(params) { … }
 function lowpass_log_values(params) { … }
-function accel_is_default(values, names) { … }   // сравнение с заводскими × scale с допуском 0.5·scale
+function lowpass_accel_is_default(values, names) { … }   // сравнение с заводскими × scale с допуском 0.5·scale
 function prop_size_warning(p) { … }
 
 // Варианты: «как в логе»; «по размеру винта» (только с p > 0; пределы ускорения — по формуле, только если в логе

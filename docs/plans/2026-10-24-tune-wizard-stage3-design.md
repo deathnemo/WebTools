@@ -73,7 +73,7 @@
 
 ## 5. Страница шага
 
-- Поле «Размер винта, ″» (обязательное, 3–40″, иначе предупреждение у поля) с подсказкой «текущему `INS_GYRO_FILTER` N Гц по формуле соответствует ≈ p″»; значение в `localStorage` (в `try/catch`).
+- Поле «Размер винта, ″» (обязательное, 4–40″, иначе предупреждение у поля: ниже ≈ 4″ формулы выходят за диапазоны метаданных ArduPilot) с подсказкой «текущему `INS_GYRO_FILTER` N Гц по формуле соответствует ≈ p″»; значение в `localStorage` (в `try/catch`).
 - Таблица вариантов: вариант, `INS_GYRO_FILTER`, `FLTD`/`FLTT` крена и тангажа, шум гироскопа, шум D (крен / тангаж), задержка путей P и D на 30 Гц (10 Гц — во всплывающей подсказке), флаги, «Применить вариант».
 - Вердикт: рекомендованный вариант, отличие от лога; при флагах — что именно хуже.
 - Форма параметров с описаниями ArduPilot (`Libraries/ParameterMetadata.js` + `../FilterReview/params.json`, как на шаге 2): `INS_GYRO_FILTER`, `INS_ACCEL_FILTER`, `ATC_RAT_RLL/PIT/YAW_FLTT/FLTE/FLTD`, пределы ускорения под именем из лога. В `params.json` есть только новые имена `ATC_ACC_*_MAX`: для старых `ATC_ACCEL_*_MAX` описание берётся у нового имени, единицы и диапазон пересчитываются ×100. Правка формы — вариант «Свой».
@@ -83,7 +83,7 @@
 
 ## 6. Файлы
 
-- `TuneWizard/core/lowpass.js` (новый, без DOM): `lowpass_rules` (формулы и источники, пороги **[наше]**: 1 мс, 3 дБ, полоса 20–400 Гц); `prop_values(p)`; `prop_from_gyro_filter(hz)`; `accel_names(params)` — имена и множитель единиц; `lowpass_candidates(...)`; `pid_lowpass(fc, loop_rate)` — передаточная функция первого порядка ArduPilot; `evaluate_lowpass(ctx, values)` — шум гироскопа, шум D по осям, задержка путей P и D; `lowpass_flags(...)`.
+- `TuneWizard/core/lowpass.js` (новый, без DOM): `lowpass_rules` (формулы и источники, пороги **[наше]**: 1 мс, 3 дБ, полоса 20–400 Гц); `prop_values(p)`; `prop_from_gyro_filter(hz)`; `lowpass_accel_names(params)` — имена и множитель единиц; `lowpass_candidates(...)`; `pid_lowpass(fc, loop_rate)` — передаточная функция первого порядка ArduPilot; `evaluate_lowpass(ctx, values)` — шум гироскопа, шум D по осям, задержка путей P и D; `lowpass_flags(...)`.
 - `TuneWizard/steps/step3.js` — страница шага.
 - `TuneWizard/index.html`, `TuneWizard/wizard.js` — секция 3, скрипты, доступность шага, передача принятого notch.
 - Переиспользуются без копирования: реестр графиков, загрузка формы с метаданными (общий помощник выносится из `steps/step2.js`, если понадобится обоим шагам), `evaluate_candidate`, `filters_lag_ms`, `alias_obj`.
