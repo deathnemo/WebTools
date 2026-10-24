@@ -7,32 +7,42 @@
 // (оси и первые 5 строк матрицы) в двух конфигурациях: дБ без алиасинга и PSD со свёрнутым алиасингом. Шаг 2
 // с параметрами из лога в обоих инструментах: бодэ (частоты, средняя амплитуда в дБ, средняя фаза) для гироскопа,
 // выбранного в FilterReview, с его выбором фазы (развёрнутая или ±180°) и с противоположным, и оценка «после»
-// по X, Y, Z. Допуск |a − b| ≤ 1e-6·max(1, |a|); при расхождении — первая позиция и значения, код выхода 1.
+// по X, Y, Z. Допуск |a − b| ≤ 1e-6·max(1, |a|), для осей времени — |a − b| ≤ 1e-9 с (относительный допуск
+// на 560 с — это 0.56 мс и скрыл бы сдвиги в десятки микросекунд); при расхождении — первая позиция и значения,
+// код выхода 1.
 //
 // Эталон точного сравнения — FilterReview с теми же исправлениями дефектов upstream, что внесены в мастер
 // (задача 8, docs/plans/2026-10-24-tune-wizard-stage2-design.md, раздел 2): до загрузки лога в исходном тексте
-// функций FilterReview заменяются строки дефектов 1 (run_batch_fft), 2 (load_from_raw_log) и 5 (load_from_batch);
-// каждая замена обязана сработать заданное число раз, иначе upstream изменился и тест надо пересмотреть.
-// Дефекты 3, 4, 6, 7 на логах, которые FilterReview открывает без ошибок, не срабатывают: при них он прерывает
-// загрузку, выдаёт alert или падает, и тест останавливается раньше сравнения.
+// функций FilterReview заменяются строки дефектов 1 (run_batch_fft), 2 (load_from_raw_log), 3 — заголовок пакета
+// без сообщений ISBD посреди лога (load_from_batch, FR 2087–2095) — и 5 (load_from_batch); каждая замена обязана
+// сработать заданное число раз, иначе upstream изменился и тест надо пересмотреть. Остальные ветви дефекта 3 и
+// дефекты 4, 6, 7 на логах, которые FilterReview открывает без ошибок, не срабатывают: при них он прерывает
+// загрузку, выдаёт alert или падает, и тест останавливается раньше сравнения. Если интервал анализа у FilterReview
+// с исправлениями другой (дефект 5 сдвигает конец данных), это печатается, и тот же интервал задаётся обоим.
+//
 // Кроме того, мастер сравнивается с FilterReview как есть (upstream): печатается, какие массивы совпадают, какие
-// отличаются, насколько и почему. Если на логе действует только дефект 1 (частота дискретизации пакетов batch-лога
-// непостоянна, и upstream брал частоту первого пакета), расхождения проверяются точно: оси частот — ровно ×ρ,
-// где ρ — отношение средних частот, пересчитанное по пакетам самого FilterReview; записанные спектры в дБ и строки
-// спектрограммы — без изменений; время спектрограммы сдвинуто на Δ = (окно/2)·(новый период − старый) (при одном
-// окне на пакет); сетка бодэ длиннее на k точек с тем же началом. Без действующих дефектов всё должно совпадать
-// с upstream; при других сочетаниях — только отчёт (точность обеспечивает сравнение с эталоном).
+// отличаются, насколько и почему. Какие исправления действуют на логе, определяется по данным самого FilterReview.
+// Если действует только дефект 1 (частоты пакетов разные: у batch-лога — непостоянная ISBH.smp_rate, у raw-лога из
+// двух и больше пакетов — своя частота у каждого; upstream брал частоту первого пакета и не исключал из средней
+// пакеты короче окна), расхождения проверяются точно: оси частот — ровно ×ρ, где ρ — отношение средних частот,
+// пересчитанное по пакетам самого FilterReview; сетка бодэ длиннее или короче на k точек с тем же началом. Для
+// batch-лога ещё: записанные спектры в дБ и строки спектрограммы — без изменений, время спектрограммы сдвинуто на
+// Δ = (окно/2)·(новый период − старый) (при одном окне на пакет). У raw-лога окон в пакете много и сдвиг времени
+// у них разный — эти массивы только в отчёте. Без действующих дефектов всё должно совпадать с upstream; при других
+// сочетаниях — только отчёт (точность обеспечивает сравнение с эталоном).
 // Нужны те же лог, браузер и python, что для tests/tunewizard-browser.cjs; без лога тест пропускается.
+// Логика правил (upstream_plan, check_upstream) без браузера проверяется в tests/tunewizard-compare-rules.test.cjs.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
-const { chromium } = require('playwright')
 
 const repo = path.resolve(__dirname, '..')
 const logs_dir = path.join(repo, 'TuneWizard', 'logs')
 const port = 8792
 const tolerance = 1e-6
+// Допуск для осей времени, с
+const time_tolerance = 1e-9
 
 // Типы и оси трасс FilterReview: индекс трассы — get_FFT_data_index(сенсор, type, axis)
 const FR_TYPES = ['Pre-filter', 'Post-filter', 'Estimated post']
@@ -103,6 +113,13 @@ function patch_filterreview(page) {
         ])
         // Дефект 2 (FR 2295–2297): срез до j для всех экземпляров GYR
         patch('load_from_raw_log', 2, [[/slice\(batch_start, j-i\)/, 'slice(batch_start, j)', 3]])
+        // Дефект 3, заголовок без сообщений ISBD (FR 2087–2095): поиск возвращается к началу, заголовок пропускается.
+        // Без этого FilterReview такой лог открывает без ошибок, но теряет все пакеты после повреждения
+        patch('load_from_batch', 3, [
+            [/const seq_num = ISBH\.N\[i\]/, 'const seq_num = ISBH.N[i]; const search_start = data_index; let not_found = false', 1],
+            [/(console\.log\("Could not find next sequence[^\r\n]*\r?\n\s*)decode_complete = true/, '$1data_index = search_start; not_found = true', 1],
+            [/(\}\s*)if \(decode_complete\) \{(\s*break\s*\}\s*let x = \[\])/, '$1if (not_found) { continue }\n        if (decode_complete) {$2', 1],
+        ])
         // Дефект 5 (FR 2118–2122): пакет, дочитанный целиком на последнем сообщении ISBD, — полный
         patch('load_from_batch', 5, [[/if \(data_index >= ISBD\.N\.length\) \{(?=\s*console\.log\("Sequence incomplete)/,
                                       'if ((data_index >= ISBD.N.length) && (j + 1 < num_data_msg)) {', 1]])
@@ -208,30 +225,37 @@ function compare_bode(label, fr_bode, wz_bode) {
     ]
 }
 
-// Сравнение двух массивов; возвращает { ok, count, max_rel, mismatch }
-function compare_arrays(label, a, b) {
+// Отклонение пары чисел: абсолютное, если задан abs (с), иначе относительное |a−b|/max(1,|a|)
+function difference(a, b, abs) {
+    return (abs != null) ? Math.abs(a - b) : Math.abs(a - b) / Math.max(1, Math.abs(a))
+}
+
+// Сравнение двух массивов; abs — абсолютный допуск (для осей времени), иначе относительный tolerance.
+// Возвращает { ok, count, max_rel, max_abs, mismatch }: отклонение в max_abs, если задан abs, иначе в max_rel
+function compare_arrays(label, a, b, abs = null) {
     if ((a == null) || (b == null)) {
-        return { ok: false, count: 0, max_rel: 0, mismatch: label + ': нет данных (FilterReview ' + (a == null ? 'null' : a.length) + ', мастер ' + (b == null ? 'null' : b.length) + ')' }
+        return { ok: false, count: 0, max_rel: 0, max_abs: 0, mismatch: label + ': нет данных (FilterReview ' + (a == null ? 'null' : a.length) + ', мастер ' + (b == null ? 'null' : b.length) + ')' }
     }
     if (a.length !== b.length) {
-        return { ok: false, count: 0, max_rel: 0, mismatch: label + ': длина FilterReview ' + a.length + ', мастер ' + b.length }
+        return { ok: false, count: 0, max_rel: 0, max_abs: 0, mismatch: label + ': длина FilterReview ' + a.length + ', мастер ' + b.length }
     }
-    let max_rel = 0
+    const limit = abs ?? tolerance
+    let max = 0
+    const result = (ok, count, mismatch) => ({ ok, count, max_rel: (abs == null) ? max : 0, max_abs: (abs == null) ? 0 : max, mismatch })
     for (let i = 0; i < a.length; i++) {
         if ((typeof a[i] === 'string') || (typeof b[i] === 'string')) {
             if (a[i] !== b[i]) {
-                return { ok: false, count: i, max_rel, mismatch: label + '[' + i + ']: FilterReview ' + a[i] + ', мастер ' + b[i] }
+                return result(false, i, label + '[' + i + ']: FilterReview ' + a[i] + ', мастер ' + b[i])
             }
             continue
         }
-        const scale = Math.max(1, Math.abs(a[i]))
-        const rel = Math.abs(a[i] - b[i]) / scale
-        max_rel = Math.max(max_rel, rel)
-        if (rel > tolerance) {
-            return { ok: false, count: i, max_rel, mismatch: label + '[' + i + ']: FilterReview ' + a[i] + ', мастер ' + b[i] + ', |a−b|/max(1,|a|) = ' + rel.toExponential(3) }
+        const d = difference(a[i], b[i], abs)
+        max = Math.max(max, d)
+        if (d > limit) {
+            return result(false, i, label + '[' + i + ']: FilterReview ' + a[i] + ', мастер ' + b[i] + ((abs == null) ? ', |a−b|/max(1,|a|) = ' : ', |a−b| = ') + d.toExponential(3) + ((abs == null) ? '' : ' с'))
         }
     }
-    return { ok: true, count: a.length, max_rel, mismatch: null }
+    return result(true, a.length, null)
 }
 
 // Имя трассы мастера для сенсора sensor (с нуля), типа и оси
@@ -255,10 +279,10 @@ function compare_snapshots(label, fr_snap, wz_snap, sensor) {
             results.push(compare_arrays(label + ' · ' + name + ' · y', fr_trace.y, wz_trace?.y))
         }
     }
-    results.push(compare_arrays(label + ' · спектрограмма · x (время)', fr_snap.heat.x, wz_snap.heat.x))
+    results.push(compare_arrays(label + ' · спектрограмма · x (время)', fr_snap.heat.x, wz_snap.heat.x, time_tolerance))
     results.push(compare_arrays(label + ' · спектрограмма · y (частота)', fr_snap.heat.y, wz_snap.heat.y))
     if (fr_snap.heat.rows !== wz_snap.heat.rows) {
-        results.push({ ok: false, count: 0, max_rel: 0, mismatch: label + ' · спектрограмма: строк FilterReview ' + fr_snap.heat.rows + ', мастер ' + wz_snap.heat.rows })
+        results.push({ ok: false, count: 0, max_rel: 0, max_abs: 0, mismatch: label + ' · спектрограмма: строк FilterReview ' + fr_snap.heat.rows + ', мастер ' + wz_snap.heat.rows })
     }
     for (let j = 0; j < fr_snap.heat.z.length; j++) {
         results.push(compare_arrays(label + ' · спектрограмма · z[' + j + ']', fr_snap.heat.z[j], wz_snap.heat.z[j]))
@@ -269,8 +293,9 @@ function compare_snapshots(label, fr_snap, wz_snap, sensor) {
 }
 
 // FilterReview: открыть, при patched — применить исправления, загрузить лог, снять настройки, выбранный гироскоп,
-// пакеты и снимки графиков в конфигурациях «дБ, без алиасинга», «PSD, свёрнутый алиасинг» и бодэ для шага 2
-async function run_filterreview(browser, server, log_path, problems, patched) {
+// пакеты и снимки графиков в конфигурациях «дБ, без алиасинга», «PSD, свёрнутый алиасинг» и бодэ для шага 2.
+// interval = { start, end } (строки полей) — задать этот интервал анализа, если свой у FilterReview другой
+async function run_filterreview(browser, server, log_path, problems, patched, interval = null) {
     const name = patched ? 'FilterReview с исправлениями' : 'FilterReview'
     const fr = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
     fr.on('pageerror', (e) => problems.push(name + ' pageerror: ' + e.message))
@@ -289,6 +314,17 @@ async function run_filterreview(browser, server, log_path, problems, patched) {
         batch: document.getElementById('log_type_batch').checked,
         filter_version: [1, 2, 3, 4].find((v) => document.getElementById('filter_version_' + v).checked),
     }))
+    // Свой интервал FilterReview меняется на заданный: find_start_index/find_end_index читают поля при расчёте (re_calc ниже)
+    let own_interval = null
+    if ((interval != null) && ((interval.start !== settings.start) || (interval.end !== settings.end))) {
+        own_interval = { start: settings.start, end: settings.end }
+        await fr.evaluate((iv) => {
+            document.getElementById('TimeStart').value = iv.start
+            document.getElementById('TimeEnd').value = iv.end
+        }, interval)
+        settings.start = interval.start
+        settings.end = interval.end
+    }
     // Гироскоп по умолчанию — выбор спектрограммы после загрузки: первичный, а без его данных — первый с данными (FR 2674–2677)
     const sensor = await fr.evaluate(() => [0, 1, 2].find((i) => document.getElementById('SpecGyroInst' + i).checked))
     const gyro = await filterreview_gyro(fr, sensor)
@@ -310,7 +346,7 @@ async function run_filterreview(browser, server, log_path, problems, patched) {
     await fr.check(bode.wrap ? '#ScaleUnWrap' : '#ScaleWrap')
     await fr.evaluate(() => redraw_post_estimate_and_bode())
     const bode_other = await snapshot_filterreview_bode(fr)
-    return { settings, sensor, gyro, snap, snap_psd, bode, bode_other, patches }
+    return { settings, own_interval, sensor, gyro, snap, snap_psd, bode, bode_other, patches }
 }
 
 // Исправленная средняя частота (дефект 1) по пакетам FilterReview: среднее по пакетам не короче окна, а если таких
@@ -340,10 +376,10 @@ function bode_points(max) {
     return Math.floor(max / BODE_FREQ_STEP) + 1
 }
 
-// Наибольшее относительное отклонение по общему началу массивов и число отличающихся позиций
-function deviation(a, b) {
+// Наибольшее отклонение по общему началу массивов (абсолютное при abs, иначе относительное) и число позиций сверх допуска
+function deviation(a, b, abs = null) {
     const len = Math.min(a.length, b.length)
-    let max_rel = 0
+    let max = 0
     let differ = 0
     for (let i = 0; i < len; i++) {
         if ((typeof a[i] === 'string') || (typeof b[i] === 'string')) {
@@ -352,54 +388,177 @@ function deviation(a, b) {
             }
             continue
         }
-        const rel = Math.abs(a[i] - b[i]) / Math.max(1, Math.abs(a[i]))
-        if (rel > tolerance) {
+        const d = difference(a[i], b[i], abs)
+        if (d > (abs ?? tolerance)) {
             differ++
         }
-        max_rel = Math.max(max_rel, rel)
+        max = Math.max(max, d)
     }
-    return { max_rel, differ, len }
+    return { max, differ, len, text: max.toExponential(2) + ((abs == null) ? '' : ' с') }
 }
 
-// Проверка массива мастера против FilterReview как есть по правилу:
-//   same — совпадает (допуск tolerance); scale — FilterReview × k; shift — FilterReview + d;
-//   grow — мастер длиннее на n с тем же началом; report — только отчёт.
-// Возвращает { ok, line } — строку для вывода
+// Проверка массива мастера против FilterReview как есть по правилу item.rule:
+//   same — совпадает; scale — FilterReview × k; shift — FilterReview + d;
+//   grow — длина мастера = длина FilterReview + n (n любого знака), общее начало совпадает; report — только отчёт.
+// item.abs — абсолютный допуск (оси времени). Возвращает { ok, same, line } — строку для вывода
 function check_upstream(item) {
-    const { name, up, wz, rule, reason } = item
+    const { name, up, wz, rule, reason, abs = null } = item
     if ((up == null) || (wz == null)) {
-        return { ok: false, line: name + ': нет данных (FilterReview ' + (up == null ? 'null' : up.length) + ', мастер ' + (wz == null ? 'null' : wz.length) + ')' }
+        return { ok: false, same: false, line: name + ': нет данных (FilterReview ' + (up == null ? 'null' : up.length) + ', мастер ' + (wz == null ? 'null' : wz.length) + ')' }
     }
     const map = (f) => up.map((v) => (typeof v === 'number') ? f(v) : v)
-    let r
+    let r = null
     if (rule.kind == 'same') {
-        r = compare_arrays(name, up, wz)
+        r = compare_arrays(name, up, wz, abs)
         return { ok: r.ok, same: r.ok, line: r.ok ? name : r.mismatch }
     }
     if (rule.kind == 'scale') {
-        r = compare_arrays(name + ' (FilterReview × ' + rule.k + ')', map((v) => v * rule.k), wz)
+        r = compare_arrays(name + ' (FilterReview × ' + rule.k + ')', map((v) => v * rule.k), wz, abs)
     } else if (rule.kind == 'shift') {
-        r = compare_arrays(name + ' (FilterReview + ' + rule.d + ' с)', map((v) => v + rule.d), wz)
+        r = compare_arrays(name + ' (FilterReview + ' + rule.d + ' с)', map((v) => v + rule.d), wz, abs)
     } else if (rule.kind == 'grow') {
-        if ((up == null) || (wz == null) || (wz.length !== up.length + rule.n)) {
-            return { ok: false, line: name + ': ожидалась длина FilterReview + ' + rule.n + ' = ' + (up?.length + rule.n) + ', мастер ' + wz?.length }
+        if (wz.length !== up.length + rule.n) {
+            return { ok: false, same: false, line: name + ': ожидалась длина FilterReview ' + (rule.n < 0 ? '− ' : '+ ') + Math.abs(rule.n) + ' = ' + (up.length + rule.n) + ', мастер ' + wz.length }
         }
-        r = compare_arrays(name + ' (общее начало)', up, wz.slice(0, up.length))
+        // Общее начало — по более короткому массиву: при ρ < 1 сетка мастера короче
+        const common = Math.min(up.length, wz.length)
+        r = compare_arrays(name + ' (общее начало)', up.slice(0, common), wz.slice(0, common), abs)
     }
+    const dev = deviation(up, wz, abs)
+    const length = (up.length == wz.length) ? '' : ((wz.length > up.length) ? 'длиннее' : 'короче') + ' на ' + Math.abs(wz.length - up.length) + ' (' + up.length + ' → ' + wz.length + '), '
     if (r != null) {
-        const dev = deviation(up, wz)
-        const detail = (up.length == wz.length) ? 'до ' + dev.max_rel.toExponential(2) : 'длина ' + up.length + ' → ' + wz.length + ', в общем начале до ' + dev.max_rel.toExponential(2)
-        return { ok: r.ok, line: r.ok ? name + ' — отличается (' + detail + '): ' + reason : r.mismatch }
+        const detail = (up.length == wz.length) ? 'до ' + dev.text : length + 'в общем начале до ' + dev.text
+        return { ok: r.ok, same: false, line: r.ok ? name + ' — отличается (' + detail + '): ' + reason : r.mismatch }
     }
-    const dev = deviation(up, wz)
-    const length = (up.length == wz.length) ? '' : 'длина ' + up.length + ' → ' + wz.length + ', '
-    const line = (dev.differ == 0) && (up.length == wz.length)
-        ? name + ' — совпадает'
-        : name + ' — отличается (' + length + 'позиций ' + dev.differ + ' из ' + dev.len + ', до ' + dev.max_rel.toExponential(2) + '): ' + reason
-    return { ok: true, same: line.endsWith('совпадает'), line }
+    if ((dev.differ == 0) && (up.length == wz.length)) {
+        return { ok: true, same: true, line: name + ' — совпадает' }
+    }
+    return { ok: true, same: false, line: name + ' — отличается (' + length + 'позиций ' + dev.differ + ' из ' + dev.len + ', до ' + dev.text + '): ' + reason }
+}
+
+// План сверки с FilterReview как есть — без браузера (его проверяет tests/tunewizard-compare-rules.test.cjs).
+// ctx = { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates }:
+//   up / fix — результаты run_filterreview для FilterReview как есть и с исправлениями (нужны gyro, snap, bode,
+//   bode_other); settings — настройки, с которыми считали оба инструмента; wz_* — снимки мастера и средние частоты
+//   его экземпляров до/после фильтров этого сенсора.
+// Возвращает { active, reasons, checks, items }: действующие исправления, их описание, проверки средних частот
+// ({ ok, line }) и массивы с правилами для check_upstream
+function upstream_plan(ctx) {
+    const { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates } = ctx
+    // Какие исправления действуют на этом логе — по данным самого FilterReview
+    const fixed = { pre: (up.gyro.pre != null) ? fixed_rate(up.gyro.pre) : null, post: (up.gyro.post != null) ? fixed_rate(up.gyro.post) : null }
+    const defect1 = ['pre', 'post'].some((k) => (fixed[k] != null) && (fixed[k].rate !== up.gyro[k].average_sample_rate))
+    const defect5 = JSON.stringify(fix.gyro.batches) !== JSON.stringify(up.gyro.batches)
+    const defect2 = (up.gyro.type == 'raw') && up.gyro.batches.some((b, i) => (i > 0) && (b != null))
+    const active = [defect1 && 1, defect2 && 2, defect5 && 5].filter(Boolean)
+
+    // Средние частоты: мастер — как у FilterReview с исправлениями (его пакеты те же, что у мастера, и при дефекте 5);
+    // пересчёт по пакетам FilterReview как есть совпадает с ними, только если набор пакетов не менялся
+    const checks = []
+    const reasons = []
+    for (const k of ['pre', 'post']) {
+        if (fix.gyro[k] == null) {
+            continue
+        }
+        const name = WIZARD_TYPES[k == 'pre' ? 0 : 1]
+        const reference = fix.gyro[k].average_sample_rate
+        const ok = Math.abs(wz_rates[k] - reference) <= 1e-12 * reference
+        checks.push({ ok, line: 'средняя частота мастера (' + name + ') ' + wz_rates[k] + (ok ? ' = ' : ' ≠ ') + reference + ' у FilterReview с исправлениями' })
+        if (!defect5 && (fixed[k] != null)) {
+            const same = Math.abs(fixed[k].rate - reference) <= 1e-12 * reference
+            checks.push({ ok: same, line: 'исправленная средняя частота (' + name + ') по пакетам FilterReview ' + fixed[k].rate + (same ? ' = ' : ' ≠ ') + reference + ' у FilterReview с исправлениями' })
+        }
+        if (defect1 && (fixed[k] != null) && (up.gyro[k] != null)) {
+            reasons.push(name + ': ' + up.gyro[k].average_sample_rate + ' → ' + fixed[k].rate + ' Гц (×' + (fixed[k].rate / up.gyro[k].average_sample_rate) + ')')
+        }
+    }
+
+    const only1 = defect1 && !defect2 && !defect5
+    const batch = (up.gyro.type == 'batch')
+    const why = {
+        scale: 'дефект 1 — бины по средней частоте всех пакетов, ровно ×ρ',
+        same: 'не зависит от частоты дискретизации',
+        shift: 'дефект 1 — центр окна (окно/2)·период сдвинут на Δ',
+        shift_many: 'дефект 1 — окон на пакет больше одного, сдвиг времени у окон разный',
+        raw: 'дефект 1 — у raw-пакетов своя частота и много окон: время окон сдвигается неравномерно, окна на границах ' +
+             'интервала и разрывы спектрограммы могут смениться',
+        grow: 'дефект 1 — сетка бодэ 0…Найквист шагом 0.05 Гц, с тем же началом',
+        filters: 'дефект 1 — notch и ФНЧ заданы в герцах, их доля частоты дискретизации другая',
+        other: 'дефекты ' + active.join(', ') + ' — проверено точным сравнением с FilterReview с исправлениями',
+    }
+    // Правило массива: без действующих дефектов всё совпадает; только дефект 1 — по виду массива; иначе — отчёт.
+    // Сдвиг и «без изменений» — только у batch-лога (у raw-лога время окон сдвигается неравномерно)
+    const rule = (kind, k) => {
+        if (active.length == 0) {
+            return { rule: { kind: 'same' }, reason: '' }
+        }
+        if (!only1) {
+            return { rule: { kind: 'report' }, reason: why.other }
+        }
+        if (kind == 'scale') {
+            return { rule: { kind: 'scale', k }, reason: why.scale }
+        }
+        if (kind == 'grow') {
+            return { rule: { kind: 'grow', n: k }, reason: why.grow }
+        }
+        if (kind == 'filters') {
+            return { rule: { kind: 'report' }, reason: why.filters }
+        }
+        if (!batch) {
+            return { rule: { kind: 'report' }, reason: why.raw }
+        }
+        if (kind == 'shift') {
+            return (k == null) ? { rule: { kind: 'report' }, reason: why.shift_many } : { rule: { kind: 'shift', d: k }, reason: why.shift }
+        }
+        return { rule: { kind: 'same' }, reason: why.same }
+    }
+    const rho = (k) => ((fixed[k] != null) && (up.gyro[k] != null)) ? fixed[k].rate / up.gyro[k].average_sample_rate : 1
+    const shift = (fixed.pre != null) && (settings.window_per_batch == 1)
+        ? (up.gyro.pre.window_size / 2) * (fixed.pre.sample_time - 1 / up.gyro.pre.average_sample_rate)
+        : null
+
+    const items = []
+    const label = 'дБ, без алиасинга'
+    for (let t = 0; t < 3; t++) {
+        for (let a = 0; a < 3; a++) {
+            const fr_trace = up.snap.traces[t * 3 + a]
+            if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
+                continue
+            }
+            const name = label + ' · ' + wizard_trace_name(sensor, t, a)
+            const wz_trace = wz_snap.traces[wizard_trace_name(sensor, t, a)] ?? {}
+            items.push({ name: name + ' · x', up: fr_trace.x, wz: wz_trace.x, ...rule('scale', rho(t == 1 ? 'post' : 'pre')) })
+            items.push({ name: name + ' · y', up: fr_trace.y, wz: wz_trace.y, ...rule(t == 2 ? 'filters' : 'same') })
+        }
+    }
+    items.push({ name: label + ' · спектрограмма · x (время)', up: up.snap.heat.x, wz: wz_snap.heat.x, abs: time_tolerance, ...rule('shift', shift) })
+    items.push({ name: label + ' · спектрограмма · y (частота)', up: up.snap.heat.y, wz: wz_snap.heat.y, ...rule('scale', rho('pre')) })
+    items.push({ name: label + ' · спектрограмма · строк', up: [up.snap.heat.rows], wz: [wz_snap.heat.rows], ...rule('same') })
+    for (let j = 0; j < up.snap.heat.z.length; j++) {
+        items.push({ name: label + ' · спектрограмма · z[' + j + ']', up: up.snap.heat.z[j], wz: wz_snap.heat.z[j], ...rule('same') })
+    }
+    const step2_label = 'шаг 2 (параметры лога)'
+    for (let a = 0; a < 3; a++) {
+        const fr_trace = up.snap.traces[2 * 3 + a]
+        if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
+            continue
+        }
+        items.push({ name: step2_label + ' · оценка «после» · ' + AXES[a] + ' · x', up: fr_trace.x, wz: wz_step2.est[a].x, ...rule('scale', rho('pre')) })
+        items.push({ name: step2_label + ' · оценка «после» · ' + AXES[a] + ' · y', up: fr_trace.y, wz: wz_step2.est[a].y, ...rule('filters') })
+    }
+    const bode_grow = ((fixed.pre != null) && (up.gyro.pre != null)) ? bode_points(fixed.pre.max_bin) - bode_points(up.gyro.pre.max_bin) : 0
+    const phase_name = (b) => b.wrap ? 'фаза ±180°' : 'фаза развёрнута'
+    for (const [b_up, b_wz] of [[up.bode, wz_step2], [up.bode_other, wz_step2_other]]) {
+        const name = step2_label + ', ' + phase_name(b_up) + ' · бодэ'
+        items.push({ name: name + ' · x (частота)', up: b_up.x, wz: b_wz.x, ...rule('grow', bode_grow) })
+        items.push({ name: name + ' · амплитуда', up: b_up.amp, wz: b_wz.amp, ...rule('filters') })
+        items.push({ name: name + ' · фаза', up: b_up.phase, wz: b_wz.phase, ...rule('filters') })
+    }
+    return { active, reasons, checks, items }
 }
 
 async function main() {
+    const { chromium } = require('playwright')
     const log_path = find_log()
     if (log_path == null) {
         console.log('tunewizard-compare: лог не найден (TUNEWIZARD_LOG или TuneWizard/logs/*.bin) — пропуск')
@@ -414,15 +573,23 @@ async function main() {
         server.on('error', (e) => problems.push('http.server: ' + e.message))
         browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || undefined })
 
-        // 1. FilterReview как есть и FilterReview с исправлениями — эталон точного сравнения
-        const up = await run_filterreview(browser, server, log_path, problems, false)
+        // 1. FilterReview с исправлениями — эталон точного сравнения; затем FilterReview как есть с тем же интервалом
         const fix = await run_filterreview(browser, server, log_path, problems, true)
-        assert.deepEqual(fix.settings, up.settings, 'FilterReview с исправлениями: те же интервал, тип лога, окна и версия фильтра')
-        assert.equal(fix.sensor, up.sensor, 'FilterReview с исправлениями показывает тот же гироскоп')
+        const up = await run_filterreview(browser, server, log_path, problems, false, fix.settings)
         const fr_settings = fix.settings
         const sensor = fix.sensor
         const fr_bode = fix.bode
         const fr_bode_other = fix.bode_other
+        // Отличия настроек FilterReview как есть — в отчёт (интервал ему задан тот же, остальное должно совпадать)
+        const settings_notes = []
+        if (up.own_interval != null) {
+            settings_notes.push('свой интервал ' + up.own_interval.start + '–' + up.own_interval.end + ' с заменён интервалом FilterReview с исправлениями ' + fr_settings.start + '–' + fr_settings.end + ' с')
+        }
+        for (const key of ['window_per_batch', 'window_size', 'batch', 'filter_version']) {
+            if (up.settings[key] !== fr_settings[key]) {
+                settings_notes.push(key + ': ' + up.settings[key] + ' против ' + fr_settings[key] + ' у FilterReview с исправлениями')
+            }
+        }
 
         // 2. Мастер: тот же лог, интервал FilterReview, тот же тип лога, окна на пакет и версия фильтра, дБ / Гц / без алиасинга
         const wz = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
@@ -533,6 +700,7 @@ async function main() {
             const failed = results.filter((r) => !r.ok)
             const count = results.reduce((sum, r) => sum + r.count, 0)
             const max_rel = results.reduce((max, r) => Math.max(max, r.max_rel), 0)
+            const max_abs = results.reduce((max, r) => Math.max(max, r.max_abs), 0)
             if (failed.length > 0) {
                 console.error('tunewizard-compare: ' + label + ' — расхождений с FilterReview с исправлениями ' + failed.length + ' из ' + results.length + ' массивов; первое: ' + failed[0].mismatch)
                 for (const r of failed.slice(1, 6)) {
@@ -540,112 +708,46 @@ async function main() {
                 }
                 failed_total += failed.length
             }
-            summary.push(label + ': ' + results.length + ' массивов, ' + count + ' значений, наибольшее относительное отклонение ' + max_rel.toExponential(2))
+            summary.push(label + ': ' + results.length + ' массивов, ' + count + ' значений, наибольшее относительное отклонение ' + max_rel.toExponential(2) +
+                ((fr_s == null) ? '' : ', по времени ' + max_abs.toExponential(2) + ' с'))
         }
 
         // 4. Отчёт о расхождениях с FilterReview как есть («дБ, без алиасинга» и шаг 2) и точная проверка ожидаемых
-        // Какие исправления действуют на этом логе — по данным самого FilterReview
-        const fixed = { pre: (up.gyro.pre != null) ? fixed_rate(up.gyro.pre) : null, post: (up.gyro.post != null) ? fixed_rate(up.gyro.post) : null }
-        const defect1 = ['pre', 'post'].some((k) => (fixed[k] != null) && (fixed[k].rate !== up.gyro[k].average_sample_rate))
-        const defect5 = JSON.stringify(fix.gyro.batches) !== JSON.stringify(up.gyro.batches)
-        const defect2 = (up.gyro.type == 'raw') && up.gyro.batches.some((b, i) => (i > 0) && (b != null))
-        const active = [defect1 && 1, defect2 && 2, defect5 && 5].filter(Boolean)
-        const reasons = []
-        if (defect1) {
-            for (const k of ['pre', 'post']) {
-                if (fixed[k] == null) {
-                    continue
+        if (settings_notes.length > 0) {
+            console.log('tunewizard-compare: настройки FilterReview как есть — ' + settings_notes.join('; '))
+        }
+        if (up.sensor !== sensor) {
+            // Без своего экземпляра у FilterReview как есть сравнивать нечего: снимки сняты для другого гироскопа
+            console.log('tunewizard-compare: FilterReview как есть показывает гироскоп ' + (up.sensor + 1) + ', с исправлениями — ' + (sensor + 1) + '; отчёт о расхождениях с upstream пропущен')
+        } else {
+            const plan = upstream_plan({ up, fix, sensor, settings: fr_settings, wz_snap, wz_step2, wz_step2_other, wz_rates })
+            const checked = plan.items.map(check_upstream)
+            const same = checked.filter((c) => c.ok && c.same)
+            const differ = checked.filter((c) => c.ok && !c.same)
+            const upstream_failed = [...plan.checks.filter((c) => !c.ok), ...checked.filter((c) => !c.ok)]
+            console.log('tunewizard-compare: FilterReview как есть — действующие исправления: ' + (plan.active.length ? plan.active.join(', ') : 'нет') +
+                (plan.reasons.length ? ' (средняя частота ' + plan.reasons.join('; ') + ')' : '') + '; исправления в эталоне: ' + fix.patches.join(', '))
+            for (const c of plan.checks.filter((c) => c.ok)) {
+                console.log('  ' + c.line)
+            }
+            console.log('  совпадают ' + same.length + ' из ' + checked.length + ' массивов: ' + same.map((c) => c.line.replace(/ — совпадает$/, '')).join('; '))
+            for (const c of differ) {
+                console.log('  ' + c.line)
+            }
+            if (upstream_failed.length > 0) {
+                console.error('tunewizard-compare: ожидаемые расхождения с FilterReview как есть не подтвердились — ' + upstream_failed.length + ':')
+                for (const c of upstream_failed.slice(0, 6)) {
+                    console.error('  ' + c.line)
                 }
-                // Мастер считает ту же исправленную среднюю частоту, что получена здесь по пакетам FilterReview
-                assert.ok(Math.abs(wz_rates[k] - fixed[k].rate) <= 1e-12 * fixed[k].rate, 'средняя частота мастера (' + k + ') ' + wz_rates[k] + ', по пакетам FilterReview ' + fixed[k].rate)
-                reasons.push(WIZARD_TYPES[k == 'pre' ? 0 : 1] + ': ' + up.gyro[k].average_sample_rate + ' → ' + fixed[k].rate + ' Гц (×' + (fixed[k].rate / up.gyro[k].average_sample_rate) + ')')
+                failed_total += upstream_failed.length
             }
-        }
-        const only1 = defect1 && !defect2 && !defect5
-        const why = {
-            scale: 'дефект 1 — бины по средней частоте всех пакетов, ровно ×ρ',
-            same: 'не зависит от частоты дискретизации',
-            shift: 'дефект 1 — центр окна (окно/2)·период сдвинут на Δ',
-            grow: 'дефект 1 — сетка бодэ 0…Найквист шагом 0.05 Гц, с тем же началом',
-            filters: 'дефект 1 — notch и ФНЧ заданы в герцах, их доля частоты дискретизации другая',
-            other: 'дефекты ' + active.join(', ') + ' — проверено точным сравнением с FilterReview с исправлениями',
-        }
-        // Правило массива: без действующих дефектов всё совпадает; только дефект 1 — по виду массива; иначе — отчёт
-        const rule = (kind, k) => {
-            if (active.length == 0) {
-                return { rule: { kind: 'same' }, reason: '' }
-            }
-            if (!only1) {
-                return { rule: { kind: 'report' }, reason: why.other }
-            }
-            if (kind == 'scale') return { rule: { kind: 'scale', k }, reason: why.scale }
-            if (kind == 'shift') return (k == null) ? { rule: { kind: 'report' }, reason: why.shift + ' (окон на пакет больше одного — сдвиг у окон разный)' } : { rule: { kind: 'shift', d: k }, reason: why.shift }
-            if (kind == 'grow') return { rule: { kind: 'grow', n: k }, reason: why.grow }
-            if (kind == 'filters') return { rule: { kind: 'report' }, reason: why.filters }
-            return { rule: { kind: 'same' }, reason: why.same }
-        }
-        const rho = (k) => (fixed[k] != null) ? fixed[k].rate / up.gyro[k].average_sample_rate : 1
-        const shift = (fixed.pre != null) && (fr_settings.window_per_batch == 1)
-            ? (up.gyro.pre.window_size / 2) * (fixed.pre.sample_time - 1 / up.gyro.pre.average_sample_rate)
-            : null
-        const items = []
-        const label = 'дБ, без алиасинга'
-        for (let t = 0; t < 3; t++) {
-            for (let a = 0; a < 3; a++) {
-                const fr_trace = up.snap.traces[t * 3 + a]
-                if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
-                    continue
-                }
-                const name = label + ' · ' + wizard_trace_name(sensor, t, a)
-                const wz_trace = wz_snap.traces[wizard_trace_name(sensor, t, a)]
-                items.push({ name: name + ' · x', up: fr_trace.x, wz: wz_trace.x, ...rule('scale', rho(t == 1 ? 'post' : 'pre')) })
-                items.push({ name: name + ' · y', up: fr_trace.y, wz: wz_trace.y, ...rule(t == 2 ? 'filters' : 'same') })
-            }
-        }
-        items.push({ name: label + ' · спектрограмма · x (время)', up: up.snap.heat.x, wz: wz_snap.heat.x, ...rule('shift', shift) })
-        items.push({ name: label + ' · спектрограмма · y (частота)', up: up.snap.heat.y, wz: wz_snap.heat.y, ...rule('scale', rho('pre')) })
-        items.push({ name: label + ' · спектрограмма · строк', up: [up.snap.heat.rows], wz: [wz_snap.heat.rows], ...rule('same') })
-        for (let j = 0; j < up.snap.heat.z.length; j++) {
-            items.push({ name: label + ' · спектрограмма · z[' + j + ']', up: up.snap.heat.z[j], wz: wz_snap.heat.z[j], ...rule('same') })
-        }
-        for (let a = 0; a < 3; a++) {
-            const fr_trace = up.snap.traces[2 * 3 + a]
-            if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
-                continue
-            }
-            items.push({ name: step2_label + ' · оценка «после» · ' + AXES[a] + ' · x', up: fr_trace.x, wz: wz_step2.est[a].x, ...rule('scale', rho('pre')) })
-            items.push({ name: step2_label + ' · оценка «после» · ' + AXES[a] + ' · y', up: fr_trace.y, wz: wz_step2.est[a].y, ...rule('filters') })
-        }
-        const bode_grow = (fixed.pre != null) ? bode_points(fixed.pre.max_bin) - bode_points(up.gyro.pre.max_bin) : 0
-        for (const [b_up, b_wz] of [[up.bode, wz_step2], [up.bode_other, wz_step2_other]]) {
-            const name = step2_label + ', ' + phase_name(b_up) + ' · бодэ'
-            items.push({ name: name + ' · x (частота)', up: b_up.x, wz: b_wz.x, ...rule('grow', bode_grow) })
-            items.push({ name: name + ' · амплитуда', up: b_up.amp, wz: b_wz.amp, ...rule('filters') })
-            items.push({ name: name + ' · фаза', up: b_up.phase, wz: b_wz.phase, ...rule('filters') })
-        }
-        const checked = items.map(check_upstream)
-        const same = checked.filter((c) => c.ok && c.same)
-        const differ = checked.filter((c) => c.ok && !c.same)
-        const upstream_failed = checked.filter((c) => !c.ok)
-        console.log('tunewizard-compare: FilterReview как есть — действующие исправления: ' + (active.length ? active.join(', ') : 'нет') +
-            (reasons.length ? ' (средняя частота ' + reasons.join('; ') + ')' : '') + '; исправления в эталоне: ' + fix.patches.join(', '))
-        console.log('  совпадают ' + same.length + ' из ' + checked.length + ' массивов: ' + same.map((c) => c.line.replace(/ — совпадает$/, '')).join('; '))
-        for (const c of differ) {
-            console.log('  ' + c.line)
-        }
-        if (upstream_failed.length > 0) {
-            console.error('tunewizard-compare: ожидаемые расхождения с FilterReview как есть не подтвердились — ' + upstream_failed.length + ' из ' + checked.length + ' массивов:')
-            for (const c of upstream_failed.slice(0, 6)) {
-                console.error('  ' + c.line)
-            }
-            failed_total += upstream_failed.length
         }
 
         if (failed_total > 0) {
             process.exitCode = 1
             return
         }
-        console.log('tunewizard-compare: совпадение с FilterReview с исправлениями (допуск ' + tolerance + ') — ' + summary.join('; ') + '. Интервал ' + fr_settings.start + '–' +
+        console.log('tunewizard-compare: совпадение с FilterReview с исправлениями (допуск ' + tolerance + ', по времени ' + time_tolerance + ' с) — ' + summary.join('; ') + '. Интервал ' + fr_settings.start + '–' +
             fr_settings.end + ' с (у мастера по умолчанию ' + wz_default.join('–') + ' с), окон на пакет ' + fr_settings.window_per_batch + ', окно ' + wz_window +
             ', версия фильтра ' + wz_fv + ', гироскоп ' + (sensor + 1) + ', строк спектрограммы ' + wz_snap.heat.rows + ', гироскоп бодэ ' + (fr_bode.inst + 1) +
             ', фаза FilterReview по умолчанию ' + (fr_bode.wrap ? '±180°' : 'развёрнута'))
@@ -664,7 +766,12 @@ async function main() {
     }
 }
 
-main().catch((e) => {
-    console.error(e)
-    process.exit(1)
-})
+if (require.main === module) {
+    main().catch((e) => {
+        console.error(e)
+        process.exit(1)
+    })
+} else {
+    // Для tests/tunewizard-compare-rules.test.cjs: правила сверки без браузера
+    module.exports = { upstream_plan, check_upstream, compare_arrays, fixed_rate, bode_points, wizard_trace_name, time_tolerance, tolerance }
+}

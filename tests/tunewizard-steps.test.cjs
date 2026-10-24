@@ -295,9 +295,8 @@ function esc_batch_log({ esc_hz, motor = [[1, 2], [2, 1]], fixed = [[155, 1.5]],
         return noise * Math.sqrt(3) * (2 * seed / 2 ** 32 - 1)
     }
     const batch_s = samples / rate
-    const per_batch = esc_hz
-    for (let b = 0; b < per_batch.length; b++) {
-        const f = per_batch[b]
+    for (let b = 0; b < esc_hz.length; b++) {
+        const f = esc_hz[b]
         ISBH.N.push(b); ISBH.type.push(1); ISBH.instance.push(0); ISBH.smp_cnt.push(samples)
         ISBH.mul.push(scale); ISBH.SampleUS.push((10 + b * batch_s) * 1e6); ISBH.smp_rate.push(rate)
         for (let m = 0; m < samples / 32; m++) {
@@ -315,11 +314,11 @@ function esc_batch_log({ esc_hz, motor = [[1, 2], [2, 1]], fixed = [[155, 1.5]],
         }
     }
     const TimeUS = [], RPM = []
-    for (let n = 0; 9 + n * 0.05 < 11 + per_batch.length * batch_s; n++) {
+    for (let n = 0; 9 + n * 0.05 < 11 + esc_hz.length * batch_s; n++) {
         const t = 9 + n * 0.05
-        const b = Math.min(per_batch.length - 1, Math.max(0, Math.floor((t - 10) / batch_s)))
+        const b = Math.min(esc_hz.length - 1, Math.max(0, Math.floor((t - 10) / batch_s)))
         TimeUS.push(t * 1e6)
-        RPM.push(per_batch[b] * 60)
+        RPM.push(esc_hz[b] * 60)
     }
     const ESC = { instances: {} }
     for (let i = 0; i < 4; i++) {

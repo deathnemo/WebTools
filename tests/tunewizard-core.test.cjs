@@ -389,7 +389,7 @@ test('дефект 3: нет сообщения ISBD в последнем па�
     assert.equal(gyro.error, null, 'загрузка не обрывается')
     assert.equal(gyro[0].length, 3, 'пакеты 0–2 сохранены, повреждённый 3 пропущен')
     assert.equal(gyro.have_pre, true)
-    assert.ok(gyro.warnings.some((w) => /ISBD/.test(w) && /1/.test(w)), gyro.warnings.join('; '))
+    assert.ok(gyro.warnings.some((w) => /ISBD/.test(w) && /— 1$/.test(w)), gyro.warnings.join('; '))
 })
 
 test('дефект 3: нет сообщения ISBD посреди лога — пропускается только этот пакет, следующие читаются', () => {
@@ -398,6 +398,32 @@ test('дефект 3: нет сообщения ISBD посреди лога —
     assert.equal(gyro.error, null)
     assert.deepEqual(gyro[0].map((b) => b.sample_time), [10, 10 + 2 * 1.024, 10 + 3 * 1.024], 'пакеты 0, 2, 3')
     assert.equal(gyro.warnings.length, 1, gyro.warnings.join('; '))
+})
+
+test('дефект 3: у заголовка посреди лога нет ни одного сообщения ISBD — пакет пропущен, следующие читаются (FR 2087–2095)', () => {
+    // upstream искал сообщения этого пакета до конца лога и прекращал разбор: пакеты 2 и 3 терялись
+    const messages = batch_messages()
+    for (let seqno = 31; seqno >= 0; seqno--) {
+        drop_isbd(messages, 1, seqno)
+    }
+    const log = fake_log({ messages, params: gyro_params() })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro.error, null)
+    assert.deepEqual(gyro[0].map((b) => b.sample_time), [10, 10 + 2 * 1.024, 10 + 3 * 1.024], 'пакеты 0, 2, 3')
+    assert.equal(gyro.warnings.length, 1, gyro.warnings.join('; '))
+    assert.match(gyro.warnings[0], /— 1$/)
+})
+
+test('дефект 3: заголовок без сообщений ISBD в самом конце лога — ожидаемо, без предупреждения', () => {
+    // Лог оборвался сразу после заголовка пакета 4: данные дальше не продолжаются, повреждения нет
+    const messages = batch_messages()
+    const { ISBH } = messages
+    ISBH.N.push(4); ISBH.type.push(1); ISBH.instance.push(0); ISBH.smp_cnt.push(1024)
+    ISBH.mul.push(1000); ISBH.SampleUS.push(10e6 + 4 * 1.024e6); ISBH.smp_rate.push(1000)
+    const log = fake_log({ messages, params: gyro_params() })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro[0].length, 4)
+    assert.deepEqual(gyro.warnings, [])
 })
 
 test('дефект 3: число отсчётов пакета не совпадает с заголовком — пакет пропущен, предупреждение (FR 2130)', () => {

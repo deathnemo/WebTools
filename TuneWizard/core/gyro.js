@@ -267,8 +267,11 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
     const ISBH = log.get("ISBH")
     const ISBD = log.get("ISBD")
 
-    // Пропущенные повреждённые пакеты (исправление дефекта upstream 3)
+    // Пропущенные повреждённые пакеты (исправление дефекта upstream 3). missing_batches — заголовки подряд, для которых
+    // нет ни одного сообщения ISBD: они засчитываются в пропущенные, только если данные дальше продолжаются, — заголовки
+    // без данных в самом конце лога (лог оборвался после заголовка) ожидаемы и предупреждения не дают
     let skipped_batches = 0
+    let missing_batches = 0
 
     for (let i = 0; i < ISBH.N.length; i++) {
         // Разбор заголовков
@@ -286,19 +289,29 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
 
         // Сдвигаем индекс данных до совпадения номера последовательности
         const seq_num = ISBH.N[i]
+        const search_start = data_index
+        let not_found = false
         while (ISBD.N[data_index] != seq_num) {
             data_index++
             if (data_index >= ISBD.N.length) {
-                // Ожидаемо в конце лога: сообщений больше нет, выходим.
+                // Ожидаемо в конце лога: сообщений больше нет.
                 // Строка минус число даёт NaN в тексте (в upstream та же опечатка, только console.log)
                 console.log("Could not find next sequence " + i + " of " + ISBH.N.length-1)
-                decode_complete = true
+                // исправление дефекта upstream 3 (FR 2087–2095): upstream здесь прекращал разбор, и если сообщений ISBD
+                // этого пакета нет вовсе, а дальше лог продолжается, все следующие пакеты молча терялись. Поиск
+                // возвращается к своему началу, заголовок пропускается
+                data_index = search_start
+                not_found = true
                 break
             }
         }
-        if (decode_complete) {
-            break
+        if (not_found) {
+            missing_batches++
+            continue
         }
+        // Данные продолжаются: заголовки без сообщений перед этим пакетом — повреждение посреди лога
+        skipped_batches += missing_batches
+        missing_batches = 0
 
         let x = []
         let y = []
