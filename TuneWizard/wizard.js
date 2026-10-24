@@ -1,4 +1,4 @@
-// Мастер настройки: состояние, навигация по шагам, тема и график полёта. Математика — в core/, реестр графиков — в plots.js.
+// Мастер настройки: состояние, навигация по шагам и график полёта. Математика — в core/, реестр графиков — в plots.js.
 
 // Парсер логов — ES-модуль, подгружается асинхронно; load() ждёт import_done
 var DataflashParser
@@ -32,47 +32,6 @@ const state = {
     load_warnings: [],
     // Файл лога: нужен для «Открыть в FilterReview»
     file: null,
-}
-
-// ---------- Тема ----------
-
-function apply_theme(name) {
-    const root = document.documentElement
-    if (name === "auto") {
-        root.removeAttribute("data-theme")
-    } else {
-        root.setAttribute("data-theme", name)
-    }
-    for (const button of document.querySelectorAll(".themebar button[data-t]")) {
-        button.setAttribute("aria-pressed", String(button.dataset.t === name))
-    }
-    restyle_plots()
-}
-
-function init_theme() {
-    let saved = null
-    try {
-        saved = localStorage.getItem("theme_v1")
-    } catch {
-        // Хранилище недоступно — работаем без памяти темы
-    }
-    apply_theme(saved ?? "auto")
-    for (const button of document.querySelectorAll(".themebar button[data-t]")) {
-        button.addEventListener("click", () => {
-            apply_theme(button.dataset.t)
-            try {
-                localStorage.setItem("theme_v1", button.dataset.t)
-            } catch {
-                // см. выше
-            }
-        })
-    }
-    // Смена системной темы при выборе «как в системе»
-    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-        if (!document.documentElement.hasAttribute("data-theme")) {
-            restyle_plots()
-        }
-    })
 }
 
 // ---------- График полёта ----------

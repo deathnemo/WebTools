@@ -41,7 +41,7 @@
 ## 3. Реестр графиков `TuneWizard/plots.js`
 
 - `register_plot(id, data, layout, { on_theme })` — регистрирует контейнер; `render_plot(id)` — `Plotly.react`; `plot(id)` — доступ к `data/layout`.
-- `restyle_plots()` применяет `plot_layout_theme()` ко всем зарегистрированным графикам: `paper_bgcolor`, `plot_bgcolor`, `font`, каждая ось `/^[xy]axis\d*$/`, `rangeslider`, `colorbar`; затем вызывает `on_theme(palette)` графика для цветов линий. Вызывается при смене темы и при показе шага.
+- `restyle_plots()` применяет `plot_layout_theme()` ко всем зарегистрированным графикам: `paper_bgcolor`, `plot_bgcolor`, `font`, каждая ось `/^[xy]axis\d*$/`, `rangeslider`, `colorbar`; затем вызывает `on_theme(palette)` графика для цветов линий. Тема одна — только тёмная тема «Графит» (решение пользователя 24.10.2026): переключателя нет, тема применяется при регистрации и показе графика, `restyle_plots()` остаётся служебной функцией.
 - `plot_palette()` из токенов: оси X/Y/Z → `--accent`, `--low`, `--ok`; предупреждение → `--high`; стили линий: pre — сплошная, оценка post — пунктир (`dash`), логированное post — точки (`dot`); гироскопы 2 и 3 — та же палитра с прозрачностью 0.65 и 0.4. Градиент спектрограммы — Viridis (единственное исключение из правила «цвета только из токенов»: тепловой карте нужен непрерывный ряд).
 - Помощники темы `css_token`, `plot_layout_theme`, палитра и `restyle_plots` переезжают из `wizard.js` в `plots.js`; график полёта шага 0 регистрируется первым (регрессия — браузерный тест этапа 1).
 - Один классический скрипт на шаг: `TuneWizard/steps/step1.js`, `steps/step2.js`; `wizard.js` остаётся каркасом (состояние, навигация, шаг 0). Все они делят `state`; `core/` по-прежнему не объявляет `state`, `US2S`, `css_token`, `stat_tile`, `html_escape`.

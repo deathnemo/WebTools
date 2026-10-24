@@ -137,11 +137,20 @@ async function main() {
         assert.deepEqual(await visible_steps(page), ['0'], 'видна только секция шага 0')
         assert.deepEqual(await page.evaluate(() => ['log_verdict', 'log_info', 'log_checks'].filter((id) => getComputedStyle(document.getElementById(id)).display !== 'none')), [], 'блоки результата скрыты до загрузки')
 
-        // Тема
-        await page.click('.themebar button[data-t="dark"]')
-        assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark')
-        assert.equal(await page.evaluate(() => localStorage.getItem('theme_v1')), 'dark')
-        await page.click('.themebar button[data-t="light"]')
+        // Только тёмная тема «Графит»: переключателя нет, color-scheme тёмная, фон страницы — токен --bg
+        assert.equal(await page.locator('.themebar').count(), 0, 'переключателя темы нет')
+        const theme = await page.evaluate(() => {
+            const root = getComputedStyle(document.documentElement)
+            // Цвет токена в том виде, в каком его отдаёт getComputedStyle для фона (rgb(…))
+            const probe = document.createElement('div')
+            probe.style.background = root.getPropertyValue('--bg')
+            document.body.appendChild(probe)
+            const bg = getComputedStyle(probe).backgroundColor
+            probe.remove()
+            return { scheme: root.colorScheme, body: getComputedStyle(document.body).backgroundColor, bg: bg }
+        })
+        assert.match(theme.scheme, /dark/, 'color-scheme: dark')
+        assert.equal(theme.body, theme.bg, 'фон страницы — --bg')
 
         // Загрузка лога
         await page.setInputFiles('#fileItem', log_path)
@@ -181,21 +190,18 @@ async function main() {
         assert.equal(await page.inputValue('#FFTWindow_size'), '2048', 'окно FFT округляется к степени двойки')
         await page.evaluate((disabled) => { document.getElementById('FFTWindow_size').disabled = disabled }, only_batch)
 
-        // Шаги и тема с данными
+        // Шаги с данными
         // Проверка gyro_log и pid_log на реальном логе не fail — открыты все шаги
         assert.deepEqual(await step_buttons_disabled(page), [false, false, false, false, false, false], 'после загрузки лога Copter доступны все шаги')
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
-        await page.click('.themebar button[data-t="dark"]')
         const surface = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--surface').trim())
-        assert.equal(await page.evaluate(() => document.getElementById('FlightData').layout.paper_bgcolor), surface, 'график перекрашен под тёмную тему')
+        assert.equal(await page.evaluate(() => document.getElementById('FlightData').layout.paper_bgcolor), surface, 'фон графика полёта — --surface')
 
         // Скриншоты для глаз — рядом с логами, в репозиторий не попадают
         const shots = path.join(logs_dir, 'screenshots')
         fs.mkdirSync(shots, { recursive: true })
-        await page.screenshot({ path: path.join(shots, 'step0_dark.png'), fullPage: true })
-        await page.click('.themebar button[data-t="light"]')
-        await page.screenshot({ path: path.join(shots, 'step0_light.png'), fullPage: true })
+        await page.screenshot({ path: path.join(shots, 'step0.png'), fullPage: true })
 
         // Шаг 1: спектр, спектрограмма, пики и вердикт считаются при первом показе
         await page.click('#wizbar button:nth-child(2)')
@@ -281,12 +287,9 @@ async function main() {
         await wait_overlay(page)
         assert.equal((await step1_summary(page)).x_len, s1.x_len, 'одно окно на пакет — прежняя длина')
 
-        // Тема на шаге 1 и скриншоты
-        await page.click('.themebar button[data-t="dark"]')
-        assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.paper_bgcolor), surface, 'спектр перекрашен под тёмную тему')
-        await page.screenshot({ path: path.join(shots, 'step1_dark.png'), fullPage: true })
-        await page.click('.themebar button[data-t="light"]')
-        await page.screenshot({ path: path.join(shots, 'step1_light.png'), fullPage: true })
+        // Фон графиков шага 1 и скриншот
+        assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.paper_bgcolor), surface, 'фон спектра — --surface')
+        await page.screenshot({ path: path.join(shots, 'step1.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
 
@@ -384,13 +387,10 @@ async function main() {
         assert.doesNotMatch(await page.getAttribute('#cand2_refit', 'class') ?? '', /primary/)
         assert.equal((await step2_summary(page)).recommended_marks, 1, 'для нового интервала снова одна пометка «рекомендуется»')
 
-        // Тема на шаге 2 и скриншоты
-        await page.click('.themebar button[data-t="dark"]')
-        assert.equal(await page.evaluate(() => document.getElementById('Spectrum2').layout.paper_bgcolor), surface, 'спектр шага 2 перекрашен под тёмную тему')
-        assert.equal(await page.evaluate(() => document.getElementById('Bode2').layout.paper_bgcolor), surface, 'бодэ перекрашено')
-        await page.screenshot({ path: path.join(shots, 'step2_dark.png'), fullPage: true })
-        await page.click('.themebar button[data-t="light"]')
-        await page.screenshot({ path: path.join(shots, 'step2_light.png'), fullPage: true })
+        // Фон графиков шага 2 и скриншот
+        assert.equal(await page.evaluate(() => document.getElementById('Spectrum2').layout.paper_bgcolor), surface, 'фон спектра шага 2 — --surface')
+        assert.equal(await page.evaluate(() => document.getElementById('Bode2').layout.paper_bgcolor), surface, 'фон бодэ — --surface')
+        await page.screenshot({ path: path.join(shots, 'step2.png'), fullPage: true })
 
         // «Принять»: значения формы и метрики в state.steps[2], открыт шаг 3
         await page.click('#notch_accept')

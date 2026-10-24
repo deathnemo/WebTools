@@ -43,32 +43,8 @@
 <script type="text/javascript" src="steps/step2.js"></script>
 
 <style>
-/* Токены оформления: светлая тема «Светлый технический», тёмная «Графит» (общие правила проектов, 23.10.2026) */
+/* Токены оформления: только тёмная тема «Графит» (общие правила проектов; решение пользователя 24.10.2026) */
 :root{
-  --bg:#F0F1EE; --surface:#FCFCFB; --surface-2:#F6F7F4; --sunk:#F6F7F4;
-  --ink:#1A1D19; --ink-2:#4B514A; --ink-3:#787E77;
-  --line:#DBDED8; --line-soft:#E4E7E1;
-  --accent:#B45309; --accent-soft:rgba(180,83,9,.10);
-  --low:#0D9488;   --low-soft:rgba(13,148,136,.10);
-  --ok:#4D7C0F;    --ok-soft:rgba(77,124,15,.10);
-  --high:#B91C1C;  --high-soft:rgba(185,28,28,.10);
-  --shadow:0 1px 0 rgba(26,29,25,.05);
-  color-scheme:light;
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]){
-    --bg:#212426; --surface:#2E3234; --surface-2:#262A2C; --sunk:#262A2C;
-    --ink:#E9EBE7; --ink-2:#B8BDB7; --ink-3:#9AA09A;
-    --line:#3B4043; --line-soft:#353A3D;
-    --accent:#E0A64A; --accent-soft:rgba(224,166,74,.14);
-    --low:#4FC3D1;   --low-soft:rgba(79,195,209,.14);
-    --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
-    --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
-    --shadow:none;
-    color-scheme:dark;
-  }
-}
-:root[data-theme="dark"]{
   --bg:#212426; --surface:#2E3234; --surface-2:#262A2C; --sunk:#262A2C;
   --ink:#E9EBE7; --ink-2:#B8BDB7; --ink-3:#9AA09A;
   --line:#3B4043; --line-soft:#353A3D;
@@ -76,8 +52,7 @@
   --low:#4FC3D1;   --low-soft:rgba(79,195,209,.14);
   --ok:#A9D166;    --ok-soft:rgba(169,209,102,.14);
   --high:#F08A7A;  --high-soft:rgba(240,138,122,.14);
-  --shadow:none;
-  color-scheme:dark;
+  --shadow:none; color-scheme:dark;
 }
 *{box-sizing:border-box}
 /* Атрибут hidden должен побеждать display правил секций и блоков */
@@ -98,14 +73,12 @@ header.hero{display:flex; flex-direction:column; gap:8px; border-bottom:1px soli
 section{display:flex; flex-direction:column; gap:14px}
 section > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
 
-/* Переключатель темы */
-.themebar{display:flex; align-items:center; gap:6px; justify-content:flex-end; flex-wrap:wrap}
-.themebar__k{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); margin-right:4px}
+/* Кнопки */
 button,label.pickbtn{font-family:"IBM Plex Sans",sans-serif; font-size:12px; padding:5px 11px; cursor:pointer;
   background:var(--surface-2); color:var(--ink-2); border:1px solid var(--line); border-radius:2px}
 button:hover,label.pickbtn:hover{color:var(--ink); border-color:var(--ink-3)}
 button:disabled{opacity:.45; cursor:not-allowed}
-button[aria-pressed="true"],button.primary{color:var(--accent); border-color:var(--accent); background:var(--accent-soft)}
+button.primary{color:var(--accent); border-color:var(--accent); background:var(--accent-soft)}
 button:focus-visible,input:focus-visible,label.pickbtn:focus-visible{outline:2px solid var(--low); outline-offset:2px}
 
 /* Полоса шагов */
@@ -236,9 +209,9 @@ tr:last-child td{border-bottom:0}
 #loading h1{color:var(--ink)}
 
 @media print{
-  /* Три селектора одной специфичности с правилами тёмной темы: при печати побеждают как более поздние */
-  :root, :root[data-theme], :root:not([data-theme]){--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none; color-scheme:light}
-  .themebar,.wizbar,button,label.pickbtn{display:none!important}
+  /* Та же специфичность, что у токенов выше: при печати побеждает как более позднее правило */
+  :root{--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none; color-scheme:light}
+  .wizbar,button,label.pickbtn{display:none!important}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
 }
@@ -246,13 +219,6 @@ tr:last-child td{border-bottom:0}
 </head>
 <body>
 <div class="wrap">
-
-<div class="themebar" role="group" aria-label="Тема оформления">
-  <span class="themebar__k">Тема</span>
-  <button type="button" data-t="auto">как в системе</button>
-  <button type="button" data-t="light">светлая</button>
-  <button type="button" data-t="dark">тёмная</button>
-</div>
 
 <header class="hero">
   <span class="eyebrow">ArduPilot · Copter</span>
@@ -556,7 +522,6 @@ tr:last-child td{border-bottom:0}
 
 <script>
     init_loading_overlay()
-    init_theme()
     init_wizard()
 </script>
 </body>
