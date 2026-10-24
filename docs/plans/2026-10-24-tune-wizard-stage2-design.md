@@ -36,6 +36,7 @@
 2. `load_from_raw_log`: `slice(batch_start, j-i)` — `i` здесь номер экземпляра гироскопа, а не смещение.
 3. `load_from_batch`: `return` при неполной последовательности оставляет `Gyro_batch` недостроенным.
 4. `ThrottleTarget` без `RATE` (и без `CTUN` на Copter) получает `mode_value = null` → «Unsupported notch mode» для MODE 1.
+5. `load_from_batch` (FR 2118–2122): пакет, заканчивающийся ровно на последнем сообщении ISBD лога, считается неполным и отбрасывается.
 
 ## 3. Реестр графиков `TuneWizard/plots.js`
 

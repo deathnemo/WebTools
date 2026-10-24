@@ -4,18 +4,21 @@
 // (779–891), find_start_index/find_end_index (1031–1056), load_from_batch и load_from_raw_log
 // (2051–2344), части load (2375–2443, 2546–2572, 2619–2652).
 //
-// Замены относительно upstream:
+// Замены относительно upstream (слева — FilterReview, справа — здесь):
 //   глобал Gyro_batch                               → аргумент gyro (массив по экземплярам с полями сводки)
 //   find_start_index(time) / find_end_index(time)   → find_start_index(time, range) / find_end_index(time, range), range = [t0, t1]
 //   document.getElementById("FFTWindow_size"/"FFTWindow_per_batch") → opts.window_size / opts.window_per_batch
 //   alert(msg)                                      → warnings.push(msg) или возвращаемое поле error
-//   get_param_value(PARM, name, allow_change)       → params.get(name)
-//   decode_devid(...)                               → env.decode_devid ? env.decode_devid(...) : null
-// Известные дефекты upstream сохранены и помечены комментариями «upstream:» — их исправляет задача 8
+//   get_param_value(PARM, name, allow_change)       → params.get(name). Upstream брал первое значение параметра
+//                                                     и предупреждал о смене в полёте; здесь берётся последнее,
+//                                                     а смена INS_LOG_BAT_OPT / INS_RAW_LOG_OPT даёт предупреждение
+//   decode_devid(ID, DEVICE_TYPE_IMU)               → без замены: оба — глобалы страницы из Libraries/DecodeDevID.js,
+//                                                     вызов под охраной typeof decode_devid
+// Известные дефекты upstream сохранены и помечены комментариями «upstream» с двоеточием — их исправляет задача 8
 // (docs/plans/2026-10-24-tune-wizard-stage2.md), после регрессионной сверки с FilterReview.
 //
 // Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/Array_Math.js, Libraries/fft.js,
-// DEVICE_TYPE_IMU (Libraries/DecodeDevID.js) и US2S (core/log.js).
+// decode_devid и DEVICE_TYPE_IMU (Libraries/DecodeDevID.js) и US2S (core/log.js).
 
 // Пройти по массиву времени и вернуть последний индекс до начала диапазона
 function find_start_index(time, range) {
@@ -141,8 +144,8 @@ function clear_gyro_fft(gyro) {
 }
 
 // Пересчитать все FFT. opts = { window_size, window_per_batch }.
-// Возвращает { changed, warnings }. Интерполяцию трекинга по окнам FFT (upstream: tracking_methods[j].interpolate)
-// делает interpolate_tracking из core/filters.js, а подпись «частота/разрешение» — fft_info.
+// Возвращает { changed, warnings }. Интерполяцию трекинга по окнам FFT (в upstream здесь вызывался
+// tracking_methods[j].interpolate) делает interpolate_tracking из core/filters.js, а подпись «частота/разрешение» — fft_info.
 function gyro_fft(gyro, opts) {
     const warnings = []
 
@@ -273,7 +276,8 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
         while (ISBD.N[data_index] != seq_num) {
             data_index++
             if (data_index >= ISBD.N.length) {
-                // Ожидаемо в конце лога: сообщений больше нет, выходим
+                // Ожидаемо в конце лога: сообщений больше нет, выходим.
+                // Строка минус число даёт NaN в тексте (в upstream та же опечатка, только console.log)
                 console.log("Could not find next sequence " + i + " of " + ISBH.N.length-1)
                 decode_complete = true
                 break
@@ -343,6 +347,9 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
     }
 
     // Определяем по параметру, логирование до или после фильтров
+    if (params.changed("INS_LOG_BAT_OPT")) {
+        warnings.push("Параметр INS_LOG_BAT_OPT менялся в полёте: взято последнее значение")
+    }
     const INS_LOG_BAT_OPT = params.get("INS_LOG_BAT_OPT")
     const _doing_sensor_rate_logging = (INS_LOG_BAT_OPT & (1 << 0)) != 0
     const _doing_post_filter_logging = (INS_LOG_BAT_OPT & (1 << 1)) != 0
@@ -430,6 +437,9 @@ function load_from_raw_log(log, gyro, num_gyro, gyro_rate, params, warnings) {
     gyro.quantization_noise = 0.0
 
     // Определяем по параметру, логирование до или после фильтров
+    if (params.changed("INS_RAW_LOG_OPT")) {
+        warnings.push("Параметр INS_RAW_LOG_OPT менялся в полёте: взято последнее значение")
+    }
     const INS_RAW_LOG_OPT = params.get("INS_RAW_LOG_OPT")
     let post_filter = (INS_RAW_LOG_OPT != null) && ((INS_RAW_LOG_OPT & (1 << 2)) != 0)
     const pre_post_filter = (INS_RAW_LOG_OPT != null) && ((INS_RAW_LOG_OPT & (1 << 3)) != 0)
@@ -536,10 +546,12 @@ function load_from_raw_log(log, gyro, num_gyro, gyro_rate, params, warnings) {
 }
 
 // Загрузка гироскопа из лога: часть load() из FilterReview без DOM.
-// env = { params (log_params), filter_version, build_type, decode_devid? }, opts = { log_type: "batch" | "raw" | null }.
+// env = { params (log_params), filter_version, build_type }, opts = { log_type: "batch" | "raw" | null }.
 // Возвращает массив gyro по экземплярам (как Gyro_batch в upstream) с полями:
-// type, quantization_noise, start_time, end_time, have_pre, have_post, primary (номер сенсора или null),
-// first_gyro, num_gyro, gyro_rate[], gyro_info[] ({ name, bus_type, rate }), warnings[], error (строка или null).
+// type, quantization_noise, start_time, end_time, have_pre, have_post, num_gyro, gyro_rate[],
+// gyro_info[] ({ name, bus_type, rate }), warnings[], error (строка или null);
+// primary — номер первичного сенсора по AHRS_EKF_TYPE/EK3_PRIMARY, если для него есть данные, иначе null (FR 2546–2572);
+// first_gyro — первый сенсор с данными. Сенсор по умолчанию для спектрограммы и бодэ — primary ?? first_gyro (FR 2674–2677).
 function load_gyro(log, env, opts = {}) {
     const params = env.params
     const warnings = []
@@ -552,7 +564,7 @@ function load_gyro(log, env, opts = {}) {
         const ID_param = i == 0 ? "INS_GYR_ID" : "INS_GYR" + (i + 1) + "_ID"
         const ID = params.get(ID_param)
         if ((ID != null) && (ID > 0)) {
-            const decoded = env.decode_devid ? env.decode_devid(ID, DEVICE_TYPE_IMU) : null
+            const decoded = (typeof decode_devid === "function") ? decode_devid(ID, DEVICE_TYPE_IMU) : null
 
             if (("IMU" in log.messageTypes) && ("instances" in log.messageTypes.IMU) && (i in log.messageTypes.IMU.instances)) {
                 // Считаем частоту постоянной: на деле это не так, но переменная частота ломает усреднение FFT
