@@ -66,6 +66,23 @@ function step1_summary(page) {
     })
 }
 
+// Ширина графиков ids равна ширине контейнера (±2 px; Plotly берёт ширину у контейнера с рамкой — getComputedStyle
+// при box-sizing: border-box). Проверять в окне без полностраничного снимка: снимок меняет размер окна, обработчик
+// responsive у Plotly подгоняет графики и маскирует узкий. Подгонка размера (Plots.resize) отложена — ждём до 5 с
+async function assert_plot_widths(page, ids) {
+    const widths = (ids) => ids.map((id) => {
+        const gd = document.getElementById(id)
+        return [id, gd._fullLayout.width, gd.getBoundingClientRect().width]
+    })
+    await page.waitForFunction((ids) => ids.every((id) => {
+        const gd = document.getElementById(id)
+        return Math.abs(gd._fullLayout.width - gd.getBoundingClientRect().width) <= 2
+    }), ids, { timeout: 5000 }).catch(() => {})
+    for (const [id, plot_width, box_width] of await page.evaluate(widths, ids)) {
+        assert.ok(Math.abs(plot_width - box_width) <= 2, id + ': ширина графика ' + plot_width + ' px — ширина контейнера ' + box_width + ' px')
+    }
+}
+
 // Запомнить объекты FFT экземпляров гироскопа и проверить, что они те же: перерисовка без пересчёта FFT
 function remember_fft(page) {
     return page.evaluate(() => { window.__fft = state.gyro.map((g) => g?.FFT ?? null) })
@@ -355,6 +372,9 @@ async function main() {
 
         // Фон графиков шага 1 и скриншот
         assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.paper_bgcolor), surface, 'фон спектра — --surface')
+        // Ширина графиков шага — до его снимка (узкий график после регистрации в скрытой секции ловит проверка после
+        // перезагрузки в конце: снимок step0.png уже включил autosize всем графикам)
+        await assert_plot_widths(page, ['Spectrum1', 'Spectrogram1'])
         await page.screenshot({ path: path.join(shots, 'step1.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
@@ -526,6 +546,7 @@ async function main() {
         // Фон графиков шага 2 и скриншот
         assert.equal(await page.evaluate(() => document.getElementById('Spectrum2').layout.paper_bgcolor), surface, 'фон спектра шага 2 — --surface')
         assert.equal(await page.evaluate(() => document.getElementById('Bode2').layout.paper_bgcolor), surface, 'фон бодэ — --surface')
+        await assert_plot_widths(page, ['Spectrum2', 'Bode2', 'Spectrogram2'])
         await page.screenshot({ path: path.join(shots, 'step2.png'), fullPage: true })
 
         // «Принять»: значения формы, метрики и отметки против лога в state.steps[2], открыт шаг 3
@@ -668,6 +689,7 @@ async function main() {
             assert.equal(g3[id].with_data, g3[id].traces, id + ': все трассы с данными')
             assert.equal(g3[id].bg, surface, id + ': фон — --surface')
         }
+        await assert_plot_widths(page, ['Spectrum3', 'DTerm3', 'Bode3'])
         assert.ok(g3.Spectrum3.groups.pre.visible.every((v) => v === 'legendonly'), '«до фильтров» — только в легенде: ' + JSON.stringify(g3.Spectrum3.groups.pre))
         assert.ok([...g3.Spectrum3.groups.log.visible, ...g3.Spectrum3.groups.sel.visible].every((v) => v === true), 'как в логе и выбранный — видны')
         assert.equal(g3.Spectrum3.groups.sel.title, 'выбранный: Свой', 'в легенде спектра — название выбранной строки')
@@ -775,6 +797,20 @@ async function main() {
         // Размер винта переживает перезагрузку страницы (localStorage). Перезагрузка забывает лог — поэтому в самом конце
         await page.reload({ waitUntil: 'networkidle' })
         assert.equal(await page.inputValue('#prop_in'), '10', 'размер винта из памяти браузера после перезагрузки')
+
+        // Ширина графиков, впервые показанных после регистрации в скрытой секции. Проверки ширины выше её не ловят:
+        // первый же полностраничный снимок (step0.png) меняет размер окна, обработчик responsive у Plotly включает
+        // autosize всем графикам, и даже скрытым, — дальше любой react берёт ширину контейнера. После перезагрузки
+        // снимков ещё не было: лог заново и шаги 1–3 по очереди, без снимков
+        await page.setInputFiles('#fileItem', log_path)
+        await page.locator('#log_verdict').waitFor({ state: 'visible', timeout: 180000 })
+        await wait_overlay(page)
+        assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.autosize ?? null), null, 'снимков после перезагрузки не было: autosize не включён')
+        for (const [button, ids] of [[2, ['Spectrum1', 'Spectrogram1']], [3, ['Spectrum2', 'Bode2', 'Spectrogram2']], [4, ['Spectrum3', 'DTerm3', 'Bode3']]]) {
+            await page.click('#wizbar button:nth-child(' + button + ')')
+            await wait_overlay(page)
+            await assert_plot_widths(page, ids)
+        }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
         console.log('tunewizard-browser: шаги 0–3 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
