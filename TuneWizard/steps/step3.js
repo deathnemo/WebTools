@@ -1,14 +1,16 @@
 // Шаг 3 «Низкочастотные фильтры»: размер винта, варианты INS_GYRO_FILTER, фильтров ПИД и пределов ускорения
 // (core/lowpass.js) со сравнением с логом — шум гироскопа после фильтров, шум D-составляющей, задержка путей P и D,
 // — форма параметров с описаниями из ../FilterReview/params.json, метрики значений формы и «Принять».
-// Notch-база — принятое на шаге 2 (state.steps[2].accepted), иначе notch из лога. Графики — задача 4 этапа 3.
+// Notch-база — принятое на шаге 2 (state.steps[2].accepted), иначе notch из лога. Графики (реестр plots.js) — спектр
+// гироскопа после фильтров, спектр D-составляющей и бодэ путей P и D для выбранной строки таблицы против лога.
 // Форма строится своим кодом, а не load_param_inputs (Libraries/ParameterMetadata.js): тот ищет поле по id = имени
 // параметра, а поле INS_GYRO_FILTER уже есть в форме шага 2. Поля шага 3 — id="lpf_<имя>".
 //
 // Нужны глобалы страницы: core/lowpass.js (lowpass_*, prop_*, LOWPASS_AXES), core/candidates.js (candidate_key),
-// Libraries/Param_Helpers.js (param_to_string), Libraries/LoadingOverlay.js (loading_call), wizard.js (state,
-// set_step, html_escape), steps/step1.js (step1, step1_ready, step1_prepare, values_from_log) и
-// steps/step2.js (step2_signed, step2_tile, step2_sensor — общий модуль помощников шагов появится на этапе 4).
+// Libraries/Param_Helpers.js (param_to_string), Libraries/LoadingOverlay.js (loading_call), plots.js (register_plot,
+// render_plot, plot), wizard.js (state, set_step, html_escape), steps/step1.js (step1, step1_ready, step1_prepare,
+// values_from_log, radio_value, SPEC_AXES) и steps/step2.js (step2_signed, step2_tile, step2_sensor — общий модуль
+// помощников шагов появится на этапе 4).
 
 // Внутреннее состояние шага
 const step3 = {
@@ -25,6 +27,8 @@ const step3 = {
     flags: null,              // id → lowpass_flags против «Как в логе»
     custom_row: null,         // «Свой» — значения формы, не совпавшие ни с одним вариантом: { id, title, values, evaluation, flags }
     selected_id: null,        // выбранная в таблице строка (читать через step3_selected_row)
+    bode_log: null,           // lowpass_bode значений лога — один раз на расчёт; null — нет контекста оценки
+    bode_sel: null,           // { key, bode } — бодэ выбранной строки (key — candidate_key её значений); null — не считалось
     key: null,                // для какого расчёта посчитаны варианты (step3_calc_key)
     gyro_ref: null,           // и для какого объекта state.gyro
     error: null,              // ошибка расчёта шага 1: показывается в вердикте вместо результатов
@@ -43,6 +47,20 @@ const step3_edit_delay_ms = 400
 
 // Оси с метриками словами: именительный и родительный падежи
 const step3_axis_names = { roll: { nom: "крен", gen: "крена" }, pitch: { nom: "тангаж", gen: "тангажа" } }
+
+// Типы трасс графиков: до фильтров (только спектр гироскопа), как в логе, выбранная строка таблицы; штрих — по типу
+const spec3_types = ["pre", "log", "sel"]
+const spec3_type_names = { pre: "до фильтров", log: "как в логе", sel: "выбранный" }
+const spec3_dash = { pre: "dot", log: "dash", sel: "solid" }
+// Типы трасс D-составляющей и бодэ — без «до фильтров»
+const dterm3_types = ["log", "sel"]
+// Пути бодэ: P — фильтр гироскопа, notch и FLTE; D — ещё и FLTD
+const bode3_paths = ["P", "D"]
+// Подграфики бодэ сверху вниз: поле lowpass_bode, оси подграфика, подсказка значения
+const bode3_parts = [
+    { field: "amp_dB", xaxis: "x", yaxis: "y", hover: "%{y:.2f} дБ" },
+    { field: "phase_deg", xaxis: "x2", yaxis: "y2", hover: "%{y:.1f}°" },
+]
 
 // ---------- Подписи ----------
 
@@ -163,14 +181,17 @@ function step3_metrics_summary(e) {
 // ---------- Инициализация и сброс ----------
 
 function step3_init() {
-    // Пороги во вступлении — из lowpass_rules, чтобы текст не расходился с ядром. Свой атрибут data-rule3:
-    // шаг 2 перебирает все [data-rule] документа
+    step3_setup_plots()
+
+    // Пороги во вступлении и частоты задержки в подписи бодэ — из lowpass_rules, чтобы текст не расходился с ядром.
+    // Свой атрибут data-rule3: шаг 2 перебирает все [data-rule] документа
     const rules = lowpass_rules
     const rule_texts = {
         band: rules.band_hz[0] + "–" + rules.band_hz[1] + " Гц",
         noise: rules.max_noise_increase_dB + " дБ",
         lag_hz: lowpass_lag_hz() + " Гц",
         lag: rules.max_lag_increase_ms + " мс",
+        lag_freqs: rules.lag_freqs_hz.join(" и ") + " Гц",
     }
     for (const span of document.querySelectorAll("[data-rule3]")) {
         span.textContent = rule_texts[span.dataset.rule3]
@@ -206,24 +227,35 @@ function step3_init() {
     window.addEventListener("blur", step3_pointer_released)
     document.getElementById("cand3_apply").addEventListener("click", step3_apply)
     document.getElementById("lpf_accept").addEventListener("click", step3_accept)
-    // Выбор варианта в таблице (строки перерисовываются — слушаем таблицу)
+    // Выбор варианта в таблице (строки перерисовываются — слушаем таблицу): вердикт и графики выбранного
     document.getElementById("candidates3").addEventListener("change", (e) => {
         if (e.target.name === "cand3") {
             step3.selected_id = e.target.value
             if (step3_ready() && (step3.candidates != null)) {
-                step3_render_verdict()
+                step3_try(() => {
+                    step3_render_verdict()
+                    step3_redraw_plots()
+                })
             }
         }
     })
+    // Ось бодэ: перерисовать только посчитанное (бодэ обеих осей считается одним вызовом lowpass_bode)
+    for (const id of ["bode3_roll", "bode3_pitch"]) {
+        document.getElementById(id).addEventListener("change", () => {
+            if (step3_ready() && (step3.candidates != null)) {
+                step3_try(bode3_redraw)
+            }
+        })
+    }
 }
 
-// Новый лог или ошибка загрузки: забыть варианты, расчёт и форму (имена пределов ускорения зависят от лога).
-// Размер винта в поле остаётся: он про аппарат, а не про лог
+// Новый лог или ошибка загрузки: забыть варианты, расчёт и форму (имена пределов ускорения зависят от лога),
+// очистить графики. Размер винта в поле остаётся: он про аппарат, а не про лог
 function step3_reset() {
     Object.assign(step3, {
         form_built: false, form_names: null, filled: false, base: null, prop_in: null, ctx: null, candidates: null, evaluations: null,
-        flags: null, custom_row: null, selected_id: null, key: null, gyro_ref: null, error: null, edit_prop: null, edit_form: null,
-        edit_postponed: false,
+        flags: null, custom_row: null, selected_id: null, bode_log: null, bode_sel: null, key: null, gyro_ref: null, error: null,
+        edit_prop: null, edit_form: null, edit_postponed: false,
     })
     clearTimeout(step3.edit_timer)
     step3.edit_timer = null
@@ -234,6 +266,7 @@ function step3_reset() {
     for (const id of ["cand3_apply", "lpf_accept"]) {
         document.getElementById(id).disabled = true
     }
+    step3_clear_plots()
 }
 
 // ---------- Размер винта ----------
@@ -564,9 +597,10 @@ function step3_ensure_step1() {
     return false
 }
 
-// Варианты и их оценка против «Как в логе» для текущего интервала, notch-базы и размера винта. Выбор строки
-// сохраняется, если пользователь выбрал не строку по умолчанию (рекомендованную или «Как в логе») и такая строка
-// осталась; иначе выбрана новая рекомендованная. Без данных гироскопа до фильтров — варианты без оценки
+// Варианты и их оценка против «Как в логе» для текущего интервала, notch-базы и размера винта, бодэ лога для
+// графика (один раз на расчёт; бодэ выбранной строки — step3_selected_bode). Выбор строки сохраняется, если
+// пользователь выбрал не строку по умолчанию (рекомендованную или «Как в логе») и такая строка осталась; иначе
+// выбрана новая рекомендованная. Без данных гироскопа до фильтров — варианты без оценки и бодэ
 function step3_compute() {
     const previous = step3.selected_id
     const previous_default = (step3.candidates != null) ? (step3_recommended_id() ?? "log") : null
@@ -580,6 +614,8 @@ function step3_compute() {
     step3.evaluations = null
     step3.flags = null
     step3.custom_row = null
+    step3.bode_log = null
+    step3.bode_sel = null
 
     const sensor = step2_sensor()
     const range = [state.settings.start, state.settings.end]
@@ -591,6 +627,7 @@ function step3_compute() {
         }
         step3.evaluations = evaluations
         step3.flags = Object.fromEntries(step3.candidates.map((c) => [c.id, lowpass_flags(evaluations[c.id], evaluations.log)]))
+        step3.bode_log = lowpass_bode(step3_log_candidate().values, step3.ctx)
     }
     step3_update_custom()
     const keep = (previous != null) && (previous !== previous_default) && step3_rows().some((r) => r.id === previous)
@@ -624,6 +661,11 @@ function step3_rows() {
         rows.push(step3.custom_row)
     }
     return rows
+}
+
+// Вариант «Как в логе» (lowpass_candidates ставит его первым и не выбрасывает при совпадениях)
+function step3_log_candidate() {
+    return step3.candidates.find((c) => c.id === "log")
 }
 
 // Вариант с теми же значениями, что values; null — таких нет
@@ -808,12 +850,14 @@ function step3_redraw_all() {
         }
         document.getElementById("cand3_apply").disabled = true
         step3_verdict("fail", step3.error ?? "Расчёт спектра шага 1 не готов")
+        step3_clear_plots()
         return
     }
     step3_render_candidates()
     step3_render_metrics()
     step3_render_warnings()
     step3_render_verdict()
+    step3_redraw_plots()
 }
 
 // Ячейка таблицы: text — основное значение, sub — мелкая строка, cls — "better" | "worse" | "", title — подсказка
@@ -1139,4 +1183,333 @@ function step3_render_verdict() {
         action = "Выберите его в таблице и нажмите «Применить вариант», затем «Принять»."
     }
     step3_verdict(status, "Рекомендуется «" + row.title + "»" + worse + ". Меняется: " + changes.join(", ") + "." + numbers + accel_text + " " + action + base_note)
+}
+
+// ---------- Графики ----------
+// Реестр plots.js: графики регистрируются один раз (step3_setup_plots в step3_init), дальше данные меняются на месте
+// и render_plot; цвета — только в хуках on_theme. «Выбранный» — step3_selected_row(): строка с отмеченным радио
+// или «Свой» после правки формы. Без оценки вариантов (нет данных, ошибка, новый лог) графики пустые
+
+// Индекс трассы спектра гироскопа: тип t (spec3_types), ось a (SPEC_AXES)
+function spec3_trace_index(t, a) {
+    return t * SPEC_AXES.length + a
+}
+
+// Индекс трассы D-составляющей: ось a (ключи lowpass_pid_axes), тип t (dterm3_types)
+function dterm3_trace_index(a, t) {
+    return a * dterm3_types.length + t
+}
+
+// Индекс трассы бодэ: подграфик s (bode3_parts), путь p (bode3_paths), тип t (dterm3_types)
+function bode3_trace_index(s, p, t) {
+    return (s * bode3_paths.length + p) * dterm3_types.length + t
+}
+
+// Цвета спектра гироскопа: ось — цвет оси палитры (штрих — по типу, задан при регистрации); вертикали
+// INS_GYRO_FILTER — цвет текста
+function spec3_theme(palette, data, layout) {
+    for (let t = 0; t < spec3_types.length; t++) {
+        for (let a = 0; a < SPEC_AXES.length; a++) {
+            data[spec3_trace_index(t, a)].line.color = palette.axis[SPEC_AXES[a]]
+        }
+    }
+    for (const shape of layout.shapes) {
+        shape.line.color = palette.ink
+    }
+}
+
+// Цвета D-составляющей: крен — цвет оси X, тангаж — оси Y (оси гироскопа из lowpass_pid_axes)
+function dterm3_theme(palette, data, layout) {
+    const axes = Object.keys(lowpass_pid_axes)
+    for (let a = 0; a < axes.length; a++) {
+        for (let t = 0; t < dterm3_types.length; t++) {
+            data[dterm3_trace_index(a, t)].line.color = palette.axis[lowpass_pid_axes[axes[a]].gyro]
+        }
+    }
+}
+
+// Цвета бодэ: путь P — первый цвет палитры, путь D — второй; вертикали частот задержки — цвет текста
+function bode3_theme(palette, data, layout) {
+    for (let s = 0; s < bode3_parts.length; s++) {
+        for (let p = 0; p < bode3_paths.length; p++) {
+            for (let t = 0; t < dterm3_types.length; t++) {
+                data[bode3_trace_index(s, p, t)].line.color = palette.series[p]
+            }
+        }
+    }
+    for (const shape of layout.shapes) {
+        shape.line.color = palette.ink
+    }
+}
+
+// Ось графика шага: подпись, линейная шкала, рамка
+function step3_plot_axis(title) {
+    return { title: { text: title }, type: "linear", zeroline: false, showline: true, mirror: true }
+}
+
+// Вертикаль на частоте x (положение и видимость меняет перерисовка): xref/yref — оси подграфика, dash — штрих
+function step3_plot_vline(name, xref, yref, x, dash) {
+    return { type: "line", name: name, visible: false, layer: "below", xref: xref, yref: yref, x0: x, x1: x, y0: 0, y1: 1, opacity: 0.8,
+             line: { width: 1, dash: dash } }
+}
+
+function step3_setup_plots() {
+    const hover = "<extra></extra>%{meta}<br>%{x:.1f} Гц<br>%{y:.2f} дБ"
+    const margin = { b: 50, l: 60, r: 20, t: 20 }
+
+    // Спектр гироскопа после фильтров: тип × ось X/Y/Z; «до фильтров» по умолчанию только в легенде
+    const spec_data = []
+    for (let t = 0; t < spec3_types.length; t++) {
+        const type = spec3_types[t]
+        for (let a = 0; a < SPEC_AXES.length; a++) {
+            spec_data[spec3_trace_index(t, a)] = {
+                mode: "lines",
+                name: SPEC_AXES[a].toUpperCase(),
+                meta: spec3_type_names[type] + " · " + SPEC_AXES[a].toUpperCase(),
+                legendgroup: type,
+                legendgrouptitle: { text: spec3_type_names[type] },
+                line: { width: 1.2, dash: spec3_dash[type] },
+                visible: false,
+                hovertemplate: hover,
+                x: [],
+                y: [],
+            }
+        }
+    }
+    register_plot("Spectrum3", spec_data, {
+        xaxis: step3_plot_axis("Частота, Гц"),
+        yaxis: step3_plot_axis("Амплитуда, дБ"),
+        showlegend: true,
+        legend: { groupclick: "toggleitem" },
+        // INS_GYRO_FILTER лога — пунктир, выбранного — сплошная (name — тип)
+        shapes: dterm3_types.map((type) => step3_plot_vline(type, "x", "paper", 0, spec3_dash[type])),
+        margin: margin,
+    }, { on_theme: spec3_theme })
+
+    // Спектр D-составляющей: ось крен/тангаж × тип, до loop_rate / 2
+    const axes = Object.keys(lowpass_pid_axes)
+    const dterm_data = []
+    for (let a = 0; a < axes.length; a++) {
+        const name = step3_axis_names[axes[a]].nom
+        for (let t = 0; t < dterm3_types.length; t++) {
+            const type = dterm3_types[t]
+            dterm_data[dterm3_trace_index(a, t)] = {
+                mode: "lines",
+                name: spec3_type_names[type],
+                meta: name + " · " + spec3_type_names[type],
+                legendgroup: axes[a],
+                legendgrouptitle: { text: name.charAt(0).toUpperCase() + name.slice(1) },
+                line: { width: 1.2, dash: spec3_dash[type] },
+                visible: false,
+                hovertemplate: hover,
+                x: [],
+                y: [],
+            }
+        }
+    }
+    register_plot("DTerm3", dterm_data, {
+        xaxis: step3_plot_axis("Частота, Гц"),
+        yaxis: step3_plot_axis("D-составляющая, дБ (отн.)"),
+        showlegend: true,
+        legend: { groupclick: "toggleitem" },
+        margin: margin,
+    }, { on_theme: dterm3_theme })
+
+    // Бодэ путей P и D: два подграфика друг под другом (амплитуда сверху, фаза снизу), масштаб по частоте общий.
+    // В легенде — трассы амплитуды; фаза в той же группе и включается вместе с ними
+    const bode_data = []
+    for (let s = 0; s < bode3_parts.length; s++) {
+        const part = bode3_parts[s]
+        for (let p = 0; p < bode3_paths.length; p++) {
+            for (let t = 0; t < dterm3_types.length; t++) {
+                const name = "путь " + bode3_paths[p] + " · " + spec3_type_names[dterm3_types[t]]
+                bode_data[bode3_trace_index(s, p, t)] = {
+                    mode: "lines",
+                    name: name,
+                    meta: name,
+                    legendgroup: bode3_paths[p] + ":" + dterm3_types[t],
+                    showlegend: s == 0,
+                    xaxis: part.xaxis,
+                    yaxis: part.yaxis,
+                    line: { width: 1.5, dash: spec3_dash[dterm3_types[t]] },
+                    visible: false,
+                    hovertemplate: "<extra></extra>%{meta}<br>%{x:.2f} Гц<br>" + part.hover,
+                    x: [],
+                    y: [],
+                }
+            }
+        }
+    }
+    // Вертикали на частотах задержки таблицы (10 и 30 Гц) в обоих подграфиках
+    const bode_lines = []
+    for (const f of lowpass_rules.lag_freqs_hz) {
+        for (const part of bode3_parts) {
+            bode_lines.push(step3_plot_vline("lag" + f, part.xaxis, part.yaxis + " domain", f, "dot"))
+        }
+    }
+    register_plot("Bode3", bode_data, {
+        xaxis: { type: "linear", zeroline: false, showline: true, mirror: true },
+        xaxis2: { ...step3_plot_axis("Частота, Гц"), matches: "x" },
+        yaxis: { ...step3_plot_axis("Амплитуда, дБ"), domain: [0.52, 1] },
+        yaxis2: { ...step3_plot_axis("Фаза, °"), domain: [0, 0.48] },
+        showlegend: true,
+        grid: { rows: 2, columns: 1, pattern: "independent" },
+        shapes: bode_lines,
+        margin: margin,
+    }, { on_theme: bode3_theme })
+}
+
+// Видимость трассы после смены данных: без данных — вне легенды; с данными — выбранная пользователем в легенде,
+// а после очистки — по умолчанию shown (true или "legendonly")
+function step3_trace_visibility(trace, shown) {
+    if (trace.x.length == 0) {
+        trace.visible = false
+    } else if (trace.visible === false) {
+        trace.visible = shown
+    }
+}
+
+// Пустые графики шага: без расчёта (нет данных гироскопа, ошибка, новый лог)
+function step3_clear_plots() {
+    for (const id of ["Spectrum3", "DTerm3", "Bode3"]) {
+        const p = plot(id)
+        if (p == null) {
+            continue
+        }
+        for (const trace of p.data) {
+            trace.x = []
+            trace.y = []
+            trace.visible = false
+        }
+        for (const shape of p.layout.shapes ?? []) {
+            shape.visible = false
+        }
+        render_plot(id)
+    }
+    document.getElementById("dterm3_absent").hidden = true
+}
+
+// Графики выбранной строки (step3_selected_row) против лога; без оценки лога (нет данных гироскопа до фильтров) —
+// пустые
+function step3_redraw_plots() {
+    const row = step3_selected_row()
+    const log = step3.evaluations?.log ?? null
+    if ((row == null) || (log == null)) {
+        step3_clear_plots()
+        return
+    }
+    spec3_redraw(row, log)
+    dterm3_redraw(row, log)
+    bode3_redraw()
+}
+
+// Подпись выбранной строки для подсказок графиков
+function step3_selected_title(row) {
+    return spec3_type_names.sel + " «" + row.title + "»"
+}
+
+// Спектр гироскопа после фильтров (evaluate_lowpass → gyro.spectrum и gyro.pre_spectrum, дБ, первичный гироскоп):
+// до фильтров, как в логе, выбранная строка; вертикали на INS_GYRO_FILTER лога и выбранной строки (фильтр
+// выключен или поле пустое — без вертикали)
+function spec3_redraw(row, log) {
+    const p = plot("Spectrum3")
+    const sources = { pre: log.gyro.pre_spectrum, log: log.gyro.spectrum, sel: row.evaluation?.gyro.spectrum ?? null }
+    for (let t = 0; t < spec3_types.length; t++) {
+        const type = spec3_types[t]
+        const spectrum = sources[type]
+        for (let a = 0; a < SPEC_AXES.length; a++) {
+            const trace = p.data[spec3_trace_index(t, a)]
+            trace.x = spectrum?.bins ?? []
+            trace.y = spectrum?.[SPEC_AXES[a]] ?? []
+            if (type === "sel") {
+                trace.meta = step3_selected_title(row) + " · " + SPEC_AXES[a].toUpperCase()
+                trace.legendgrouptitle.text = spec3_type_names.sel + ": " + row.title
+            }
+            step3_trace_visibility(trace, (type === "pre") ? "legendonly" : true)
+        }
+    }
+    const hz = { log: log.values.INS_GYRO_FILTER, sel: row.values.INS_GYRO_FILTER }
+    for (const shape of p.layout.shapes) {
+        const f = hz[shape.name]
+        shape.visible = Number.isFinite(f) && (f > 0)
+        shape.x0 = shape.visible ? f : 0
+        shape.x1 = shape.x0
+    }
+    render_plot("Spectrum3")
+}
+
+// Спектр D-составляющей крена и тангажа (evaluate_lowpass → dterm, дБ с Kd лога, бины 0…loop_rate / 2): лог и
+// выбранная строка. У оси без Kd в логе или с Kd = 0 трасс нет — причина в подписи #dterm3_absent
+function dterm3_redraw(row, log) {
+    const p = plot("DTerm3")
+    const axes = Object.keys(lowpass_pid_axes)
+    const absent = []
+    for (let a = 0; a < axes.length; a++) {
+        const axis = axes[a]
+        for (let t = 0; t < dterm3_types.length; t++) {
+            const type = dterm3_types[t]
+            const e = (type === "log") ? log : row.evaluation
+            const dterm = e?.dterm?.[axis] ?? null
+            const trace = p.data[dterm3_trace_index(a, t)]
+            trace.x = (dterm != null) ? e.dterm.bins : []
+            trace.y = (dterm != null) ? dterm.spectrum : []
+            if (type === "sel") {
+                trace.meta = step3_axis_names[axis].nom + " · " + step3_selected_title(row)
+            }
+            step3_trace_visibility(trace, true)
+        }
+        if (log.dterm[axis] == null) {
+            const name = "ATC_RAT_" + lowpass_pid_axes[axis].param + "_D"
+            absent.push("Трассы " + step3_axis_names[axis].gen + " нет: " + ((log.kd[axis] === 0) ? "D выключен (" + name + " = 0)" : "в логе нет " + name) + ".")
+        }
+    }
+    const note = document.getElementById("dterm3_absent")
+    note.textContent = absent.join(" ")
+    note.hidden = absent.length == 0
+    render_plot("DTerm3")
+}
+
+// Бодэ выбранной строки: у строки со значениями лога — бодэ лога (step3.bode_log), иначе lowpass_bode при смене её
+// значений (кэш step3.bode_sel по candidate_key; сбрасывается с расчётом). null — строки или контекста оценки нет
+function step3_selected_bode(row) {
+    if ((row == null) || (step3.ctx == null)) {
+        return null
+    }
+    const key = candidate_key(row.values)
+    if (key === candidate_key(step3_log_candidate().values)) {
+        return step3.bode_log
+    }
+    if (step3.bode_sel?.key !== key) {
+        step3.bode_sel = { key: key, bode: lowpass_bode(row.values, step3.ctx) }
+    }
+    return step3.bode_sel.bode
+}
+
+// Бодэ путей P и D оси, выбранной радио «Крен / Тангаж»: амплитуда и фаза лога и выбранной строки; вертикали на
+// частотах задержки — при данных
+function bode3_redraw() {
+    const p = plot("Bode3")
+    const axis = radio_value("bode3_axis") ?? "roll"
+    const row = step3_selected_row()
+    const sources = { log: step3.bode_log, sel: step3_selected_bode(row) }
+    for (let s = 0; s < bode3_parts.length; s++) {
+        for (let k = 0; k < bode3_paths.length; k++) {
+            for (let t = 0; t < dterm3_types.length; t++) {
+                const type = dterm3_types[t]
+                const bode = sources[type]
+                const trace = p.data[bode3_trace_index(s, k, t)]
+                trace.x = bode?.freq ?? []
+                trace.y = (bode != null) ? bode[axis][bode3_paths[k]][bode3_parts[s].field] : []
+                if ((type === "sel") && (row != null)) {
+                    trace.meta = "путь " + bode3_paths[k] + " · " + step3_selected_title(row)
+                }
+                step3_trace_visibility(trace, true)
+            }
+        }
+    }
+    const drawn = p.data.some((trace) => trace.x.length > 0)
+    for (const shape of p.layout.shapes) {
+        shape.visible = drawn
+    }
+    render_plot("Bode3")
 }

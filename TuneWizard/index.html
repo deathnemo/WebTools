@@ -562,10 +562,27 @@ tr:last-child td{border-bottom:0}
     <button type="button" id="lpf_accept" disabled>Принять</button>
   </div>
 
-  <!-- Места под графики шага 3 (задача 4 этапа 3): спектр гироскопа после фильтров, спектр D-составляющей, бодэ путей P и D -->
-  <div id="Spectrum3" class="plot" hidden></div>
-  <div id="DTerm3" class="plot" hidden></div>
-  <div id="Bode3" class="plot plot--tall" hidden></div>
+  <div class="head"><span class="eyebrow">Спектр</span><h2>Шум гироскопа после фильтров: как в логе и выбранный вариант</h2></div>
+  <div id="Spectrum3" class="plot"></div>
+  <p class="note">Гироскоп — первичный, средний спектр за интервал анализа в дБ. «Как в логе» и «выбранный» — оценка «после», как на шаге 2: данные до фильтров через notch-базу и INS_GYRO_FILTER варианта; «до фильтров» включается в легенде. Вертикали — INS_GYRO_FILTER: пунктир — лог, сплошная — выбранный вариант. Выбранный — строка таблицы с отмеченным выбором, после правки формы — «Свой».</p>
+
+  <div class="head"><span class="eyebrow">D-составляющая</span><h2>Спектр D-составляющей крена и тангажа</h2></div>
+  <div id="DTerm3" class="plot"></div>
+  <p class="note" id="dterm3_absent" hidden></p>
+  <p class="note">Модель, а не запись лога: спектр гироскопа после фильтров варианта, свёрнутый к половине частоты контура (SCHED_LOOP_RATE / 2), × производная ошибки × FLTE × FLTD. Фильтры ПИД — первого порядка на частоте контура, как в AC_PID.cpp; Kd — из лога, он одинаков у всех вариантов, поэтому уровень относительный: смотрите разницу между линиями. Пунктир — как в логе, сплошная — выбранный вариант.</p>
+
+  <div class="head"><span class="eyebrow">Бодэ</span><h2>Амплитуда и фаза путей P и D</h2></div>
+  <div class="row">
+    <fieldset class="fld">
+      <legend>Ось</legend>
+      <div class="opts">
+        <label><input type="radio" name="bode3_axis" id="bode3_roll" value="roll" checked><span>Крен</span></label>
+        <label><input type="radio" name="bode3_axis" id="bode3_pitch" value="pitch"><span>Тангаж</span></label>
+      </div>
+    </fieldset>
+  </div>
+  <div id="Bode3" class="plot plot--tall"></div>
+  <p class="note">Путь P — фильтр гироскопа, notch-база и FLTE; путь D — ещё и FLTD (производная ошибки одинакова у всех вариантов и не показана). Амплитуда и фаза — средние по окнам интервала: notch следует за оборотами; гироскоп первичный. Пунктир — как в логе, сплошная — выбранный вариант; вертикали — <span data-rule3="lag_freqs">10 и 30 Гц</span>, частоты задержки в таблице.</p>
 </section>
 <section data-step="4" hidden>
   <div class="head"><span class="eyebrow">04 · PID по осям</span><h2>Шаг появится на этапе 4</h2></div>
