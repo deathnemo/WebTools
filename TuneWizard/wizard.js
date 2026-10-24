@@ -241,6 +241,9 @@ function on_show_step(n) {
     if ((n === 1) && (typeof step1_show === "function")) {
         step1_show()
     }
+    if ((n === 2) && (typeof step2_show === "function")) {
+        step2_show()
+    }
 }
 
 function set_step(n) {
@@ -281,6 +284,9 @@ function init_wizard() {
     setup_flight_plot()
     if (typeof step1_init === "function") {
         step1_init()
+    }
+    if (typeof step2_init === "function") {
+        step2_init()
     }
     set_step(0)
 }
@@ -349,6 +355,9 @@ function reset() {
     state.file = null
     if (typeof step1_reset === "function") {
         step1_reset()
+    }
+    if (typeof step2_reset === "function") {
+        step2_reset()
     }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {

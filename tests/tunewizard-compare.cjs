@@ -4,7 +4,10 @@
 // на пакет, версией фильтра (как выбрана в FilterReview) и шкалой частоты (Гц, линейная ось); данные графиков
 // сравниваются поэлементно: средний спектр первичного гироскопа (до / после / оценка «после» по X, Y, Z)
 // и спектрограмма (оси и первые 5 строк матрицы) — в двух конфигурациях: дБ без алиасинга и PSD со свёрнутым
-// алиасингом. Допуск |a − b| ≤ 1e-6·max(1, |a|); при расхождении — первая позиция и значения, код выхода 1.
+// алиасингом. Шаг 2 с параметрами из лога в обоих инструментах: бодэ (частоты, средняя амплитуда в дБ, средняя
+// фаза) для гироскопа, выбранного в FilterReview, с его выбором фазы (развёрнутая или ±180°) и с противоположным,
+// и оценка «после» по X, Y, Z. Допуск |a − b| ≤ 1e-6·max(1, |a|); при расхождении — первая позиция и значения,
+// код выхода 1.
 // Нужны те же лог, браузер и python, что для tests/tunewizard-browser.cjs; без лога тест пропускается.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -79,6 +82,48 @@ function snapshot_wizard(page) {
         const heat = document.getElementById('Spectrogram1').data[0]
         return { traces, heat: { x: snap(heat.x), y: snap(heat.y), z: heat.z.slice(0, 5).map(snap), rows: heat.z.length } }
     })
+}
+
+// Бодэ FilterReview: выбранный гироскоп и шкала фазы, частоты, средняя амплитуда и фаза (Bode.data[2], [3])
+function snapshot_filterreview_bode(page) {
+    return page.evaluate(() => {
+        const snap = (a) => (a == null) ? null : Array.from(a, (v) => Number.isFinite(v) ? v : String(v))
+        return {
+            inst: [0, 1, 2].find((i) => document.getElementById('BodeGyroInst' + i).checked),
+            wrap: document.getElementById('ScaleWrap').checked,
+            x: snap(Bode.data[2].x),
+            amp: snap(Bode.data[2].y),
+            phase: snap(Bode.data[3].y),
+        }
+    })
+}
+
+// Шаг 2 мастера: бодэ (Bode2.data[2], [3]) и оценка «после» по осям (Spectrum2.data[3..5])
+function snapshot_wizard_step2(page) {
+    return page.evaluate(() => {
+        const snap = (a) => (a == null) ? null : Array.from(a, (v) => Number.isFinite(v) ? v : String(v))
+        const bode = document.getElementById('Bode2').data
+        const spectrum = document.getElementById('Spectrum2').data
+        return {
+            inst: [0, 1, 2].find((i) => document.getElementById('bode2_inst' + i).checked),
+            wrap: document.getElementById('bode2_wrap').checked,
+            x: snap(bode[2].x),
+            amp: snap(bode[2].y),
+            phase: snap(bode[3].y),
+            est: [3, 4, 5].map((i) => ({ x: snap(spectrum[i].x), y: snap(spectrum[i].y) })),
+        }
+    })
+}
+
+// Сравнение бодэ одной шкалы фазы; label — подпись конфигурации
+function compare_bode(label, fr_bode, wz_bode) {
+    assert.equal(wz_bode.inst, fr_bode.inst, label + ': тот же гироскоп бодэ')
+    assert.equal(wz_bode.wrap, fr_bode.wrap, label + ': та же шкала фазы')
+    return [
+        compare_arrays(label + ' · бодэ · x (частота)', fr_bode.x, wz_bode.x),
+        compare_arrays(label + ' · бодэ · амплитуда', fr_bode.amp, wz_bode.amp),
+        compare_arrays(label + ' · бодэ · фаза', fr_bode.phase, wz_bode.phase),
+    ]
 }
 
 // Сравнение двух массивов; возвращает { ok, count, max_rel, mismatch }
@@ -178,6 +223,14 @@ async function main() {
         await fr.check('#Aliasing_on')
         await fr.evaluate(() => re_calc())
         const fr_snap_psd = await snapshot_filterreview(fr)
+        // Для шага 2: снова дБ без алиасинга; бодэ гироскопа, выбранного FilterReview, с его шкалой фазы и с противоположной
+        await fr.check('#ScaleLog')
+        await fr.check('#Aliasing_none')
+        await fr.evaluate(() => re_calc())
+        const fr_bode = await snapshot_filterreview_bode(fr)
+        await fr.check(fr_bode.wrap ? '#ScaleUnWrap' : '#ScaleWrap')
+        await fr.evaluate(() => redraw_post_estimate_and_bode())
+        const fr_bode_other = await snapshot_filterreview_bode(fr)
 
         // 2. Мастер: тот же лог, интервал FilterReview, тот же тип лога, окна на пакет и версия фильтра, дБ / Гц / без алиасинга
         const wz = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
@@ -227,13 +280,55 @@ async function main() {
         await wait_overlay(wz)
         const wz_snap_psd = await snapshot_wizard(wz)
 
+        // Шаг 2 мастера: шкалы шага 1 обратно в дБ без алиасинга, параметры формы — из лога; гироскоп бодэ и шкала фазы как в FilterReview
+        await wz.check('#spec_amp_dB')
+        await wait_overlay(wz)
+        await wz.check('#spec_alias_none')
+        await wait_overlay(wz)
+        await wz.click('#wizbar button:nth-child(3)')
+        await wait_overlay(wz)
+        assert.equal(await wz.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'форма шага 2 — значения лога')
+        const set_bode = async (inst, wrap) => {
+            if (!(await wz.isChecked('#bode2_inst' + inst))) {
+                await wz.check('#bode2_inst' + inst)
+                await wait_overlay(wz)
+            }
+            if ((await wz.isChecked('#bode2_wrap')) !== wrap) {
+                await wz.setChecked('#bode2_wrap', wrap)
+                await wait_overlay(wz)
+            }
+        }
+        await set_bode(fr_bode.inst, fr_bode.wrap)
+        const wz_step2 = await snapshot_wizard_step2(wz)
+        await set_bode(fr_bode_other.inst, fr_bode_other.wrap)
+        const wz_step2_other = await snapshot_wizard_step2(wz)
+
         // 3. Сравнение обеих конфигураций
         assert.deepEqual(problems, [], 'ошибки страниц')
         const configs = [['дБ, без алиасинга', fr_snap, wz_snap], ['PSD, свёрнутый алиасинг', fr_snap_psd, wz_snap_psd]]
         let failed_total = 0
         const summary = []
+        // Шаг 2: оценка «после» для значений формы (= лога) против Estimated post FilterReview (дБ, без алиасинга) и бодэ
+        const step2_label = 'шаг 2 (параметры лога)'
+        const step2_results = () => {
+            const results = []
+            for (let a = 0; a < 3; a++) {
+                const fr_trace = fr_snap.traces[2 * 3 + a]
+                if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
+                    continue
+                }
+                results.push(compare_arrays(step2_label + ' · оценка «после» · ' + AXES[a] + ' · x', fr_trace.x, wz_step2.est[a].x))
+                results.push(compare_arrays(step2_label + ' · оценка «после» · ' + AXES[a] + ' · y', fr_trace.y, wz_step2.est[a].y))
+            }
+            const phase_name = (b) => b.wrap ? 'фаза ±180°' : 'фаза развёрнута'
+            results.push(...compare_bode(step2_label + ', ' + phase_name(fr_bode), fr_bode, wz_step2))
+            results.push(...compare_bode(step2_label + ', ' + phase_name(fr_bode_other), fr_bode_other, wz_step2_other))
+            assert.ok(results.some((r) => r.count > 0), step2_label + ': нет ни одного сравненного значения')
+            return results
+        }
+        configs.push([step2_label, null, null])
         for (const [label, fr_s, wz_s] of configs) {
-            const results = compare_snapshots(label, fr_s, wz_s)
+            const results = (fr_s == null) ? step2_results() : compare_snapshots(label, fr_s, wz_s)
             const failed = results.filter((r) => !r.ok)
             const count = results.reduce((sum, r) => sum + r.count, 0)
             const max_rel = results.reduce((max, r) => Math.max(max, r.max_rel), 0)
@@ -252,7 +347,8 @@ async function main() {
         }
         console.log('tunewizard-compare: совпадение с FilterReview (допуск ' + tolerance + ') — ' + summary.join('; ') + '. Интервал ' + fr_settings.start + '–' +
             fr_settings.end + ' с (у мастера по умолчанию ' + wz_default.join('–') + ' с), окон на пакет ' + fr_settings.window_per_batch + ', окно ' + wz_window +
-            ', версия фильтра ' + wz_fv + ', строк спектрограммы ' + wz_snap.heat.rows)
+            ', версия фильтра ' + wz_fv + ', строк спектрограммы ' + wz_snap.heat.rows + ', гироскоп бодэ ' + (fr_bode.inst + 1) +
+            ', фаза FilterReview по умолчанию ' + (fr_bode.wrap ? '±180°' : 'развёрнута'))
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения страниц:', problems)

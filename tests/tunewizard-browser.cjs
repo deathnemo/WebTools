@@ -74,6 +74,29 @@ function same_fft(page) {
     return page.evaluate(() => state.gyro.every((g, i) => (g?.FFT ?? null) === window.__fft[i]) && state.gyro.some((g) => g?.FFT != null))
 }
 
+// Сводка шага 2: строки таблицы вариантов, рекомендованный вариант, значения формы и метрики
+function step2_summary(page) {
+    return page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#candidates2 tbody tr')]
+        return {
+            titles: rows.map((tr) => tr.querySelector('label').textContent),
+            recommended_rows: rows.filter((tr) => tr.classList.contains('recommended')).length,
+            recommended_marks: (document.getElementById('candidates2').textContent.match(/рекомендуется/g) ?? []).length,
+            best_id: step2.ranking.best_id,
+            verdict: document.getElementById('verdict2').textContent,
+            verdict_class: document.getElementById('verdict2').className,
+            metrics: [...document.querySelectorAll('#metrics2 .stat')].map((tile) => tile.textContent),
+            changed: [...document.querySelectorAll('#notch_form p.changed')].map((p) => p.dataset.name),
+            est_y: Array.from(document.getElementById('Spectrum2').data[3].y),
+        }
+    })
+}
+
+// Ключ значений формы и ключ значений варианта id — одинаковые, если вариант применён
+function form_matches_variant(page, id) {
+    return page.evaluate((id) => candidate_key(values_from_form()) === candidate_key(step2_rows().find((r) => r.id === id).values), id)
+}
+
 async function wait_for_server(page, url, server) {
     for (let i = 0; i < 40; i++) {
         if (server.exitCode != null) {
@@ -267,6 +290,118 @@ async function main() {
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
 
+        // Шаг 2: форма из лога, варианты со сравнением, «Применить вариант», ручная правка, .param, «Принять»
+        await page.click('#wizbar button:nth-child(3)')
+        assert.deepEqual(await visible_steps(page), ['2'])
+        await wait_overlay(page)
+        // Разметка формы по метаданным (load_param_inputs) асинхронна: ждём подписи и список MODE
+        await page.waitForFunction(() => (document.querySelector('label[for="INS_HNTCH_MODE"]') != null) && step2.form_ready, null, { timeout: 30000 })
+        assert.equal(await page.inputValue('#INS_HNTCH_MODE'), '3', 'INS_HNTCH_MODE из лога (ESC-телеметрия)')
+        assert.equal(await page.evaluate(() => document.getElementById('INS_HNTCH_MODE').tagName), 'SELECT', 'MODE — список значений из params.json')
+        assert.equal(await page.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'все поля формы — значения лога')
+        assert.equal(await page.textContent('#notch_form .inlog[data-for="INS_HNTCH_MODE"]'), 'в логе: 3')
+        assert.equal(await page.isDisabled('#INS_HNTC2_FREQ'), true, 'поля выключенного второго notch недоступны')
+        assert.equal(await page.isHidden('#INS_HNTCH_ESCMSK'), true, 'ESCMSK скрыт при версии фильтра ниже 4')
+        const v1 = await step2_summary(page)
+        assert.deepEqual(v1.changed, [], 'до правок изменённых полей нет')
+        assert.ok(v1.titles.includes('Как в логе'), 'строка «Как в логе»: ' + v1.titles.join('; '))
+        assert.ok(v1.titles.some((t) => t.startsWith('Автоподбор')), 'строка автоподбора: ' + v1.titles.join('; '))
+        assert.equal(v1.recommended_rows, 1, 'ровно одна строка помечена как рекомендуемая')
+        assert.equal(v1.recommended_marks, 1, 'ровно одна пометка «рекомендуется»')
+        assert.match(v1.verdict_class, /verdict--(ok|warn)/)
+        // Рекомендованный вариант не хуже лога: по полосе 20–400 Гц и по задержке на 30 Гц (не больше лога + 0.5 мс)
+        const best = await page.evaluate(() => {
+            const e = step2.evaluations
+            const id = step2.ranking.best_id
+            return { band: e[id].band_dB, log_band: e.log.band_dB, lag: e[id].lag_ms[30], log_lag: e.log.lag_ms[30], limit: candidate_rules.max_lag_increase_ms }
+        })
+        assert.ok(best.band <= best.log_band, 'рекомендованный вариант не хуже лога по полосе: ' + JSON.stringify(best))
+        assert.ok(best.lag <= best.log_lag + best.limit, 'и по задержке на 30 Гц: ' + JSON.stringify(best))
+        assert.ok(v1.metrics.some((t) => /дБ/.test(t)) && v1.metrics.some((t) => /мс/.test(t)), 'метрики в дБ и мс: ' + v1.metrics.join(' | '))
+
+        // «Применить вариант»: рекомендованный, а если это лог — автоподбор; форма и оценка «после» меняются
+        const apply_id = (v1.best_id === 'log') ? 'fit' : v1.best_id
+        await page.check('#cand2_' + apply_id)
+        await page.click('#cand2_apply')
+        await wait_overlay(page)
+        assert.equal(await form_matches_variant(page, apply_id), true, 'форма заполнена значениями варианта ' + apply_id)
+        const v2 = await step2_summary(page)
+        assert.ok(v2.changed.length > 0, 'поля, отличные от лога, помечены')
+        assert.notDeepEqual(v2.est_y, v1.est_y, 'оценка «после» на спектре пересчитана')
+
+        // Ручная правка и «Пересчитать фильтры»: строка «Текущий (из формы)»
+        const att = Number(await page.inputValue('#INS_HNTCH_ATT')) + 5
+        await page.fill('#INS_HNTCH_ATT', String(att))
+        await page.dispatchEvent('#INS_HNTCH_ATT', 'change')
+        assert.match(await page.getAttribute('#notch_recalc', 'class') ?? '', /primary/, 'правка подсвечивает «Пересчитать фильтры»')
+        await page.click('#notch_recalc')
+        await wait_overlay(page)
+        const v3 = await step2_summary(page)
+        assert.ok(v3.titles.some((t) => t.startsWith('Текущий (из формы)')), 'строка «Текущий»: ' + v3.titles.join('; '))
+        assert.equal(v3.titles.filter((t) => t.startsWith('Текущий')).length, 1, 'одна строка «Текущий»')
+        assert.notDeepEqual(v3.est_y, v2.est_y, 'оценка «после» для правки пересчитана')
+        assert.ok(v3.metrics.some((t) => /дБ/.test(t)) && v3.metrics.some((t) => /мс/.test(t)), 'метрики в дБ и мс')
+        assert.equal(v3.recommended_marks, 1, 'после «Пересчитать» пометка «рекомендуется» по-прежнему одна')
+
+        // Бодэ: «свернуть фазу» — ось фазы ±180°
+        await page.check('#bode2_wrap')
+        await wait_overlay(page)
+        assert.deepEqual(await page.evaluate(() => document.getElementById('Bode2').layout.yaxis2.range), [-180, 180], 'свёрнутая фаза в ±180°')
+        await page.uncheck('#bode2_wrap')
+        await wait_overlay(page)
+        assert.ok(await page.evaluate(() => document.getElementById('Bode2').data[2].y.length > 0), 'бодэ нарисовано')
+
+        // «Сохранить .param»: загрузка файла с параметрами notch
+        const [download] = await Promise.all([page.waitForEvent('download'), page.click('#notch_save')])
+        assert.equal(download.suggestedFilename(), 'notch.param')
+        const param_text = fs.readFileSync(await download.path(), 'utf8')
+        assert.match(param_text, /^INS_HNTCH_FREQ,/m, '.param содержит INS_HNTCH_FREQ')
+        assert.match(param_text, new RegExp('^INS_HNTCH_ATT,' + att + '$', 'm'), '.param содержит правку INS_HNTCH_ATT')
+        assert.doesNotMatch(param_text, /SCHED_LOOP_RATE|ESCMSK/, 'в .param только INS_*, без ESCMSK при версии фильтра ниже 4')
+
+        // «Загрузить .param»: значение из файла в форму и пересчёт
+        const param_file = path.join(shots, 'test_notch.param')
+        fs.writeFileSync(param_file, '# тест\nINS_HNTCH_ATT,33\nINS_HNTCH_BW 21\nNOT_A_PARAM,1\n')
+        await page.setInputFiles('#notch_load_file', param_file)
+        await page.waitForFunction(() => document.getElementById('INS_HNTCH_ATT').value === '33', null, { timeout: 30000 })
+        await wait_overlay(page)
+        assert.equal(await page.inputValue('#INS_HNTCH_BW'), '21', 'формат MAVProxy из файла')
+        assert.match(await page.textContent('#notch_file_note'), /взято параметров формы: 2 из 22/)
+        fs.rmSync(param_file)
+
+        // Смена интервала на шаге 0 помечает варианты устаревшими, «Подобрать заново» считает их для нового интервала
+        await page.click('#wizbar button:nth-child(1)')
+        await page.fill('#TimeStart', String(start + 20))
+        await page.dispatchEvent('#TimeStart', 'change')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        assert.equal(await page.isVisible('#candidates2_stale'), true, 'варианты помечены устаревшими')
+        assert.match(await page.getAttribute('#cand2_refit', 'class') ?? '', /primary/, '«Подобрать заново» подсвечена')
+        assert.equal(await page.inputValue('#INS_HNTCH_ATT'), '33', 'смена интервала не трогает форму')
+        await page.click('#cand2_refit')
+        await wait_overlay(page)
+        assert.equal(await page.isVisible('#candidates2_stale'), false, 'после «Подобрать заново» варианты актуальны')
+        assert.doesNotMatch(await page.getAttribute('#cand2_refit', 'class') ?? '', /primary/)
+        assert.equal((await step2_summary(page)).recommended_marks, 1, 'для нового интервала снова одна пометка «рекомендуется»')
+
+        // Тема на шаге 2 и скриншоты
+        await page.click('.themebar button[data-t="dark"]')
+        assert.equal(await page.evaluate(() => document.getElementById('Spectrum2').layout.paper_bgcolor), surface, 'спектр шага 2 перекрашен под тёмную тему')
+        assert.equal(await page.evaluate(() => document.getElementById('Bode2').layout.paper_bgcolor), surface, 'бодэ перекрашено')
+        await page.screenshot({ path: path.join(shots, 'step2_dark.png'), fullPage: true })
+        await page.click('.themebar button[data-t="light"]')
+        await page.screenshot({ path: path.join(shots, 'step2_light.png'), fullPage: true })
+
+        // «Принять»: значения формы и метрики в state.steps[2], открыт шаг 3
+        await page.click('#notch_accept')
+        assert.deepEqual(await visible_steps(page), ['3'], '«Принять» открывает шаг 3')
+        const accepted = await page.evaluate(() => state.steps[2])
+        assert.equal(accepted.accepted.INS_HNTCH_ATT, 33, 'принятые значения — из формы')
+        assert.equal(accepted.candidate_id, 'current', 'правка вручную — вариант «current»')
+        assert.ok((accepted.metrics != null) && Number.isFinite(accepted.metrics.current.band_dB) && Number.isFinite(accepted.metrics.current.lag_ms[30]), 'метрики принятого')
+        assert.match(await page.textContent('#verdict2'), /^Принято/, 'вердикт шага 2 — «Принято»')
+        await page.click('#wizbar button:nth-child(1)')
+
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):
         // шаг 1 считается заново начисто
         await page.evaluate(() => { window.__old_log = state.log; window.__fft = null })
@@ -280,12 +415,20 @@ async function main() {
         assert.ok(s4.with_data >= 3 && s4.peaks >= 1, 'после повторной загрузки спектр и пики снова есть')
         assert.deepEqual(s4.peak_rows, s1.peak_rows, 'та же таблица пиков')
         assert.equal(s4.verdict, s1.verdict, 'тот же вердикт')
+        // Шаг 2 после повторной загрузки: форма снова из лога, без строки «Текущий», принятое забыто
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        const v4 = await step2_summary(page)
+        assert.equal(await page.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'форма снова из лога')
+        assert.deepEqual(v4.titles, v1.titles, 'те же варианты')
+        assert.equal(await page.evaluate(() => state.steps[2] ?? null), null, 'принятое на шаге 2 сброшено')
         await page.click('#wizbar button:nth-child(1)')
 
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаги 0–1 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+        console.log('tunewizard-browser: шаги 0–2 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
         console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
+        console.log('  шаг 2: варианты ' + v1.titles.join('; ') + '; рекомендован ' + v1.best_id + '; вердикт «' + v1.verdict + '»')
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

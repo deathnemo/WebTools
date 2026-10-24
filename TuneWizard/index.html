@@ -16,7 +16,9 @@
 <script type="text/javascript" src="../Libraries/Array_Math.js"></script>
 <script type="text/javascript" src="../Libraries/fft.js"></script>
 <script type="text/javascript" src="../Libraries/DecodeDevID.js"></script>
+<script type="text/javascript" src="../Libraries/ParameterMetadata.js"></script>
 <script type="text/javascript" src="../Libraries/Param_Helpers.js"></script>
+<script type="text/javascript" src="../Libraries/FileSaver.js"></script>
 
 <script type="text/javascript" src="core/log.js"></script>
 <script type="text/javascript" src="core/checks.js"></script>
@@ -38,6 +40,7 @@
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
 <script type="text/javascript" src="steps/step1.js"></script>
+<script type="text/javascript" src="steps/step2.js"></script>
 
 <style>
 /* Токены оформления: светлая тема «Светлый технический», тёмная «Графит» (общие правила проектов, 23.10.2026) */
@@ -176,8 +179,59 @@ tr:last-child td{border-bottom:0}
 .check__b .fix{color:var(--ink-3); font-size:12.5px}
 .check__b .fix b{color:var(--ink-2); font-weight:600}
 
+/* Плитки с пояснением и таблица вариантов шага 2 */
+.stat__s{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); overflow-wrap:anywhere}
+.stat--bad .stat__v{color:var(--high)}
+.stat--good .stat__v{color:var(--ok)}
+#candidates2 td{vertical-align:top}
+#candidates2 td small{display:block; font-size:11px; opacity:.8}
+#candidates2 th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
+#metrics2{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+#metrics2 .stat__v{font-size:16px}
+#candidates2 td.better{color:var(--ok)}
+#candidates2 td.worse{color:var(--high)}
+#candidates2 tr.recommended td{background:var(--accent-soft)}
+#candidates2 tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+#candidates2 input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
+#candidates2 label{cursor:pointer}
+.tag{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--accent); border:1px solid var(--accent); padding:1px 5px; white-space:nowrap}
+
+/* Форма параметров шага 2. Подписи, описания, списки и флажки масок строит Libraries/ParameterMetadata.js
+   (load_param_inputs): у подписи-имени он ставит inline width:165px и margin — здесь они перебиваются. Флажки
+   маски остаются прямыми детьми абзаца (их обработчик ищет поле через parentElement), строки флажков разбиты
+   его <br>; отступ строк флажков — висячий отступ абзаца */
+.pgroups{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr)); gap:18px 32px}
+.pgroup{display:flex; flex-direction:column; gap:2px; min-width:0}
+.pgroup h3{font-size:13px; margin-bottom:4px}
+.pgroup--wide{grid-column:1/-1; flex-direction:row; flex-wrap:wrap; align-items:center; column-gap:40px}
+.pgroup--wide h3{flex-basis:100%}
+#notch_form p{padding-left:144px; text-indent:-144px; line-height:30px; color:var(--ink-3); font-size:12px}
+#notch_form p > *{text-indent:0}
+#notch_form p > label:not([for^="bit_"]){display:inline-block!important; width:136px!important; margin:0 8px 0 0!important; vertical-align:middle;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; line-height:1.3; color:var(--ink-2); overflow-wrap:anywhere; cursor:help}
+/* Описания из params.json не загрузились — имя параметра из data-name, чтобы поле не осталось без подписи */
+#notch_form p:not(:has(> label))::before{content:attr(data-name); display:inline-block; width:136px; margin-right:8px; text-indent:0;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)}
+#notch_form input[type=number],#notch_form select{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
+  vertical-align:middle; border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
+#notch_form input[type=number]{width:96px}
+#notch_form select{max-width:220px}
+#notch_form input:disabled,#notch_form select:disabled{opacity:.45}
+#notch_form select:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+#notch_form .inlog{margin-left:10px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); white-space:nowrap}
+#notch_form input[type=checkbox]{accent-color:var(--accent); margin:0 4px 0 0; vertical-align:middle}
+#notch_form p > label[for^="bit_"]{margin-right:10px; font-size:12px; line-height:24px; color:var(--ink-2); white-space:nowrap; cursor:pointer}
+#notch_form input[type=checkbox]:disabled + label{opacity:.45}
+#notch_form p.changed > input,#notch_form p.changed > select{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+#notch_form p.changed > label:not([for^="bit_"]),#notch_form p.changed .inlog{color:var(--accent)}
+@media (max-width:600px){
+  #notch_form p{padding-left:0; text-indent:0}
+}
+
 /* Графики */
 .plot{width:100%; height:420px; border:1px solid var(--line); background:var(--surface)}
+.plot--tall{height:640px}
 #loading{background-color:var(--bg)!important}
 #loading h1{color:var(--ink)}
 
@@ -352,7 +406,141 @@ tr:last-child td{border-bottom:0}
   <p class="note" id="peaks1_note" hidden></p>
 </section>
 <section data-step="2" hidden>
-  <div class="head"><span class="eyebrow">02 · Гармонический notch</span><h2>Шаг появится на этапе 2</h2></div>
+  <div class="head"><span class="eyebrow">02 · Гармонический notch</span><h2>Notch по гармоникам моторов</h2></div>
+  <p class="lede">Мастер считает несколько вариантов настроек notch — как в логе, автоподбор по методу PR #363, их сочетания и, если после лучшего остаётся пик рамы, второй notch — и оценивает каждый по ожидаемому шуму после фильтров и фазовой задержке. Рекомендуется лучший по полосе 20–400 Гц из тех, что не хуже лога: ни один пик не растёт больше чем на 3 дБ, задержка на 30 Гц — не больше чем на 0.5 мс.</p>
+
+  <div class="verdict" id="verdict2" hidden></div>
+  <p class="note" id="warnings2" hidden></p>
+
+  <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов notch</h2></div>
+  <p class="note" id="candidates2_stale" hidden></p>
+  <div class="tablewrap" id="candidates2" hidden>
+    <table>
+      <thead></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="note" id="candidates2_note" hidden></p>
+  <div class="row">
+    <button type="button" id="cand2_apply" disabled>Применить вариант</button>
+    <button type="button" id="cand2_refit" disabled>Подобрать заново</button>
+  </div>
+
+  <div class="head"><span class="eyebrow">Автоподбор</span><h2>Гармоники в порядковом спектре ESC</h2></div>
+  <div class="tablewrap" id="harmonics2" hidden>
+    <table>
+      <thead><tr><th>Гармоника N</th><th>Превышение над шумом, дБ</th><th>В автоподборе</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="note" id="harmonics2_note" hidden></p>
+
+  <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров</h2></div>
+  <div class="lab">
+    <div class="pgroups" id="notch_form">
+      <div class="pgroup pgroup--wide">
+        <h3>Общие</h3>
+        <p class="param" data-name="INS_GYRO_FILTER"><input type="number" id="INS_GYRO_FILTER" name="INS_GYRO_FILTER" step="0.1"><span class="inlog" data-for="INS_GYRO_FILTER"></span></p>
+        <p class="param" data-name="SCHED_LOOP_RATE"><input type="number" id="SCHED_LOOP_RATE" name="SCHED_LOOP_RATE" step="1" min="25" data-paramValues="false"><span class="inlog" data-for="SCHED_LOOP_RATE"></span></p>
+      </div>
+      <div class="pgroup">
+        <h3>Первый notch · INS_HNTCH_*</h3>
+        <p class="param" data-name="INS_HNTCH_ENABLE"><input type="number" id="INS_HNTCH_ENABLE" name="INS_HNTCH_ENABLE" step="1"><span class="inlog" data-for="INS_HNTCH_ENABLE"></span></p>
+        <p class="param" data-name="INS_HNTCH_MODE"><input type="number" id="INS_HNTCH_MODE" name="INS_HNTCH_MODE" step="1"><span class="inlog" data-for="INS_HNTCH_MODE"></span></p>
+        <p class="param" data-name="INS_HNTCH_FREQ"><input type="number" id="INS_HNTCH_FREQ" name="INS_HNTCH_FREQ" step="0.1"><span class="inlog" data-for="INS_HNTCH_FREQ"></span></p>
+        <p class="param" data-name="INS_HNTCH_BW"><input type="number" id="INS_HNTCH_BW" name="INS_HNTCH_BW" step="0.1"><span class="inlog" data-for="INS_HNTCH_BW"></span></p>
+        <p class="param" data-name="INS_HNTCH_ATT"><input type="number" id="INS_HNTCH_ATT" name="INS_HNTCH_ATT" step="0.1"><span class="inlog" data-for="INS_HNTCH_ATT"></span></p>
+        <p class="param" data-name="INS_HNTCH_REF"><input type="number" id="INS_HNTCH_REF" name="INS_HNTCH_REF" step="0.01"><span class="inlog" data-for="INS_HNTCH_REF"></span></p>
+        <p class="param" data-name="INS_HNTCH_FM_RAT"><input type="number" id="INS_HNTCH_FM_RAT" name="INS_HNTCH_FM_RAT" step="0.01"><span class="inlog" data-for="INS_HNTCH_FM_RAT"></span></p>
+        <p class="param" data-name="INS_HNTCH_HMNCS"><input type="number" id="INS_HNTCH_HMNCS" name="INS_HNTCH_HMNCS" step="1" data-bitmask-columns="4"><span class="inlog" data-for="INS_HNTCH_HMNCS"></span></p>
+        <p class="param" data-name="INS_HNTCH_OPTS"><input type="number" id="INS_HNTCH_OPTS" name="INS_HNTCH_OPTS" step="1"><span class="inlog" data-for="INS_HNTCH_OPTS"></span></p>
+        <p class="param" data-name="INS_HNTCH_ESCMSK"><input type="number" id="INS_HNTCH_ESCMSK" name="INS_HNTCH_ESCMSK" step="1" data-bitmask-columns="6"><span class="inlog" data-for="INS_HNTCH_ESCMSK"></span></p>
+      </div>
+      <div class="pgroup">
+        <h3>Второй notch · INS_HNTC2_*</h3>
+        <p class="param" data-name="INS_HNTC2_ENABLE"><input type="number" id="INS_HNTC2_ENABLE" name="INS_HNTC2_ENABLE" step="1"><span class="inlog" data-for="INS_HNTC2_ENABLE"></span></p>
+        <p class="param" data-name="INS_HNTC2_MODE"><input type="number" id="INS_HNTC2_MODE" name="INS_HNTC2_MODE" step="1"><span class="inlog" data-for="INS_HNTC2_MODE"></span></p>
+        <p class="param" data-name="INS_HNTC2_FREQ"><input type="number" id="INS_HNTC2_FREQ" name="INS_HNTC2_FREQ" step="0.1"><span class="inlog" data-for="INS_HNTC2_FREQ"></span></p>
+        <p class="param" data-name="INS_HNTC2_BW"><input type="number" id="INS_HNTC2_BW" name="INS_HNTC2_BW" step="0.1"><span class="inlog" data-for="INS_HNTC2_BW"></span></p>
+        <p class="param" data-name="INS_HNTC2_ATT"><input type="number" id="INS_HNTC2_ATT" name="INS_HNTC2_ATT" step="0.1"><span class="inlog" data-for="INS_HNTC2_ATT"></span></p>
+        <p class="param" data-name="INS_HNTC2_REF"><input type="number" id="INS_HNTC2_REF" name="INS_HNTC2_REF" step="0.01"><span class="inlog" data-for="INS_HNTC2_REF"></span></p>
+        <p class="param" data-name="INS_HNTC2_FM_RAT"><input type="number" id="INS_HNTC2_FM_RAT" name="INS_HNTC2_FM_RAT" step="0.01"><span class="inlog" data-for="INS_HNTC2_FM_RAT"></span></p>
+        <p class="param" data-name="INS_HNTC2_HMNCS"><input type="number" id="INS_HNTC2_HMNCS" name="INS_HNTC2_HMNCS" step="1" data-bitmask-columns="4"><span class="inlog" data-for="INS_HNTC2_HMNCS"></span></p>
+        <p class="param" data-name="INS_HNTC2_OPTS"><input type="number" id="INS_HNTC2_OPTS" name="INS_HNTC2_OPTS" step="1"><span class="inlog" data-for="INS_HNTC2_OPTS"></span></p>
+        <p class="param" data-name="INS_HNTC2_ESCMSK"><input type="number" id="INS_HNTC2_ESCMSK" name="INS_HNTC2_ESCMSK" step="1" data-bitmask-columns="6"><span class="inlog" data-for="INS_HNTC2_ESCMSK"></span></p>
+      </div>
+    </div>
+    <div class="row">
+      <div class="fld"><button type="button" id="notch_recalc" disabled>Пересчитать фильтры</button></div>
+      <div class="fld"><button type="button" id="notch_save" disabled>Сохранить .param</button></div>
+      <div class="fld">
+        <input id="notch_load_file" type="file" accept=".param,.parm,.txt" disabled>
+        <label class="pickbtn" for="notch_load_file">Загрузить .param</label>
+      </div>
+    </div>
+    <p class="note" id="notch_file_note" hidden></p>
+    <p class="note">Значения — из лога; описание параметра — во всплывающей подсказке у имени. Поля notch с ENABLE = 0 выключены, INS_*_ESCMSK показывается с версии фильтра 4. После правки нажмите «Пересчитать фильтры»: в таблицу вариантов добавится строка «Текущий», графики и метрики пересчитаются. В .param попадают параметры INS_* (как «Save Parameters» в FilterReview); ESCMSK — только с версии фильтра 4.</p>
+  </div>
+
+  <div class="head"><span class="eyebrow">Метрики</span><h2>Посчитанные значения формы против лога</h2></div>
+  <div class="stats" id="metrics2" hidden></div>
+  <div class="row">
+    <button type="button" id="notch_accept" disabled>Принять</button>
+  </div>
+
+  <div class="head"><span class="eyebrow">Спектр</span><h2>До фильтров, оценка «после» для значений формы и записанное «после»</h2></div>
+  <div id="Spectrum2" class="plot"></div>
+  <p class="note">Гироскоп — первичный. Полосы — диапазон частот гармоник notch за интервал, пунктир — средняя частота (у второго notch заливка другого цвета и точечный пунктир). Шкалы и алиасинг — из настроек спектра шага 1, частота контура для алиасинга — из поля SCHED_LOOP_RATE.</p>
+
+  <div class="head"><span class="eyebrow">Бодэ</span><h2>Амплитуда и фаза цепочки фильтров</h2></div>
+  <div class="row">
+    <fieldset class="fld">
+      <legend>Гироскоп</legend>
+      <div class="opts">
+        <label><input type="radio" name="bode2_inst" id="bode2_inst0" value="0" disabled><span>1</span></label>
+        <label><input type="radio" name="bode2_inst" id="bode2_inst1" value="1" disabled><span>2</span></label>
+        <label><input type="radio" name="bode2_inst" id="bode2_inst2" value="2" disabled><span>3</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="fld">
+      <legend>Фаза</legend>
+      <div class="opts">
+        <label><input type="checkbox" id="bode2_wrap"><span>свернуть в ±180°</span></label>
+      </div>
+    </fieldset>
+  </div>
+  <div id="Bode2" class="plot plot--tall"></div>
+  <p class="note">Линия — среднее по окнам интервала, заливка — размах, пока notch следуют за оборотами.</p>
+
+  <div class="head"><span class="eyebrow">Спектрограмма</span><h2>Спектр по времени и линии notch</h2></div>
+  <div class="row">
+    <fieldset class="fld">
+      <legend>Гироскоп</legend>
+      <div class="opts">
+        <label><input type="radio" name="sg2_inst" id="sg2_inst0" value="0" disabled><span>1</span></label>
+        <label><input type="radio" name="sg2_inst" id="sg2_inst1" value="1" disabled><span>2</span></label>
+        <label><input type="radio" name="sg2_inst" id="sg2_inst2" value="2" disabled><span>3</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="fld">
+      <legend>Данные</legend>
+      <div class="opts">
+        <label><input type="radio" name="sg2_data" id="sg2_pre" value="pre" disabled><span>до фильтров</span></label>
+        <label><input type="radio" name="sg2_data" id="sg2_post" value="post" disabled><span>после (записано)</span></label>
+        <label><input type="radio" name="sg2_data" id="sg2_est" value="est" disabled><span>оценка «после»</span></label>
+      </div>
+    </fieldset>
+    <fieldset class="fld">
+      <legend>Ось</legend>
+      <div class="opts">
+        <label><input type="radio" name="sg2_axis" id="sg2_x" value="x" checked><span>X</span></label>
+        <label><input type="radio" name="sg2_axis" id="sg2_y" value="y"><span>Y</span></label>
+        <label><input type="radio" name="sg2_axis" id="sg2_z" value="z"><span>Z</span></label>
+      </div>
+    </fieldset>
+  </div>
+  <div id="Spectrogram2" class="plot"></div>
+  <p class="note">Линии — гармоники notch для посчитанных значений формы; записанные в лог (FTN) включаются в легенде.</p>
 </section>
 <section data-step="3" hidden>
   <div class="head"><span class="eyebrow">03 · Низкочастотные фильтры</span><h2>Шаг появится на этапе 3</h2></div>
