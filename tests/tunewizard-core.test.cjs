@@ -417,6 +417,10 @@ test('calculate_transfer_function + estimate_post: оценка после = д�
     const expected_dB = 20 * Math.log10(expected_lin * FFT.correction.linear)
     assert.ok(Math.abs(est.x[peak] - expected_dB) < 0.01, 'после = до × |H|: ' + est.x[peak].toFixed(3) + ' против ' + expected_dB.toFixed(3))
     assert.ok(pre_dB - est.x[peak] > 20, 'пик ослаблен не меньше чем на 20 дБ: до ' + pre_dB.toFixed(1) + ', после ' + est.x[peak].toFixed(1))
+    // Вне notch (≥ 300 Гц) |H| ≈ 1, и оценка «после» совпадает со средним «до» по окнам
+    const i300 = FFT.bins.findIndex((b) => b >= 300)
+    const pre300_dB = 20 * Math.log10(FFT.x.reduce((sum, x) => sum + x[i300], 0) / FFT.x.length * FFT.correction.linear)
+    assert.ok(Math.abs(est.x[i300] - pre300_dB) < 0.1, 'вне notch: до ' + pre300_dB.toFixed(3) + ', после ' + est.x[i300].toFixed(3))
     const bode = bode_mean(gyro, 0, range)
     const i100 = bode.freq.findIndex((f) => f >= 100)
     assert.ok(20 * Math.log10(bode.amp_mean[i100]) < -30, 'бодэ: провал на 100 Гц')
@@ -424,4 +428,80 @@ test('calculate_transfer_function + estimate_post: оценка после = д�
     const stats = notch_line_stats(filters, range)
     assert.equal(stats[0].enabled, true)
     assert.equal(stats[0].harmonics[0].mean, 100)
+})
+
+test('bode_mean: null без бодэ (только post) и до calculate_transfer_function', () => {
+    const post = synthetic_batch_log({ post: true })
+    const gyro_post = load_gyro(post, env_for(post), { log_type: null })
+    gyro_fft(gyro_post, { window_size: 1024, window_per_batch: 1 })
+    assert.ok(gyro_post[0].FFT.bode == null, 'сетка бодэ у post-экземпляра не создаётся (поле не задано)')
+    assert.equal(bode_mean(gyro_post, 0, [0, 100]), null, 'у post-экземпляра нет сетки бодэ')
+    const pre = synthetic_batch_log()
+    const gyro_pre = load_gyro(pre, env_for(pre), { log_type: null })
+    gyro_fft(gyro_pre, { window_size: 1024, window_per_batch: 1 })
+    assert.ok(gyro_pre[0].FFT.bode != null && gyro_pre[0].FFT.bode.H == null)
+    assert.equal(bode_mean(gyro_pre, 0, [0, 100]), null, 'H ещё не посчитана')
+    assert.equal(bode_mean(gyro_pre, 5, [0, 100]), null, 'нет такого экземпляра')
+})
+
+test('HarmonicNotchFilter: triple (бит 16), quintuple на версии 3 — предупреждение, бит 32 — минимум × гармоника', () => {
+    const gyro = { start_time: 0, end_time: 10 }
+    const make = (options, filter_version) => {
+        const env = { filter_version, params: fake_params({}), build_type: 2 }
+        return new HarmonicNotchFilter({ enable: 1, mode: 0, freq: 80, bandwidth: 40, attenuation: 30, ref: 0, min_ratio: 0.5, harmonics: 1, options, esc_mask: 0 }, env, [new StaticTarget(gyro, env)])
+    }
+    const triple = make(16, 4)
+    assert.deepEqual(triple.warnings, [])
+    assert.equal(triple.notches[0].notches.length, 3, 'MultiNotch из трёх')
+    const quintuple_v3 = make(64, 3)
+    assert.ok(quintuple_v3.warnings.some((w) => /Пятикратный/.test(w)), quintuple_v3.warnings.join('; '))
+    assert.equal(quintuple_v3.notches[0].notches, undefined, 'на версии 3 остаётся одиночный NotchFilter')
+    const quintuple_v4 = make(64, 4)
+    assert.deepEqual(quintuple_v4.warnings, [])
+    assert.equal(quintuple_v4.notches[0].notches.length, 5)
+    assert.equal(make(32, 4).get_min_freq(2), 2 * 80 * 0.5, 'бит 32: минимальная частота умножается на номер гармоники')
+    assert.equal(make(0, 4).get_min_freq(2), 80 * 0.5, 'без бита 32 — одна для всех гармоник')
+})
+
+test('notch_line_stats: многопиковая ветка — ESC по моторам, min/mean/max по двум экземплярам', () => {
+    const log = fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6], RPM: [6000, 6000, 6000] },
+        1: { TimeUS: [0, 1e6, 5e6], RPM: [3000, 3000, 3000] }
+    } } } })
+    const gyro = { start_time: 0, end_time: 6 }
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    // OPTS 2 — notch по каждому мотору: get_target_freq отдаёт частоты по экземплярам, интерполяция не нужна
+    const values = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_OPTS: 2, INS_HNTCH_REF: 1, INS_HNTCH_FREQ: 50, INS_HNTCH_BW: 25, INS_HNTCH_ATT: 40, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 1, INS_HNTCH_ESCMSK: 0 }
+    const filters = load_filters(values, env, tracking)
+    assert.deepEqual(filters.warnings, [])
+    assert.equal(filters.notch[0].enabled(), true)
+    const stats = notch_line_stats(filters, [gyro.start_time, gyro.end_time])
+    const h = stats[0].harmonics[0]
+    assert.equal(h.harmonic, 1)
+    assert.ok(h.min <= h.mean && h.mean <= h.max)
+    assert.equal(h.min, 50, '3000 об/мин → 50 Гц')
+    assert.equal(h.max, 100, '6000 об/мин → 100 Гц')
+    assert.equal(h.mean, 75, 'среднее средних по экземплярам')
+    assert.deepEqual(stats[1], { enabled: false, harmonics: [] })
+})
+
+test('load_filters: предупреждения трекинга попадают в filters.warnings без повторов', () => {
+    // Квадрокоптер с RCOU и обоими наборами параметров моторов: о Q_M_THST_EXPO при наличии MOT_THST_EXPO
+    // ThrottleTarget предупреждает ещё до проверок батареи и барометра (Throttle.js:142), поэтому BAT/BARO не нужны
+    const params = [['FRAME_CLASS', 1, 0], ['MOT_THST_EXPO', 0.65, 0], ['Q_M_THST_EXPO', 0.5, 0], ['MOT_SPIN_MAX', 0.95, 0], ['MOT_SPIN_MIN', 0.15, 0],
+                    ['MOT_PWM_MIN', 1000, 0], ['MOT_PWM_MAX', 2000, 0], ['MOT_BAT_VOLT_MIN', 0, 0], ['MOT_BAT_VOLT_MAX', 0, 0], ['MOT_BAT_IDX', 0, 0]]
+    for (let i = 1; i <= 4; i++) {
+        params.push(['SERVO' + i + '_FUNCTION', 32 + i, 0])
+    }
+    const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.3, 0.3] }, RCOU: { TimeUS: [0, 1e6], C1: [1500, 1500] } }, params })
+    const gyro = { start_time: 0, end_time: 1 }
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    const expected = 'Неожиданный параметр мотора: Q_M_THST_EXPO'
+    assert.deepEqual(tracking[1].warnings, [expected])
+    // То же предупреждение у второго источника — в сводке оно одно
+    tracking[2].warnings.push(expected)
+    const filters = load_filters({ INS_HNTCH_ENABLE: 0, INS_HNTC2_ENABLE: 0 }, env, tracking)
+    assert.deepEqual(filters.warnings, [expected])
 })

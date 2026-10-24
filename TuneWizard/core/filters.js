@@ -196,7 +196,10 @@ function HarmonicNotchFilter(params, env, tracking) {
         if (this.params.mode == tracking[j].mode_value) {
             this.tracking = tracking[j]
             if ((this.params.enable > 0) && !this.tracking.have_data(this.params)) {
-                this.warnings.push(this.tracking.no_data_error(this.params))
+                const msg = this.tracking.no_data_error(this.params)
+                if (msg) {
+                    this.warnings.push(msg)
+                }
             }
             break
         }
@@ -314,7 +317,9 @@ function notch_param_names() {
     return ret
 }
 
-// Источники трекинга в порядке режимов INS_HNTCH_MODE: 0 Static, 1 Throttle, 2 RPM1, 3 ESC, 4 FFT, 5 RPM2
+// Источники трекинга в порядке режимов INS_HNTCH_MODE: 0 Static, 1 Throttle, 2 RPM1, 3 ESC, 4 FFT, 5 RPM2.
+// Каждый источник несёт warnings, собранные при создании (например, неожиданный параметр мотора у Throttle);
+// load_filters добавляет их в сводку filters.warnings
 function create_tracking(log, env, gyro) {
     return [new StaticTarget(gyro, env), new ThrottleTarget(log, env), new RPMTarget(log, env, 1, 2), new ESCTarget(log, env), new FFTTarget(log, env), new RPMTarget(log, env, 2, 5)]
 }
@@ -357,6 +362,10 @@ function load_filters(values, env, tracking) {
         filters.notch.push(new HarmonicNotchFilter(params, env, tracking))
         filters.warnings.push(...filters.notch[i].warnings)
     }
+
+    // Предупреждения источников трекинга, собранные при их создании, без повторов
+    filters.warnings.push(...new Set(tracking.flatMap((t) => t.warnings)))
+
     return filters
 }
 
@@ -527,6 +536,12 @@ function estimate_post(gyro, i, amplitude_scale, range, alias) {
 // Среднее, максимум и минимум амплитуды и фазы бодэ экземпляра index по окнам в диапазоне range.
 // Амплитуда линейная (масштаб накладывает вызывающая сторона), фаза в градусах без свёртки
 function bode_mean(gyro, index, range) {
+    // Без FFT, окон, сетки бодэ или ещё не посчитанной H считать нечего — upstream такие экземпляры
+    // пропускал при выборе индекса (FR 1396–1408); null симметрично estimate_post
+    if ((gyro[index] == null) || (gyro[index].FFT == null) || (gyro[index].FFT.x.length == 0) || (gyro[index].FFT.bode == null) || (gyro[index].FFT.bode.H == null)) {
+        return null
+    }
+
     // Начальный и конечный индексы
     const start_index = find_start_index(gyro[index].FFT.time, range)
     const end_index = find_end_index(gyro[index].FFT.time, range)+1

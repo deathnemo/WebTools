@@ -32,7 +32,7 @@
 | `parameter_get_value(name)` (чтение формы) | значения приходят объектом `values[name]` |
 | `get_air_density_model()` с `this` | возвращает обычный объект `model` |
 
-`env` создаётся в `wizard.js` после загрузки лога: `{ params: state.params, build_type: state.info.build_type, filter_version: <из VER.FV или форма>, decode_devid }`.
+`env` создаётся в `wizard.js` после загрузки лога: `{ params: state.params, build_type: state.info.build_type, filter_version: <из VER.FV или форма> }` (`decode_devid` в env не передаётся — это глобал страницы из `Libraries/DecodeDevID.js`).
 
 ---
 
