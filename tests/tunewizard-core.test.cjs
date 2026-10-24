@@ -27,7 +27,21 @@ load_page_scripts([
     'TuneWizard/core/log.js',
     'TuneWizard/core/checks.js',
     'TuneWizard/core/gyro.js',
+    'TuneWizard/core/tracking/Atmosphere_model.js',
+    'TuneWizard/core/tracking/BaseClass.js',
+    'TuneWizard/core/tracking/Static.js',
+    'TuneWizard/core/tracking/Throttle.js',
+    'TuneWizard/core/tracking/RPM.js',
+    'TuneWizard/core/tracking/ESC.js',
+    'TuneWizard/core/tracking/FFT.js',
+    'TuneWizard/core/tracking/Logged.js',
+    'TuneWizard/core/filters.js',
 ])
+
+// Параметры без лога: values = { имя: значение }
+function fake_params(values) {
+    return { get: (name) => (name in values) ? values[name] : null, has: (name) => name in values, changed: () => false }
+}
 
 // Поддельный лог с интерфейсом парсера (как в tests/tunewizard.test.cjs).
 // messages = { ИМЯ: { поле: массив } } — сообщение без экземпляров;
@@ -291,4 +305,123 @@ test('fft_info: частота дискретизации и разрешени�
     assert.ok(Math.abs(info[0].sample_rate - 1000) < 1e-6)
     assert.ok(Math.abs(info[0].resolution - 1000 / 1024) < 1e-6)
     assert.equal(info[0].window_size, 1024)
+})
+
+// Передаточная функция одного notch на сетке частот: |H| в центре ≈ -ATT дБ, вдали ≈ 0 дБ
+function notch_response(center, bw, att, sample_rate, freqs) {
+    const Z = exp_jw(freqs, sample_rate)
+    const Z1 = complex_inverse(Z)
+    const Z2 = complex_inverse(complex_square(Z))
+    const one = [new Array(freqs.length).fill(1), new Array(freqs.length).fill(0)]
+    const Hn = [one[0].slice(), one[1].slice()]
+    const Hd = [one[0].slice(), one[1].slice()]
+    new NotchFilter(att, bw, 1, () => 0, 1.0).transfer(Hn, Hd, center, sample_rate, Z1, Z2)
+    return complex_abs(complex_div(Hn, Hd))
+}
+
+test('NotchFilter: ослабление в центре равно ATT, вдали — нет', () => {
+    const freqs = array_from_range(1, 400, 1)
+    const H = notch_response(100, 50, 40, 1000, freqs)
+    const at_center = 20 * Math.log10(H[freqs.indexOf(100)])
+    assert.ok(Math.abs(at_center + 40) < 0.5, 'в центре ' + at_center.toFixed(2) + ' дБ')
+    assert.ok(Math.abs(20 * Math.log10(H[freqs.indexOf(10)])) < 0.1, 'на 10 Гц нет ослабления')
+    assert.ok(Math.abs(20 * Math.log10(H[freqs.indexOf(300)])) < 0.5, 'на 300 Гц нет ослабления')
+})
+
+test('DigitalBiquadFilter: −3 дБ на частоте среза', () => {
+    const freqs = [10, 40, 200]
+    const Z = exp_jw(freqs, 1000)
+    const Z1 = complex_inverse(Z), Z2 = complex_inverse(complex_square(Z))
+    const Hn = [[1, 1, 1], [0, 0, 0]], Hd = [[1, 1, 1], [0, 0, 0]]
+    new DigitalBiquadFilter(40).transfer(Hn, Hd, 1000, Z1, Z2)
+    const H = complex_abs(complex_div(Hn, Hd))
+    assert.ok(Math.abs(20 * Math.log10(H[1]) + 3) < 0.3, 'на 40 Гц ≈ −3 дБ')
+    assert.ok(H[0] > 0.98 && H[2] < 0.1)
+})
+
+test('HarmonicNotchFilter: статический notch, гармоники 1 и 3, предупреждений нет', () => {
+    const gyro = { start_time: 0, end_time: 10 }
+    const env = { filter_version: 2, params: fake_params({}), build_type: 2 }
+    const tracking = [new StaticTarget(gyro, env)]
+    const f = new HarmonicNotchFilter({ enable: 1, mode: 0, freq: 80, bandwidth: 40, attenuation: 30, ref: 0, min_ratio: 1, harmonics: 5, options: 0, esc_mask: 0 }, env, tracking)
+    assert.equal(f.enabled(), true)
+    assert.equal(f.static(), true)
+    assert.equal(f.harmonics(), 5)
+    assert.deepEqual(f.warnings, [])
+    const target = f.get_target_freq()
+    assert.deepEqual(target.freq, [80, 80])
+})
+
+test('ThrottleTarget.get_target: freq·√(thr/ref), версия 2', () => {
+    const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.25, 0.5] } } })
+    const env = { filter_version: 2, params: fake_params({}), build_type: 2 }
+    const t = new ThrottleTarget(log, env)
+    assert.equal(t.have_data({ options: 0 }), true)
+    assert.ok(Math.abs(t.get_target({ ref: 0.25, freq: 100, min_ratio: 1 }, 0.5) - 100 * Math.SQRT2) < 1e-9)
+    assert.equal(t.get_target({ ref: 0, freq: 100 }, 0.5), 100)
+})
+
+test('ESCTarget.compute_avg: среднее по маске и тайм-аут экземпляра', () => {
+    const log = fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6], RPM: [6000, 6000, 6000] },
+        1: { TimeUS: [0, 1e6, 5e6], RPM: [3000, 3000, 3000] }
+    } } } })
+    const env = { filter_version: 2, params: fake_params({}), build_type: 2 }
+    const esc = new ESCTarget(log, env)
+    assert.equal(esc.get_num_motors(), 2)
+    const avg = esc.compute_avg(0)
+    // Отсчёты одного момента идут в порядке экземпляров, поэтому первое среднее — по одному экземпляру 0
+    // (экземпляр 1 ещё не появился), дальше (100+50)/2 Гц; после 2 с экземпляр 0 молчит, и к 5 с он выбывает
+    // по тайм-ауту 1 с — последнее среднее только по экземпляру 1 (50 Гц)
+    assert.deepEqual(avg.avg_freq.map((f) => Math.round(f * 1e6) / 1e6), [100, 75, 75, 50], 'среднее (100+50)/2 Гц и тайм-аут')
+    assert.deepEqual(avg.avg_time.map((t) => Math.round(t * 1e6) / 1e6), [0, 1, 2, 5])
+    const only_first = esc.compute_avg(1)
+    assert.ok(only_first.avg_freq.every((f) => Math.abs(f - 100) < 1e-9))
+})
+
+test('load_filters: значения формы → фильтры, нет данных для режима ESC → предупреждение', () => {
+    const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.3, 0.3] } } })
+    const gyro = { start_time: 0, end_time: 1 }
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    const values = { INS_GYRO_FILTER: 40, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_FREQ: 80, INS_HNTCH_BW: 40, INS_HNTCH_ATT: 40, INS_HNTCH_REF: 1, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 3, INS_HNTCH_OPTS: 0, INS_HNTCH_ESCMSK: 0, INS_HNTC2_ENABLE: 0 }
+    const filters = load_filters(values, env, tracking)
+    assert.equal(filters.notch.length, 2)
+    assert.equal(filters.notch[0].enabled(), false, 'ESC-данных нет — notch выключен')
+    assert.ok(filters.warnings.length >= 1 && /ESC/.test(filters.warnings.join(' ')))
+})
+
+test('calculate_transfer_function + estimate_post: оценка после = до × |H|, пик 100 Гц ослаблен', () => {
+    const log = synthetic_batch_log({ freq: 100, amp: 2 })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    interpolate_tracking(tracking, gyro)
+    const values = { INS_GYRO_FILTER: 0, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 0, INS_HNTCH_FREQ: 100, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 40, INS_HNTCH_REF: 0, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 1, INS_HNTCH_OPTS: 0, INS_HNTCH_ESCMSK: 0, INS_HNTC2_ENABLE: 0 }
+    const filters = load_filters(values, env, tracking)
+    assert.deepEqual(filters.warnings, [])
+    calculate_transfer_function(filters, gyro)
+    const FFT = gyro[0].FFT
+    assert.ok(FFT.H != null && FFT.H.length === FFT.x.length, 'H на каждое окно')
+    const scale = fft_amplitude_scale(true, false)   // дБ
+    const range = [gyro.start_time, gyro.end_time + 10]
+    const alias = { bins: FFT.bins, apply_amp: (a) => a }
+    const est = estimate_post(gyro, 0, scale, range, alias)
+    // Пик 100 Гц лежит между бинами 102 (99.6 Гц) и 103 (100.6 Гц); берём первый бин не ниже 100 Гц.
+    // Он на 0.59 Гц сбоку от центра notch шириной 20 Гц, поэтому |H| там ≈ −24 дБ, а не −40, как в центре
+    const peak = FFT.bins.findIndex((b) => b >= 100)
+    const pre_dB = 20 * Math.log10(FFT.x[0][peak] * FFT.correction.linear)
+    // Оценка «после» — ровно среднее по окнам «до» × |H| с поправкой окна (шум квантования ~1e-5 даёт < 0.01 дБ)
+    const expected_lin = FFT.x.reduce((sum, x, j) => sum + x[peak] * complex_abs(FFT.H[j])[peak], 0) / FFT.x.length
+    const expected_dB = 20 * Math.log10(expected_lin * FFT.correction.linear)
+    assert.ok(Math.abs(est.x[peak] - expected_dB) < 0.01, 'после = до × |H|: ' + est.x[peak].toFixed(3) + ' против ' + expected_dB.toFixed(3))
+    assert.ok(pre_dB - est.x[peak] > 20, 'пик ослаблен не меньше чем на 20 дБ: до ' + pre_dB.toFixed(1) + ', после ' + est.x[peak].toFixed(1))
+    const bode = bode_mean(gyro, 0, range)
+    const i100 = bode.freq.findIndex((f) => f >= 100)
+    assert.ok(20 * Math.log10(bode.amp_mean[i100]) < -30, 'бодэ: провал на 100 Гц')
+    assert.ok(Math.abs(bode.phase_mean[2]) < 5, 'фаза около нуля на низкой частоте')
+    const stats = notch_line_stats(filters, range)
+    assert.equal(stats[0].enabled, true)
+    assert.equal(stats[0].harmonics[0].mean, 100)
 })
