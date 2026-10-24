@@ -159,6 +159,7 @@ tr:last-child td{border-bottom:0}
 #candidates2 td{vertical-align:top}
 #candidates2 td small{display:block; font-size:11px; opacity:.8}
 #candidates2 th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
+#candidates2 th.group{text-align:center; border-bottom:1px solid var(--line)}
 #metrics2{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
 #metrics2 .stat__v{font-size:16px}
 #candidates2 td.better{color:var(--ok)}
@@ -196,7 +197,7 @@ tr:last-child td{border-bottom:0}
 #notch_form input[type=checkbox]{accent-color:var(--accent); margin:0 4px 0 0; vertical-align:middle}
 #notch_form p > label[for^="bit_"]{margin-right:10px; font-size:12px; line-height:24px; color:var(--ink-2); white-space:nowrap; cursor:pointer}
 #notch_form input[type=checkbox]:disabled + label{opacity:.45}
-#notch_form p.changed > input,#notch_form p.changed > select{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+#notch_form p.changed > input[type=number],#notch_form p.changed > select{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
 #notch_form p.changed > label:not([for^="bit_"]),#notch_form p.changed .inlog{color:var(--accent)}
 @media (max-width:600px){
   #notch_form p{padding-left:0; text-indent:0}
@@ -373,7 +374,7 @@ tr:last-child td{border-bottom:0}
 </section>
 <section data-step="2" hidden>
   <div class="head"><span class="eyebrow">02 · Гармонический notch</span><h2>Notch по гармоникам моторов</h2></div>
-  <p class="lede">Мастер считает несколько вариантов настроек notch — как в логе, автоподбор по методу PR #363, их сочетания и, если после лучшего остаётся пик рамы, второй notch — и оценивает каждый по ожидаемому шуму после фильтров и фазовой задержке. Рекомендуется лучший по полосе 20–400 Гц из тех, что не хуже лога: ни один пик не растёт больше чем на 3 дБ, задержка на 30 Гц — не больше чем на 0.5 мс.</p>
+  <p class="lede">Мастер считает несколько вариантов настроек notch — как в логе, автоподбор по методу PR #363, их сочетания и, если после лучшего остаётся пик рамы, второй notch — и оценивает каждый по ожидаемому шуму после фильтров и фазовой задержке. Рекомендуется лучший по полосе <span data-rule="band">20–400 Гц</span> из тех, что не хуже лога: ни один пик не растёт больше чем на <span data-rule="peak">3 дБ</span>, задержка на <span data-rule="lag_hz">30 Гц</span> — не больше чем на <span data-rule="lag">0.5 мс</span>.</p>
 
   <div class="verdict" id="verdict2" hidden></div>
   <p class="note" id="warnings2" hidden></p>
@@ -445,7 +446,7 @@ tr:last-child td{border-bottom:0}
       </div>
     </div>
     <p class="note" id="notch_file_note" hidden></p>
-    <p class="note">Значения — из лога; описание параметра — во всплывающей подсказке у имени. Поля notch с ENABLE = 0 выключены, INS_*_ESCMSK показывается с версии фильтра 4. После правки нажмите «Пересчитать фильтры»: в таблицу вариантов добавится строка «Текущий», графики и метрики пересчитаются. В .param попадают параметры INS_* (как «Save Parameters» в FilterReview); ESCMSK — только с версии фильтра 4.</p>
+    <p class="note">Значения — из лога. Подписи, описания (во всплывающей подсказке у имени), списки и флажки масок — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. Поля notch с ENABLE = 0 выключены, INS_*_ESCMSK показывается с версии фильтра 4. После правки нажмите «Пересчитать фильтры»: в таблицу вариантов добавится строка «Текущий», графики и метрики пересчитаются. В .param попадают параметры INS_* (как «Save Parameters» в FilterReview); ESCMSK — только с версии фильтра 4.</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Посчитанные значения формы против лога</h2></div>

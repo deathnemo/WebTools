@@ -92,9 +92,24 @@ function step2_summary(page) {
     })
 }
 
+// Снимок шага 1, который шаг 2 трогать не должен: объекты FFT.H экземпляров (state.filters — параметры лога)
+// и данные оценки «после» на Spectrum1
+function remember_step1(page) {
+    return page.evaluate(() => {
+        window.__step1_H = state.gyro.map((g) => g?.FFT?.H ?? null)
+        window.__step1_est = Array.from(document.getElementById('Spectrum1').data[spec_trace_index(0, 2, 0)].y)
+    })
+}
+function step1_untouched(page) {
+    return page.evaluate(() => ({
+        H: state.gyro.every((g, i) => (g?.FFT?.H ?? null) === window.__step1_H[i]) && window.__step1_H.some((H) => H != null),
+        est: JSON.stringify(Array.from(document.getElementById('Spectrum1').data[spec_trace_index(0, 2, 0)].y)) === JSON.stringify(window.__step1_est),
+    }))
+}
+
 // Ключ значений формы и ключ значений варианта id — одинаковые, если вариант применён
 function form_matches_variant(page, id) {
-    return page.evaluate((id) => candidate_key(values_from_form()) === candidate_key(step2_rows().find((r) => r.id === id).values), id)
+    return page.evaluate((id) => step2_key(values_from_form()) === step2_key(step2_rows().find((r) => r.id === id).values), id)
 }
 
 async function wait_for_server(page, url, server) {
@@ -293,7 +308,11 @@ async function main() {
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
 
-        // Шаг 2: форма из лога, варианты со сравнением, «Применить вариант», ручная правка, .param, «Принять»
+        // Шаг 2: форма из лога, варианты со сравнением, «Применить вариант», ручная правка, .param, «Принять».
+        // Перед ним — снимок шага 1: шаг 2 не должен менять FFT.H и оценку «после» шага 1
+        await page.click('#wizbar button:nth-child(2)')
+        await wait_overlay(page)
+        await remember_step1(page)
         await page.click('#wizbar button:nth-child(3)')
         assert.deepEqual(await visible_steps(page), ['2'])
         await wait_overlay(page)
@@ -301,7 +320,7 @@ async function main() {
         await page.waitForFunction(() => (document.querySelector('label[for="INS_HNTCH_MODE"]') != null) && step2.form_ready, null, { timeout: 30000 })
         assert.equal(await page.inputValue('#INS_HNTCH_MODE'), '3', 'INS_HNTCH_MODE из лога (ESC-телеметрия)')
         assert.equal(await page.evaluate(() => document.getElementById('INS_HNTCH_MODE').tagName), 'SELECT', 'MODE — список значений из params.json')
-        assert.equal(await page.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'все поля формы — значения лога')
+        assert.equal(await page.evaluate(() => step2_key(values_from_form()) === step2_key(values_from_log())), true, 'все поля формы — значения лога')
         assert.equal(await page.textContent('#notch_form .inlog[data-for="INS_HNTCH_MODE"]'), 'в логе: 3')
         assert.equal(await page.isDisabled('#INS_HNTC2_FREQ'), true, 'поля выключенного второго notch недоступны')
         assert.equal(await page.isHidden('#INS_HNTCH_ESCMSK'), true, 'ESCMSK скрыт при версии фильтра ниже 4')
@@ -321,6 +340,34 @@ async function main() {
         assert.ok(best.band <= best.log_band, 'рекомендованный вариант не хуже лога по полосе: ' + JSON.stringify(best))
         assert.ok(best.lag <= best.log_lag + best.limit, 'и по задержке на 30 Гц: ' + JSON.stringify(best))
         assert.ok(v1.metrics.some((t) => /дБ/.test(t)) && v1.metrics.some((t) => /мс/.test(t)), 'метрики в дБ и мс: ' + v1.metrics.join(' | '))
+        assert.match(await page.textContent('#candidates2 tbody'), /гарм\. 1, 3/, 'маски вариантов словами (HMNCS 5 — гармоники 1 и 3)')
+        assert.match(await page.textContent('#candidates2 thead'), /Шум после фильтров на пиках, дБ/, 'общий заголовок столбцов пиков')
+        assert.match(await page.textContent('#notch_form .inlog[data-for="INS_HNTC2_FREQ"]'), /^в логе нет \(взято 80\)$/, 'параметр без записи в логе — с умолчанием')
+
+        // Ветка вердикта: автоподбор не удался, но есть вариант второго notch — неудача приставкой к обычному тексту
+        const fit_failed = await page.evaluate(() => {
+            const saved = { fit: step2.fit, candidates: step2.candidates, evaluations: step2.evaluations, ranking: step2.ranking }
+            try {
+                const keep = saved.candidates.filter((c) => ['log', 'second'].includes(c.id))
+                if (!keep.some((c) => c.id === 'second')) {
+                    return null
+                }
+                step2.fit = { result: null, errors: ['нет ESC-телеметрии'] }
+                step2.candidates = keep
+                step2.evaluations = Object.fromEntries(keep.map((c) => [c.id, saved.evaluations[c.id]]))
+                step2.ranking = rank_candidates(step2.evaluations)
+                step2_render_verdict()
+                return { text: document.getElementById('verdict2').textContent, cls: document.getElementById('verdict2').className }
+            } finally {
+                Object.assign(step2, saved)
+                step2.ranking = rank_candidates(step2.evaluations)
+                step2_render_verdict()
+            }
+        })
+        assert.ok(fit_failed != null, 'на тестовом логе есть вариант второго notch')
+        assert.match(fit_failed.text, /^Автоподбор не удался: нет ESC-телеметрии\. (Рекомендуется|Текущие настройки лучше)/, 'неудача автоподбора — приставка: ' + fit_failed.text)
+        assert.match(fit_failed.cls, /verdict--warn/)
+        assert.equal(await page.textContent('#verdict2'), v1.verdict, 'вердикт восстановлен')
 
         // «Применить вариант»: рекомендованный, а если это лог — автоподбор; форма и оценка «после» меняются
         const apply_id = (v1.best_id === 'log') ? 'fit' : v1.best_id
@@ -330,6 +377,18 @@ async function main() {
         assert.equal(await form_matches_variant(page, apply_id), true, 'форма заполнена значениями варианта ' + apply_id)
         const v2 = await step2_summary(page)
         assert.ok(v2.changed.length > 0, 'поля, отличные от лога, помечены')
+        // Подсветка изменённого — у числового поля, а не у флажков маски
+        const highlight = await page.evaluate(() => {
+            const p = [...document.querySelectorAll('#notch_form p.changed')].find((row) => row.querySelector(':scope > input[type=checkbox]') != null)
+            if (p == null) {
+                return null
+            }
+            return { number: getComputedStyle(p.querySelector(':scope > input[type=number]')).boxShadow, check: getComputedStyle(p.querySelector(':scope > input[type=checkbox]')).boxShadow }
+        })
+        if (highlight != null) {
+            assert.notEqual(highlight.number, 'none', 'изменённое числовое поле подсвечено')
+            assert.equal(highlight.check, 'none', 'флажки маски не подсвечиваются')
+        }
         assert.notDeepEqual(v2.est_y, v1.est_y, 'оценка «после» на спектре пересчитана')
 
         // Ручная правка и «Пересчитать фильтры»: строка «Текущий (из формы)»
@@ -345,6 +404,15 @@ async function main() {
         assert.notDeepEqual(v3.est_y, v2.est_y, 'оценка «после» для правки пересчитана')
         assert.ok(v3.metrics.some((t) => /дБ/.test(t)) && v3.metrics.some((t) => /мс/.test(t)), 'метрики в дБ и мс')
         assert.equal(v3.recommended_marks, 1, 'после «Пересчитать» пометка «рекомендуется» по-прежнему одна')
+        assert.match(await page.textContent('#candidates2 tbody tr:last-child'), /ручные значения в рекомендации не участвуют/, 'строка «Текущий» — вне рекомендации')
+
+        // Шаг 1 после «Применить вариант» и «Пересчитать фильтры» прежний: те же FFT.H и та же оценка «после»
+        await page.click('#wizbar button:nth-child(2)')
+        await wait_overlay(page)
+        assert.deepEqual(await step1_untouched(page), { H: true, est: true }, 'шаг 2 не меняет расчёт шага 1')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        assert.equal((await step2_summary(page)).titles.filter((t) => t.startsWith('Текущий')).length, 1, 'возврат на шаг 2 сохраняет строку «Текущий»')
 
         // Бодэ: «свернуть фазу» — ось фазы ±180°
         await page.check('#bode2_wrap')
@@ -361,6 +429,9 @@ async function main() {
         assert.match(param_text, /^INS_HNTCH_FREQ,/m, '.param содержит INS_HNTCH_FREQ')
         assert.match(param_text, new RegExp('^INS_HNTCH_ATT,' + att + '$', 'm'), '.param содержит правку INS_HNTCH_ATT')
         assert.doesNotMatch(param_text, /SCHED_LOOP_RATE|ESCMSK/, 'в .param только INS_*, без ESCMSK при версии фильтра ниже 4')
+        if (/^INS_HNTC2_ENABLE,1$/m.test(param_text)) {
+            assert.match(await page.textContent('#notch_file_note'), /сначала запишите INS_HNTC2_ENABLE = 1/, 'подсказка про включение второго notch на аппарате')
+        }
 
         // «Загрузить .param»: значение из файла в форму и пересчёт
         const param_file = path.join(shots, 'test_notch.param')
@@ -392,14 +463,34 @@ async function main() {
         assert.equal(await page.evaluate(() => document.getElementById('Bode2').layout.paper_bgcolor), surface, 'фон бодэ — --surface')
         await page.screenshot({ path: path.join(shots, 'step2.png'), fullPage: true })
 
-        // «Принять»: значения формы и метрики в state.steps[2], открыт шаг 3
+        // «Принять»: значения формы, метрики и отметки против лога в state.steps[2], открыт шаг 3
         await page.click('#notch_accept')
+        await wait_overlay(page)
         assert.deepEqual(await visible_steps(page), ['3'], '«Принять» открывает шаг 3')
         const accepted = await page.evaluate(() => state.steps[2])
         assert.equal(accepted.accepted.INS_HNTCH_ATT, 33, 'принятые значения — из формы')
         assert.equal(accepted.candidate_id, 'current', 'правка вручную — вариант «current»')
         assert.ok((accepted.metrics != null) && Number.isFinite(accepted.metrics.current.band_dB) && Number.isFinite(accepted.metrics.current.lag_ms[30]), 'метрики принятого')
+        assert.ok((accepted.flags != null) && Array.isArray(accepted.flags.worse_peaks), 'отметки принятого против лога')
         assert.match(await page.textContent('#verdict2'), /^Принято/, 'вердикт шага 2 — «Принято»')
+
+        // Принять вариант, который хуже лога: вердикт warn «Принято, но хуже лога»
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        const flagged_id = await page.evaluate(() => Object.entries(step2.ranking.flags).find(([id, f]) => (id !== 'log') && ((f.worse_peaks.length > 0) || f.lag_over))?.[0] ?? null)
+        assert.ok(flagged_id != null, 'на тестовом логе есть вариант хуже лога')
+        await page.check('#cand2_' + flagged_id)
+        await page.click('#cand2_apply')
+        await wait_overlay(page)
+        await page.click('#notch_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['3'])
+        const flagged = await page.evaluate(() => ({ text: document.getElementById('verdict2').textContent, cls: document.getElementById('verdict2').className,
+                                                      id: state.steps[2].candidate_id, flags: state.steps[2].flags }))
+        assert.equal(flagged.id, flagged_id, 'принят вариант ' + flagged_id)
+        assert.ok((flagged.flags.worse_peaks.length > 0) || flagged.flags.lag_over, 'отметки принятого: ' + JSON.stringify(flagged.flags))
+        assert.match(flagged.cls, /verdict--warn/, 'принятое хуже лога — предупреждение')
+        assert.match(flagged.text, /^Принято, но хуже лога: /, flagged.text)
         await page.click('#wizbar button:nth-child(1)')
 
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):
@@ -409,19 +500,23 @@ async function main() {
         await page.waitForFunction(() => (state.log != null) && (state.log !== window.__old_log) &&
             (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
         assert.equal(await page.evaluate(() => state.gyro === null), true, 'новый лог — гироскоп ещё не загружен')
+        // Сразу с шага 0 на шаг 2 (шаг 1 не открывался — расчёт через step1_prepare): форма снова из лога, без строки
+        // «Текущий», принятое забыто
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        const v4 = await step2_summary(page)
+        assert.equal(await page.evaluate(() => step1_ready()), true, 'шаг 2 сам досчитал шаг 1')
+        assert.equal(await page.evaluate(() => step2_key(values_from_form()) === step2_key(values_from_log())), true, 'форма снова из лога')
+        assert.deepEqual(v4.titles, v1.titles, 'те же варианты')
+        assert.equal(v4.recommended_marks, 1)
+        assert.equal(await page.evaluate(() => state.steps[2] ?? null), null, 'принятое на шаге 2 сброшено')
+        // Шаг 1 после этого — тот же, что при первом прогоне
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
         const s4 = await step1_summary(page)
         assert.ok(s4.with_data >= 3 && s4.peaks >= 1, 'после повторной загрузки спектр и пики снова есть')
         assert.deepEqual(s4.peak_rows, s1.peak_rows, 'та же таблица пиков')
         assert.equal(s4.verdict, s1.verdict, 'тот же вердикт')
-        // Шаг 2 после повторной загрузки: форма снова из лога, без строки «Текущий», принятое забыто
-        await page.click('#wizbar button:nth-child(3)')
-        await wait_overlay(page)
-        const v4 = await step2_summary(page)
-        assert.equal(await page.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'форма снова из лога')
-        assert.deepEqual(v4.titles, v1.titles, 'те же варианты')
-        assert.equal(await page.evaluate(() => state.steps[2] ?? null), null, 'принятое на шаге 2 сброшено')
         await page.click('#wizbar button:nth-child(1)')
 
         assert.deepEqual(problems, [], 'ошибки консоли')

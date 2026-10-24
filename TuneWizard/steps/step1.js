@@ -700,9 +700,12 @@ function step1_peaks() {
 function peak_method_text(analysis) {
     const info = analysis.info
     if (analysis.method === "order") {
+        // Допуск окна — как в attribute_peaks_order: max(peak_half_width_hz, 2 бина, harmonic_tolerance · p50)
+        const tolerance = Math.max(peak_rules.peak_half_width_hz, 2 * (info.bin_hz ?? 0), peak_rules.harmonic_tolerance * info.p50)
         return "Происхождение — по порядковому спектру ESC (метод автоподбора PR #363): пик — моторы, гармоника N, если у гармоники N " +
-            "в порядковом спектре превышение не меньше " + peak_rules.min_excess_dB + " дБ и частота пика лежит в N × (p5…p95) частоты ESC; иначе рама/резонанс. " +
-            "Частота ESC за интервал: p5 " + info.p5.toFixed(1) + ", p50 " + info.p50.toFixed(1) + ", p95 " + info.p95.toFixed(1) + " Гц."
+            "в порядковом спектре превышение не меньше " + peak_rules.min_excess_dB + " дБ и частота пика лежит в N × (p5…p95) ± max(" +
+            peak_rules.peak_half_width_hz + " Гц, 2 бина, " + peak_rules.harmonic_tolerance + "·p50) частоты ESC (сейчас ±" + tolerance.toFixed(1) +
+            " Гц); иначе рама/резонанс. Частота ESC за интервал: p5 " + info.p5.toFixed(1) + ", p50 " + info.p50.toFixed(1) + ", p95 " + info.p95.toFixed(1) + " Гц."
     }
     let motor_text
     if (info.median_hz == null) {
