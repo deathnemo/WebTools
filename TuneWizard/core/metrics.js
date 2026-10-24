@@ -1,11 +1,14 @@
 // Метрики спектра для шагов мастера: пики среднего спектра и их происхождение (моторы или рама). Без DOM:
 // работает в браузере и под Node (тесты). Это не перенос из FilterReview — своё, поэтому у каждого порога источник.
 //
-// Атрибуция по медианной моторной частоте здесь — запасной способ: на шаге 2 (задача 7) основным станет
-// порядковый спектр автоподбора PR #363 (auto_fit_order_spectrum в core/autofit.js), где спектр каждого окна
-// нормирован на частоту моторов в этот момент.
+// Способов атрибуции два. Основной при ESC-телеметрии — порядковый спектр автоподбора PR #363
+// (motor_order_info + attribute_peaks_order, method "order"): спектр каждого окна нормирован на частоту моторов
+// в этот момент. Запасной без ESC — медианная моторная частота, уточнённая по пику первой гармоники
+// (motor_fundamental + refine_fundamental + attribute_peaks, method "median").
 //
-// Нужны глобалы страницы: классы core/tracking/* (источники трекинга приходят аргументом tracking из create_tracking).
+// Нужны глобалы страницы: классы core/tracking/* (источники трекинга приходят аргументом tracking из create_tracking)
+// и core/autofit.js (auto_fit_rules, auto_fit_order_spectrum, auto_fit_harmonic_peaks, auto_fit_percentile) —
+// он подключается после этого файла, но вызывается только во время работы, когда все скрипты уже загружены.
 
 // Пики спектра и их происхождение. Пороги в одном блоке; источники: [PR363] — метод автоподбора, [наше].
 const peak_rules = {
@@ -41,6 +44,34 @@ function peak_exclusion_hz(bins, rules = peak_rules) {
     return Math.max(rules.peak_half_width_hz, 2 * bin_spacing(bins))
 }
 
+// Превышение бина i над локальным шумом, дБ: amp_dB[i] минус медиана окна ±floor_half_width_hz без окрестности
+// peak_exclusion_hz вокруг бина. Нечисловые значения в шум не входят; null, если значение бина нечисловое
+// или шума не набралось. Общая часть find_peaks и оценки остаточного пика после фильтров (core/candidates.js)
+function local_excess_dB(bins, amp_dB, i, rules = peak_rules) {
+    const len = Math.min(bins.length, amp_dB.length)
+    const freq = bins[i]
+    const amp = amp_dB[i]
+    if (!Number.isFinite(amp)) {
+        return null
+    }
+    const exclusion = peak_exclusion_hz(bins, rules)
+
+    // Локальный шум: медиана окна вокруг пика без его ближней окрестности
+    const floor = []
+    for (let j = i - 1; (j >= 0) && (freq - bins[j] <= rules.floor_half_width_hz); j--) {
+        if ((freq - bins[j] > exclusion) && Number.isFinite(amp_dB[j])) {
+            floor.push(amp_dB[j])
+        }
+    }
+    for (let j = i + 1; (j < len) && (bins[j] - freq <= rules.floor_half_width_hz); j++) {
+        if ((bins[j] - freq > exclusion) && Number.isFinite(amp_dB[j])) {
+            floor.push(amp_dB[j])
+        }
+    }
+    const noise = median_of(floor)
+    return (noise == null) ? null : amp - noise
+}
+
 // bins (Гц), amp_dB — средний спектр одной оси в дБ. Возвращает [{ freq, amp_dB, excess_dB }] по убыванию excess.
 // Пик — локальный максимум (строго больше соседей) не ниже min_freq_hz, выше медианы шума в окне
 // ±floor_half_width_hz (без окрестности peak_exclusion_hz вокруг пика) не меньше чем на min_excess_dB.
@@ -48,7 +79,6 @@ function peak_exclusion_hz(bins, rules = peak_rules) {
 function find_peaks(bins, amp_dB, rules = peak_rules) {
     const peaks = []
     const len = Math.min(bins.length, amp_dB.length)
-    const exclusion = peak_exclusion_hz(bins, rules)
     for (let i = 1; i < len - 1; i++) {
         const freq = bins[i]
         const amp = amp_dB[i]
@@ -60,25 +90,8 @@ function find_peaks(bins, amp_dB, rules = peak_rules) {
             continue
         }
 
-        // Локальный шум: медиана окна вокруг пика без его ближней окрестности
-        const floor = []
-        for (let j = i - 1; (j >= 0) && (freq - bins[j] <= rules.floor_half_width_hz); j--) {
-            if ((freq - bins[j] > exclusion) && Number.isFinite(amp_dB[j])) {
-                floor.push(amp_dB[j])
-            }
-        }
-        for (let j = i + 1; (j < len) && (bins[j] - freq <= rules.floor_half_width_hz); j++) {
-            if ((bins[j] - freq > exclusion) && Number.isFinite(amp_dB[j])) {
-                floor.push(amp_dB[j])
-            }
-        }
-        const noise = median_of(floor)
-        if (noise == null) {
-            continue
-        }
-
-        const excess = amp - noise
-        if (excess >= rules.min_excess_dB) {
+        const excess = local_excess_dB(bins, amp_dB, i, rules)
+        if ((excess != null) && (excess >= rules.min_excess_dB)) {
             peaks.push({ freq: freq, amp_dB: amp, excess_dB: excess })
         }
     }
@@ -133,11 +146,76 @@ function harmonic_number(freq, fundamental_hz, rules = peak_rules) {
 }
 
 // fundamental_hz — моторная частота или null. Добавляет source: "motor"|"frame", harmonic: N|null
-// (harmonic_number). Возвращает новый массив, исходные объекты не меняются
+// (harmonic_number) и method: "median" — запасной метод без ESC (основной — attribute_peaks_order).
+// Возвращает новый массив, исходные объекты не меняются
 function attribute_peaks(peaks, fundamental_hz, rules = peak_rules) {
     return peaks.map((peak) => {
         const harmonic = harmonic_number(peak.freq, fundamental_hz, rules)
-        return { ...peak, source: (harmonic != null) ? "motor" : "frame", harmonic: harmonic }
+        return { ...peak, source: (harmonic != null) ? "motor" : "frame", harmonic: harmonic, method: "median" }
+    })
+}
+
+// Порядковый спектр по ESC-телеметрии для атрибуции пиков — то же, что строит auto_fit_esc (core/autofit.js):
+// средняя частота моторов из маски esc_mask, окна с частотой ниже auto_fit_rules.min_freq пропускаются, сетка
+// 0.25…max_harmonic + 0.75 порядка шагом 0.005. Возвращает { spectrum, order_peaks, p5, p50, p95 }: spectrum —
+// результат auto_fit_order_spectrum, order_peaks — превышение пика на каждой гармонике (auto_fit_harmonic_peaks
+// при основной 1), p5/p50/p95 — процентили отслеживаемой частоты по окнам, Гц (auto_fit_percentile, как нижняя
+// частота в auto_fit_esc). null, если ESC-телеметрии нет или нет окон с работающими моторами [PR363]
+function motor_order_info(gyro, tracking, range, esc_mask) {
+    const esc = tracking.find((t) => t.name === "ESC")
+    if ((esc == null) || !esc.have_data()) {
+        return null
+    }
+
+    // Средняя частота моторов из маски — как get_tracked в auto_fit_esc
+    const config = { options: 0, ref: 1, freq: 0, esc_mask: esc_mask || 0 }
+    const get_tracked = (instance, index) => {
+        const freq = esc.get_interpolated_target_freq(instance, index, config)
+        if ((freq == null) || (freq[0] < auto_fit_rules.min_freq)) {
+            return null
+        }
+        return freq[0]
+    }
+    const spectrum = auto_fit_order_spectrum(gyro, range, get_tracked, { min: 0.25, max: auto_fit_rules.max_harmonic + 0.75, step: 0.005 })
+    if (spectrum.tracked.length == 0) {
+        return null
+    }
+
+    return {
+        spectrum: spectrum,
+        order_peaks: auto_fit_harmonic_peaks(spectrum, 1),
+        p5: auto_fit_percentile(spectrum.tracked, 0.05),
+        p50: auto_fit_percentile(spectrum.tracked, 0.5),
+        p95: auto_fit_percentile(spectrum.tracked, 0.95),
+    }
+}
+
+// Атрибуция по порядковому спектру (info из motor_order_info): пик на частоте F — «моторы, гармоника N», если
+// у гармоники N в порядковом спектре превышение не меньше min_excess_dB и F лежит в [N·p5, N·p95] частоты ESC
+// за интервал; иначе «рама/резонанс». Шум, который следует за оборотами, в порядковом спектре собирается в пик
+// на N, а фиксированный резонанс размазывается — поэтому превышение отличает одно от другого [PR363], а диапазон
+// частот привязывает пик к гармонике. Если подходят несколько N (широкий разброс оборотов), берётся та, у которой
+// F/N ближе к медиане частоты ESC в логарифмическом смысле [наше]. Добавляет source, harmonic и method: "order";
+// возвращает новый массив, исходные объекты не меняются
+function attribute_peaks_order(peaks, info, rules = peak_rules) {
+    return peaks.map((peak) => {
+        let harmonic = null
+        let best_distance = Infinity
+        for (const order_peak of info.order_peaks) {
+            const N = order_peak.harmonic
+            if ((N > rules.max_harmonic) || !(order_peak.excess >= rules.min_excess_dB)) {
+                continue
+            }
+            if ((peak.freq < N * info.p5) || (peak.freq > N * info.p95)) {
+                continue
+            }
+            const distance = Math.abs(Math.log(peak.freq / N / info.p50))
+            if (distance < best_distance) {
+                best_distance = distance
+                harmonic = N
+            }
+        }
+        return { ...peak, source: (harmonic != null) ? "motor" : "frame", harmonic: harmonic, method: "order" }
     })
 }
 

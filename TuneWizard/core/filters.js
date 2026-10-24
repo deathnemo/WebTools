@@ -20,6 +20,10 @@
 //   document.getElementById("ScaleWrap").checked        → без проверки: phase_wrap вызывает тот, кому нужна свёртка
 //   frequency_scale.fun(...)                            → без масштаба: notch_line_stats отдаёт герцы
 //   Notch…Show / SpecNotch…Show / calculate_filters     → убраны (DOM)
+//   внутренняя calc в calculate_transfer_function       → функция верхнего уровня filter_transfer, тело то же
+//                                                         (её зовёт core/candidates.js на своей сетке частот)
+//   estimate_post(…) берёт FFT.H                        → необязательный последний аргумент H, по умолчанию FFT.H
+// Исправлен досрочно дефект upstream 8 (FR 1200–1222, notch_line_stats): NaN в трекинге убирал среднюю линию notch.
 //
 // Нужны глобалы страницы: Libraries/Array_Math.js, core/gyro.js (find_start_index, find_end_index)
 // и классы core/tracking/*.
@@ -369,48 +373,52 @@ function load_filters(values, env, tracking) {
     return filters
 }
 
+// Передаточная функция цепочки фильтров экземпляра index по окнам time на сетке частот Z1 = z^-1, Z2 = z^-2:
+// массив по окнам комплексных H (внутренняя calc в calculate_transfer_function upstream, FR 895–933).
+// Вынесена наверх без изменения тела, чтобы core/candidates.js считал H вариантов на своей сетке, не трогая
+// FFT.H и FFT.bode.H
+function filter_transfer(filters, index, time, rate, Z1, Z2) {
+
+    const Z_len = Z1[0].length
+    let one = [new Array(Z_len), new Array(Z_len)]
+    one[0].fill(1)
+    one[1].fill(0)
+
+    let Hn_static = [one[0].slice(), one[1].slice()]
+    let Hd_static = [one[0].slice(), one[1].slice()]
+
+    // ФНЧ в полёте частоту не меняет
+    filters.static.transfer(Hn_static, Hd_static, rate, Z1, Z2)
+
+    // Статические notch
+    for (let k=0; k<filters.notch.length; k++) {
+        if (filters.notch[k].enabled() && filters.notch[k].static()) {
+            filters.notch[k].transfer(Hn_static, Hd_static, index, null, rate, Z1, Z2)
+        }
+    }
+
+    // Динамические notch — на каждом шаге времени
+    const len = time.length
+    let ret_H = new Array(len)
+    for (let j = 0; j < len; j++) {
+
+        let Hn = [Hn_static[0].slice(), Hn_static[1].slice()]
+        let Hd = [Hd_static[0].slice(), Hd_static[1].slice()]
+
+        for (let k=0; k<filters.notch.length; k++) {
+            if (filters.notch[k].enabled() && !filters.notch[k].static()) {
+                filters.notch[k].transfer(Hn, Hd, index, j, rate, Z1, Z2)
+            }
+        }
+
+        ret_H[j] = complex_div(Hn, Hd)
+    }
+
+    return ret_H
+}
+
 // Передаточная функция фильтров на сетке FFT (FFT.H, по окнам) и на сетке бодэ (FFT.bode.H)
 function calculate_transfer_function(filters, gyro) {
-
-    function calc(index, time, rate, Z1, Z2) {
-
-        const Z_len = Z1[0].length
-        let one = [new Array(Z_len), new Array(Z_len)]
-        one[0].fill(1)
-        one[1].fill(0)
-
-        let Hn_static = [one[0].slice(), one[1].slice()]
-        let Hd_static = [one[0].slice(), one[1].slice()]
-
-        // ФНЧ в полёте частоту не меняет
-        filters.static.transfer(Hn_static, Hd_static, rate, Z1, Z2)
-
-        // Статические notch
-        for (let k=0; k<filters.notch.length; k++) {
-            if (filters.notch[k].enabled() && filters.notch[k].static()) {
-                filters.notch[k].transfer(Hn_static, Hd_static, index, null, rate, Z1, Z2)
-            }
-        }
-
-        // Динамические notch — на каждом шаге времени
-        const len = time.length
-        let ret_H = new Array(len)
-        for (let j = 0; j < len; j++) {
-
-            let Hn = [Hn_static[0].slice(), Hn_static[1].slice()]
-            let Hd = [Hd_static[0].slice(), Hd_static[1].slice()]
-
-            for (let k=0; k<filters.notch.length; k++) {
-                if (filters.notch[k].enabled() && !filters.notch[k].static()) {
-                    filters.notch[k].transfer(Hn, Hd, index, j, rate, Z1, Z2)
-                }
-            }
-
-            ret_H[j] = complex_div(Hn, Hd)
-        }
-
-        return ret_H
-    }
 
     // Считаем по времени и частотам FFT — для оценки «после»
     for (let i = 0; i < gyro.length; i++) {
@@ -419,14 +427,14 @@ function calculate_transfer_function(filters, gyro) {
         }
         if (gyro[i].FFT.Z1 != null) {
             // Передаточные функции для оценки «после»
-            gyro[i].FFT.H = calc(i, gyro[i].FFT.time, gyro[i].FFT.average_sample_rate, gyro[i].FFT.Z1, gyro[i].FFT.Z2)
+            gyro[i].FFT.H = filter_transfer(filters, i, gyro[i].FFT.time, gyro[i].FFT.average_sample_rate, gyro[i].FFT.Z1, gyro[i].FFT.Z2)
 
         }
         if (gyro[i].FFT.bode != null) {
             // Если есть данные «после», используем их
 
             // Более частая сетка для бодэ
-            gyro[i].FFT.bode.H = calc(i, gyro[i].FFT.time, gyro[i].FFT.average_sample_rate, gyro[i].FFT.bode.Z1, gyro[i].FFT.bode.Z2)
+            gyro[i].FFT.bode.H = filter_transfer(filters, i, gyro[i].FFT.time, gyro[i].FFT.average_sample_rate, gyro[i].FFT.bode.Z1, gyro[i].FFT.bode.Z2)
         }
     }
 }
@@ -482,9 +490,12 @@ function phase_wrap(phase) {
 }
 
 // Оценка спектра «после» для экземпляра i по данным «до» и FFT.H: { x, y, z } уже после alias.apply_amp
-// и amplitude_scale.scale; null, если у экземпляра нет FFT или H
-function estimate_post(gyro, i, amplitude_scale, range, alias) {
-    if ((gyro[i] == null) || (gyro[i].FFT == null) || (gyro[i].FFT.x.length == 0) || (gyro[i].FFT.H == null)) {
+// и amplitude_scale.scale; null, если у экземпляра нет FFT или H.
+// H — передаточная функция по окнам (как FFT.H); по умолчанию FFT.H. Своя H (filter_transfer на FFT.Z1/Z2) нужна
+// core/candidates.js, чтобы оценить вариант параметров, не трогая FFT.H. Необязательный аргумент — дополнение
+// к upstream, без него поведение прежнее
+function estimate_post(gyro, i, amplitude_scale, range, alias, H = gyro[i]?.FFT?.H) {
+    if ((gyro[i] == null) || (gyro[i].FFT == null) || (gyro[i].FFT.x.length == 0) || (H == null)) {
         return null
     }
 
@@ -505,7 +516,7 @@ function estimate_post(gyro, i, amplitude_scale, range, alias) {
     let fft_mean_y = (new Array(fft_len)).fill(0)
     let fft_mean_z = (new Array(fft_len)).fill(0)
     for (let j=start_index;j<end_index;j++) {
-        const attenuation = complex_abs(gyro[i].FFT.H[j])
+        const attenuation = complex_abs(H[j])
 
         // Вычитаем шум, применяем передаточную функцию, возвращаем шум
         // Строго говоря, шум можно не трогать — с ним оценка менее точна,
@@ -606,8 +617,16 @@ function notch_line_stats(filters, range) {
             var mean = 0
             var min = null
             var max = null
+            // исправление дефекта upstream 8 (FR 1200–1222): NaN в трекинге (отсчёт ESC без оборотов) делал среднее
+            // NaN, и средняя линия notch пропадала. Нечисловые значения пропускаем и делим на число учтённых;
+            // если чисел в диапазоне нет — mean, min и max равны null
+            var count = 0
             for (let j=start_index;j<end_index;j++) {
                 const freq = Math.max(freq_array[j] * harmonic, lower_limit)
+                if (!Number.isFinite(freq)) {
+                    continue
+                }
+                count++
                 mean += freq
                 if ((min == null) || (freq < min)) {
                     min = freq
@@ -616,7 +635,10 @@ function notch_line_stats(filters, range) {
                     max = freq
                 }
             }
-            mean /= end_index - start_index
+            if (count == 0) {
+                return { mean: null, min: null, max: null }
+            }
+            mean /= count
 
             return { mean: mean, min:min, max:max}
         }
@@ -637,8 +659,15 @@ function notch_line_stats(filters, range) {
                 mean = 0
                 min = null
                 max = null
+                // исправление дефекта upstream 8 (FR 1200–1222): пик без чисел в диапазоне (mean null) не входит
+                // в среднее и размах; если таких пиков нет вовсе — mean null
+                let count = 0
                 for (let j=0;j<fundamental.time.length;j++) {
                     let mean_range = get_mean_and_range(fundamental.time[j], fundamental.freq[j], harmonic, lower_limit)
+                    if (mean_range.mean == null) {
+                        continue
+                    }
+                    count++
                     mean += mean_range.mean
                     if ((min == null) || (mean_range.min < min)) {
                         min = mean_range.min
@@ -647,7 +676,7 @@ function notch_line_stats(filters, range) {
                         max = mean_range.max
                     }
                 }
-                mean /= fundamental.time.length
+                mean = (count > 0) ? mean / count : null
             }
             return { mean, min, max }
         }
