@@ -152,15 +152,6 @@ function radio_value(name) {
 function step1_init() {
     setup_step1_plots()
 
-    // Заголовок таблицы пиков и подсказка допустимых чисел окон на пакет — разметка шага
-    document.querySelector("#peaks1 thead").innerHTML =
-        "<tr><th>Частота, Гц</th><th>Оси</th><th>Уровень, дБ</th><th>Над шумом, дБ</th><th>Источник</th></tr>"
-    const hint = document.createElement("p")
-    hint.className = "note"
-    hint.id = "spec_wpb_hint"
-    hint.hidden = true
-    document.getElementById("spec_raw_note").before(hint)
-
     // Тип лога, окна и версия фильтра — до «Пересчитать»
     for (const id of ["spec_log_batch", "spec_log_raw", "spec_fv_1", "spec_fv_2", "spec_fv_3", "spec_fv_4"]) {
         document.getElementById(id).addEventListener("change", step1_panel_changed)
@@ -486,12 +477,19 @@ function step1_run(fn) {
     })
 }
 
-// Посчитать недостающее и перерисовать всё
-function compute_and_redraw_step1() {
+// Посчитать недостающее без перерисовки: гироскоп, FFT, трекинг и фильтры из параметров лога. Шаг 2 зовёт это,
+// если шаг 1 ещё не считался или его расчёт устарел. Возвращает step1_ready(); ошибка — в step1.error
+function step1_prepare() {
     step1.error = null
     if (ensure_gyro()) {
         ensure_fft()
     }
+    return step1_ready()
+}
+
+// Посчитать недостающее и перерисовать всё
+function compute_and_redraw_step1() {
+    step1_prepare()
     fill_step1_panel()
     fill_step1_info()
     redraw_step1()
@@ -665,9 +663,60 @@ function peak_source_text(peak) {
     return (peak.source === "motor") ? "моторы, гармоника " + peak.harmonic : "рама/резонанс"
 }
 
+// Способ атрибуции словами — столбец «Метод» таблицы пиков
+const PEAK_METHOD_NAMES = { order: "порядковый спектр", median: "медиана ESC/газа" }
+
 // Пики первичного гироскопа (до фильтров, без них — после) в дБ при любой выбранной шкале и без алиасинга —
 // на настоящих частотах. Пики ищутся на каждой оси и сливаются по частоте (find_axis_peaks); происхождение —
-// по моторной частоте (медиана ESC или цели газа), уточнённой по пику первой гармоники (refine_fundamental).
+// attribute_peaks_auto: по порядковому спектру ESC, а без ESC-телеметрии — по медиане ESC или цели газа,
+// уточнённой по пику первой гармоники. Общая часть таблицы шага 1 и вариантов notch шага 2. Вызывать при step1_ready().
+// Возвращает { sensor, instance, post_filter, peaks: [{ freq, amp_dB, excess_dB, axes, source, harmonic, method }]
+// по убыванию превышения, method: "order" | "median", info } (info — как у attribute_peaks_auto); null, если у
+// первичного гироскопа нет окон FFT
+function step1_peaks() {
+    const gyro = state.gyro
+    const sensor = gyro.primary ?? gyro.first_gyro
+    let instance = find_instance(gyro, sensor, false)
+    if (instance == null) {
+        instance = find_instance(gyro, sensor, true)
+    }
+    if (instance == null) {
+        return null
+    }
+
+    const range = [state.settings.start, state.settings.end]
+    const FFT = gyro[instance].FFT
+    const mean = mean_spectrum(FFT, spectrum_amplitude_scale("dB"), range, alias_obj(FFT, { mode: "none" }))
+    const found = find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z })
+    // Маска ESC и параметры цели газа — первого notch из лога
+    const values = values_from_log()
+    const attribution = attribute_peaks_auto(found, { gyro: gyro, tracking: state.tracking, range: range, esc_mask: values.INS_HNTCH_ESCMSK,
+                                                      values: values, bins: mean.bins })
+    return { sensor: sensor, instance: instance, post_filter: gyro[instance].post_filter, peaks: attribution.peaks, method: attribution.method,
+             info: attribution.info }
+}
+
+// Пояснение способа атрибуции для подписи под таблицей пиков
+function peak_method_text(analysis) {
+    const info = analysis.info
+    if (analysis.method === "order") {
+        return "Происхождение — по порядковому спектру ESC (метод автоподбора PR #363): пик — моторы, гармоника N, если у гармоники N " +
+            "в порядковом спектре превышение не меньше " + peak_rules.min_excess_dB + " дБ и частота пика лежит в N × (p5…p95) частоты ESC; иначе рама/резонанс. " +
+            "Частота ESC за интервал: p5 " + info.p5.toFixed(1) + ", p50 " + info.p50.toFixed(1) + ", p95 " + info.p95.toFixed(1) + " Гц."
+    }
+    let motor_text
+    if (info.median_hz == null) {
+        motor_text = "Моторная частота не определена (нет ESC и цели газа) — все пики отнесены к раме."
+    } else if (info.fundamental_hz !== info.median_hz) {
+        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + info.median_hz.toFixed(1) +
+                     " Гц, уточнена по пику первой гармоники до " + info.fundamental_hz.toFixed(1) + " Гц."
+    } else {
+        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + info.fundamental_hz.toFixed(1) + " Гц."
+    }
+    return "Происхождение — по медиане ESC или цели газа (порядкового спектра нет: нужны ESC-телеметрия и запись «до» фильтров). " + motor_text +
+        " Гармоника N — если отношение частоты пика к моторной отличается от целого N не больше чем на " + peak_rules.harmonic_tolerance + "."
+}
+
 // Таблица, пояснение и вердикт шага
 function redraw_peaks1() {
     const table = document.getElementById("peaks1")
@@ -688,54 +737,30 @@ function redraw_peaks1() {
         return
     }
 
-    const gyro = state.gyro
-    const sensor = gyro.primary ?? gyro.first_gyro
-    let instance = find_instance(gyro, sensor, false)
-    if (instance == null) {
-        instance = find_instance(gyro, sensor, true)
-    }
-    if (instance == null) {
+    const analysis = step1_peaks()
+    if (analysis == null) {
         table.hidden = true
         note.hidden = true
         spec_verdict("fail", "Нет окон FFT в данных гироскопа: интервал или пакеты слишком короткие для окна")
         return
     }
-
-    const range = [state.settings.start, state.settings.end]
-    const FFT = gyro[instance].FFT
-    const mean = mean_spectrum(FFT, spectrum_amplitude_scale("dB"), range, alias_obj(FFT, { mode: "none" }))
-    const peaks_found = find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z })
-
-    const values = values_from_log()
-    const median_fundamental = motor_fundamental(state.tracking, values, range)
-    const fundamental = refine_fundamental(peaks_found, median_fundamental)
-    const peaks = attribute_peaks(peaks_found, fundamental)
+    const peaks = analysis.peaks
 
     table.querySelector("tbody").innerHTML = peaks.slice(0, SPEC_MAX_PEAKS).map((peak) =>
         '<tr><td class="num">' + peak.freq.toFixed(1) + '</td><td class="num">' + peak.axes.join(", ") +
         '</td><td class="num">' + peak.amp_dB.toFixed(1) + '</td><td class="num">' + peak.excess_dB.toFixed(1) +
-        '</td><td>' + html_escape(peak_source_text(peak)) + '</td></tr>'
+        '</td><td>' + html_escape(peak_source_text(peak)) + '</td><td>' + html_escape(PEAK_METHOD_NAMES[peak.method]) + '</td></tr>'
     ).join("")
     table.hidden = peaks.length == 0
 
-    let motor_text
-    if (median_fundamental == null) {
-        motor_text = "Моторная частота не определена (нет ESC и цели газа) — все пики отнесены к раме."
-    } else if (fundamental !== median_fundamental) {
-        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + median_fundamental.toFixed(1) +
-                     " Гц, уточнена по пику первой гармоники до " + fundamental.toFixed(1) + " Гц."
-    } else {
-        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + fundamental.toFixed(1) + " Гц."
-    }
-    note.textContent = "Гироскоп " + (sensor + 1) + ", " + (gyro[instance].post_filter ? "после фильтров (записи «до» нет)" : "до фильтров") +
+    note.textContent = "Гироскоп " + (analysis.sensor + 1) + ", " + (analysis.post_filter ? "после фильтров (записи «до» нет)" : "до фильтров") +
         ", пики по осям X/Y/Z не меньше " + peak_rules.min_excess_dB + " дБ над медианой шума в ±" + peak_rules.floor_half_width_hz + " Гц" +
-        ((peaks.length > SPEC_MAX_PEAKS) ? "; показаны " + SPEC_MAX_PEAKS + " из " + peaks.length : "") + ". " + motor_text +
-        " Гармоника N — если отношение частоты пика к моторной отличается от целого N не больше чем на " + peak_rules.harmonic_tolerance + "."
+        ((peaks.length > SPEC_MAX_PEAKS) ? "; показаны " + SPEC_MAX_PEAKS + " из " + peaks.length : "") + ". " + peak_method_text(analysis)
     note.hidden = false
 
     // Шаг диагностический: ok с описанием шума; warn — только при предупреждениях загрузки, FFT или фильтров
     const status = (warnings.length > 0) ? "warn" : "ok"
-    const gyro_filter = values.INS_GYRO_FILTER
+    const gyro_filter = values_from_log().INS_GYRO_FILTER
     const above = (gyro_filter > 0) ? peaks.filter((peak) => peak.freq > gyro_filter).length : 0
     const tail = (above > 0) ? "Пиков выше INS_GYRO_FILTER (" + gyro_filter + " Гц): " + above + " — их задача notch на шаге 2."
                              : "Пиков выше INS_GYRO_FILTER (" + gyro_filter + " Гц) нет."

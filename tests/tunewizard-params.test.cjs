@@ -1,0 +1,64 @@
+// Тесты файла параметров мастера настройки (TuneWizard/core/params.js): текст .param и его разбор.
+// Скрипты — классические (общая глобальная область), поэтому загружаются как на странице:
+// по порядку через vm.runInThisContext (как в tests/tunewizard-core.test.cjs).
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const vm = require('node:vm')
+
+const repo = path.resolve(__dirname, '..')
+
+// Загрузить скрипты страницы в глобальную область, в том порядке, что и index.html
+function load_page_scripts(files) {
+    for (const file of files) {
+        const full = path.join(repo, file)
+        vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
+    }
+}
+
+load_page_scripts([
+    'Libraries/Param_Helpers.js',
+    'TuneWizard/core/params.js',
+])
+
+test('param_file_text: строки «ИМЯ,ЗНАЧЕНИЕ» в натуральном порядке имён', () => {
+    const text = param_file_text({ INS_HNTCH_FREQ: 40, INS_HNTC2_ENABLE: 0, INS_GYRO_FILTER: 20, INS_HNTCH_ATT: 15 })
+    assert.equal(text, 'INS_GYRO_FILTER,20\nINS_HNTC2_ENABLE,0\nINS_HNTCH_ATT,15\nINS_HNTCH_FREQ,40\n')
+})
+
+test('param_file_text: числа — кратчайшая запись того же float32 (param_to_string)', () => {
+    // 0.7 во float32 — 0.699999988…: записывается как 0.7, а не 0.699999988079071
+    const text = param_file_text({ INS_HNTCH_FM_RAT: Math.fround(0.7), INS_HNTCH_REF: 0.25, INS_HNTCH_BW: 18.5 })
+    assert.equal(text, 'INS_HNTCH_BW,18.5\nINS_HNTCH_FM_RAT,0.7\nINS_HNTCH_REF,0.25\n')
+    assert.equal(param_to_string(Math.fround(0.7)), '0.7')
+})
+
+test('parse_param_file: обратно то же, что записали', () => {
+    const values = { INS_GYRO_FILTER: 20, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_FREQ: 37, INS_HNTCH_BW: 19,
+                     INS_HNTCH_ATT: 24, INS_HNTCH_REF: 1, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 5, INS_HNTCH_OPTS: 6, INS_HNTC2_FREQ: 153 }
+    assert.deepEqual(parse_param_file(param_file_text(values)), values)
+    // Дробные значения float32 переживают круг через текст с точностью float32
+    const parsed = parse_param_file(param_file_text({ INS_HNTCH_FM_RAT: Math.fround(0.7) }))
+    assert.equal(Math.fround(parsed.INS_HNTCH_FM_RAT), Math.fround(0.7))
+})
+
+test('parse_param_file: комментарии, пустые строки, CRLF и последнее значение при повторе', () => {
+    const text = '# Файл от мастера\r\n\r\nINS_HNTCH_FREQ,40\r\n   \r\nINS_HNTCH_ATT,15  # ослабление\r\n#INS_HNTCH_BW,99\r\nINS_HNTCH_FREQ,45\r\n'
+    assert.deepEqual(parse_param_file(text), { INS_HNTCH_FREQ: 45, INS_HNTCH_ATT: 15 })
+})
+
+test('parse_param_file: формат Mission Planner «ИМЯ,ЗНАЧЕНИЕ»', () => {
+    assert.deepEqual(parse_param_file('INS_HNTCH_ENABLE,1\nINS_HNTCH_REF,0.25\nINS_HNTCH_HMNCS,7\n'),
+        { INS_HNTCH_ENABLE: 1, INS_HNTCH_REF: 0.25, INS_HNTCH_HMNCS: 7 })
+})
+
+test('parse_param_file: формат MAVProxy «ИМЯ ЗНАЧЕНИЕ», табуляция и «=»', () => {
+    const text = 'INS_HNTCH_ENABLE        1\nINS_HNTCH_FREQ\t40.5\nINS_HNTCH_BW = 20\nINS_HNTCH_ATT=30\n'
+    assert.deepEqual(parse_param_file(text), { INS_HNTCH_ENABLE: 1, INS_HNTCH_FREQ: 40.5, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 30 })
+})
+
+test('parse_param_file: строки без числового значения пропускаются', () => {
+    const text = 'INS_HNTCH_FREQ\nINS_HNTCH_BW,\nINS_HNTCH_ATT,abc\nINS_HNTCH_REF,-0.5\n'
+    assert.deepEqual(parse_param_file(text), { INS_HNTCH_REF: -0.5 })
+})

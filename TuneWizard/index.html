@@ -16,6 +16,7 @@
 <script type="text/javascript" src="../Libraries/Array_Math.js"></script>
 <script type="text/javascript" src="../Libraries/fft.js"></script>
 <script type="text/javascript" src="../Libraries/DecodeDevID.js"></script>
+<script type="text/javascript" src="../Libraries/Param_Helpers.js"></script>
 
 <script type="text/javascript" src="core/log.js"></script>
 <script type="text/javascript" src="core/checks.js"></script>
@@ -33,6 +34,7 @@
 <script type="text/javascript" src="core/metrics.js"></script>
 <script type="text/javascript" src="core/autofit.js"></script>
 <script type="text/javascript" src="core/candidates.js"></script>
+<script type="text/javascript" src="core/params.js"></script>
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
 <script type="text/javascript" src="steps/step1.js"></script>
@@ -299,6 +301,7 @@ tr:last-child td{border-bottom:0}
         <button type="button" id="open_filterreview" disabled>Открыть в FilterReview</button>
       </div>
     </div>
+    <p class="note" id="spec_wpb_hint" hidden></p>
     <p class="note" id="spec_raw_note" hidden>Окно FFT raw-лога задаётся на шаге 0.</p>
     <div class="info" id="spec_info"></div>
     <p class="note">Тип лога, число окон на пакет и версия фильтра применяются кнопкой «Пересчитать»; шкалы и алиасинг — сразу. Линии включаются и выключаются щелчком по легенде графика.</p>
@@ -342,7 +345,7 @@ tr:last-child td{border-bottom:0}
   <div class="head"><span class="eyebrow">Пики</span><h2>Заметные пики шума</h2></div>
   <div class="tablewrap" id="peaks1" hidden>
     <table>
-      <thead><tr><th>Частота, Гц</th><th>Уровень, дБ</th><th>Над шумом, дБ</th><th>Источник</th></tr></thead>
+      <thead><tr><th>Частота, Гц</th><th>Оси</th><th>Уровень, дБ</th><th>Над шумом, дБ</th><th>Источник</th><th>Метод</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
