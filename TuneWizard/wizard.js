@@ -199,8 +199,8 @@ function set_step(n) {
         section.hidden = Number(section.dataset.step) !== n
     }
     update_wizbar()
-    // Plotly не перерисовывает скрытый контейнер корректно: после показа секции обновить графики
-    restyle_plots()
+    // Графики показанного шага дорисовать: скрытыми они не рисуются (политика в plots.js)
+    show_plots(document.querySelector('section[data-step="' + n + '"]'))
 }
 
 function update_wizbar() {
