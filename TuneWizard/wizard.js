@@ -28,8 +28,9 @@ const state = {
     filters: null,
     // { params, build_type, filter_version } для ядра; filter_version меняется на месте (его читают источники трекинга)
     env: null,
-    // Содержимое и сам файл лога: File нужен для «Открыть в FilterReview»
-    log_buffer: null,
+    // Предупреждения загрузки, которые показывают шаги (например, неподдерживаемая версия фильтра)
+    load_warnings: [],
+    // Файл лога: нужен для «Открыть в FilterReview»
     file: null,
 }
 
@@ -222,6 +223,19 @@ function step_available(n) {
     return check_status("pid_log") !== "fail"
 }
 
+// Окно FFT шага 0 действует только на raw-лог (GYR). Тип — выбор шага 1, а до него — как выберет load_gyro:
+// raw, если он есть, иначе batch
+function raw_window_used() {
+    if (state.log == null) {
+        return false
+    }
+    const types = state.log.messageTypes
+    const have_raw = "GYR" in types
+    const have_batch = ("ISBH" in types) && ("ISBD" in types)
+    const type = state.spectrum.log_type ?? (have_raw ? "raw" : (have_batch ? "batch" : null))
+    return type === "raw"
+}
+
 // Хук показа шага: шаги из steps/*.js готовят данные и графики своей секции
 function on_show_step(n) {
     if ((n === 1) && (typeof step1_show === "function")) {
@@ -295,6 +309,8 @@ function read_file(input) {
         load_failed("Не удалось прочитать файл «" + state.file_name + "»: " + (reader.error ? reader.error.message : "ошибка чтения"))
     }
     reader.readAsArrayBuffer(file)
+    // File уже взят: очистить поле, чтобы повторный выбор того же файла (перезагрузка лога) снова вызвал change
+    input.value = ""
 }
 
 function show_verdict(status, text) {
@@ -329,7 +345,7 @@ function reset() {
     state.logged = null
     state.filters = null
     state.env = null
-    state.log_buffer = null
+    state.load_warnings = []
     state.file = null
     if (typeof step1_reset === "function") {
         step1_reset()
@@ -379,12 +395,18 @@ async function load(buffer, file = null) {
     state.info = log_info(log, state.version)
     state.vibe = vibe_summary(log)
     state.checks = run_checks(state.info, state.params, state.vibe)
-    // Окружение ядра. Версия фильтра из VER.FV; без неё и при неизвестной версии — последняя (4). FilterReview
-    // при неизвестной версии тоже берёт последнюю, а без VER.FV оставляет 1.0 из reset — здесь сознательно 4
+    // Окружение ядра. Версия фильтра из VER.FV, как в FilterReview: без неё — 1 (FilterReview оставляет 1.0 из reset),
+    // неподдерживаемая — последняя (4) с предупреждением (FilterReview показывает alert)
     const fv = state.info.filter_version
-    state.env = { params: state.params, build_type: state.info.build_type, filter_version: [1, 2, 3, 4].includes(fv) ? fv : 4 }
-    state.spectrum.filter_version = state.env.filter_version
-    state.log_buffer = buffer
+    let filter_version = 1
+    if (fv != null) {
+        filter_version = [1, 2, 3, 4].includes(fv) ? fv : 4
+        if (filter_version !== fv) {
+            state.load_warnings.push("Неподдерживаемая версия фильтра " + fv + ", взята 4")
+        }
+    }
+    state.env = { params: state.params, build_type: state.info.build_type, filter_version: filter_version }
+    state.spectrum.filter_version = filter_version
     state.file = file
 
     document.title = "Мастер настройки: " + state.file_name
@@ -394,9 +416,10 @@ async function load(buffer, file = null) {
     render_checks()
     plot_flight()
 
-    for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
+    for (const id of ["TimeStart", "TimeEnd"]) {
         document.getElementById(id).disabled = false
     }
+    document.getElementById("FFTWindow_size").disabled = !raw_window_used()
     update_wizbar()
     console.log("Загрузка заняла " + Math.round(performance.now() - start) + " мс")
 }

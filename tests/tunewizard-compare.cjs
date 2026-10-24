@@ -1,9 +1,10 @@
 // Регрессия мастера настройки против FilterReview в настоящем браузере (Playwright + Chrome).
 // Запуск: npm run test:tunewizard-compare
 // Один лог открывается в FilterReview и в мастере с одинаковыми интервалом анализа, типом лога, числом окон
-// на пакет и шкалами (дБ, Гц, линейная ось, без алиасинга); данные графиков сравниваются поэлементно:
-// средний спектр первичного гироскопа (до / после / оценка «после» по X, Y, Z) и спектрограмма (оси и первые
-// 5 строк матрицы). Допуск |a − b| ≤ 1e-6·max(1, |a|); при расхождении — первая позиция и значения, код выхода 1.
+// на пакет, версией фильтра (как выбрана в FilterReview) и шкалой частоты (Гц, линейная ось); данные графиков
+// сравниваются поэлементно: средний спектр первичного гироскопа (до / после / оценка «после» по X, Y, Z)
+// и спектрограмма (оси и первые 5 строк матрицы) — в двух конфигурациях: дБ без алиасинга и PSD со свёрнутым
+// алиасингом. Допуск |a − b| ≤ 1e-6·max(1, |a|); при расхождении — первая позиция и значения, код выхода 1.
 // Нужны те же лог, браузер и python, что для tests/tunewizard-browser.cjs; без лога тест пропускается.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -106,6 +107,35 @@ function compare_arrays(label, a, b) {
     return { ok: true, count: a.length, max_rel, mismatch: null }
 }
 
+// Поэлементное сравнение снимков FilterReview и мастера одной конфигурации; label — подпись конфигурации
+function compare_snapshots(label, fr_snap, wz_snap) {
+    const results = []
+    for (let t = 0; t < 3; t++) {
+        for (let a = 0; a < 3; a++) {
+            const fr_trace = fr_snap.traces[t * 3 + a]
+            const name = 'Гироскоп 1 · ' + WIZARD_TYPES[t] + ' · ' + AXES[a]
+            if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
+                console.log('  ' + label + ': пропуск ' + name + ' — в FilterReview нет данных (' + FR_TYPES[t] + ' ' + AXES[a] + ')')
+                continue
+            }
+            const wz_trace = wz_snap.traces[name]
+            results.push(compare_arrays(label + ' · ' + name + ' · x', fr_trace.x, wz_trace?.x))
+            results.push(compare_arrays(label + ' · ' + name + ' · y', fr_trace.y, wz_trace?.y))
+        }
+    }
+    results.push(compare_arrays(label + ' · спектрограмма · x (время)', fr_snap.heat.x, wz_snap.heat.x))
+    results.push(compare_arrays(label + ' · спектрограмма · y (частота)', fr_snap.heat.y, wz_snap.heat.y))
+    if (fr_snap.heat.rows !== wz_snap.heat.rows) {
+        results.push({ ok: false, count: 0, max_rel: 0, mismatch: label + ' · спектрограмма: строк FilterReview ' + fr_snap.heat.rows + ', мастер ' + wz_snap.heat.rows })
+    }
+    for (let j = 0; j < fr_snap.heat.z.length; j++) {
+        results.push(compare_arrays(label + ' · спектрограмма · z[' + j + ']', fr_snap.heat.z[j], wz_snap.heat.z[j]))
+    }
+    // Сравнение без единого числа ничего не доказывает
+    assert.ok(results.some((r) => r.count > 0), label + ': нет ни одного сравненного значения')
+    return results
+}
+
 async function main() {
     const log_path = find_log()
     if (log_path == null) {
@@ -137,13 +167,19 @@ async function main() {
             window_size: document.getElementById('FFTWindow_size').value,
             batch: document.getElementById('log_type_batch').checked,
         }))
+        fr_settings.filter_version = await fr.evaluate(() => [1, 2, 3, 4].find((v) => document.getElementById('filter_version_' + v).checked))
         for (const id of ['#ScaleLog', '#freq_ScaleLinear', '#freq_Scale_Hz', '#Aliasing_none']) {
             await fr.check(id)
         }
         await fr.evaluate(() => re_calc())
         const fr_snap = await snapshot_filterreview(fr)
+        // Вторая конфигурация: PSD и свёрнутый алиасинг (Aliasing_on) — проверка PSD и alias_obj на настоящих данных
+        await fr.check('#ScalePSD')
+        await fr.check('#Aliasing_on')
+        await fr.evaluate(() => re_calc())
+        const fr_snap_psd = await snapshot_filterreview(fr)
 
-        // 2. Мастер: тот же лог, интервал FilterReview, тот же тип лога и окна на пакет, дБ / Гц / без алиасинга
+        // 2. Мастер: тот же лог, интервал FilterReview, тот же тип лога, окна на пакет и версия фильтра, дБ / Гц / без алиасинга
         const wz = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
         wz.on('console', (m) => { if (m.type() === 'error') problems.push('мастер console: ' + m.text()) })
         wz.on('pageerror', (e) => problems.push('мастер pageerror: ' + e.message))
@@ -165,6 +201,7 @@ async function main() {
         assert.equal(await wz.isChecked('#spec_log_batch'), fr_settings.batch, 'тот же тип лога (batch)')
         await wz.fill('#spec_window_per_batch', fr_settings.window_per_batch)
         await wz.dispatchEvent('#spec_window_per_batch', 'change')
+        await wz.check('#spec_fv_' + fr_settings.filter_version)
         for (const id of ['#spec_amp_dB', '#spec_freq_Hz', '#spec_alias_none']) {
             if (!(await wz.isChecked(id))) {
                 await wz.check(id)
@@ -177,51 +214,45 @@ async function main() {
         }
         await wz.click('#spec_recalc')
         await wait_overlay(wz)
+        const wz_fv = await wz.evaluate(() => [1, 2, 3, 4].find((v) => document.getElementById('spec_fv_' + v).checked))
+        assert.equal(wz_fv, fr_settings.filter_version, 'версия фильтра мастера равна версии FilterReview')
         // Выбор спектрограммы по умолчанию — как в FilterReview: первичный гироскоп, до фильтров, ось X
         assert.deepEqual(await wz.evaluate(() => ['spec_sg_inst0', 'spec_sg_pre', 'spec_sg_x'].map((id) => document.getElementById(id).checked)), [true, true, true], 'спектрограмма: гироскоп 1, до, X')
         const wz_window = await wz.inputValue('#FFTWindow_size')
         assert.equal(wz_window, fr_settings.window_size, 'окно FFT, вычисленное из числа окон на пакет, совпадает с FilterReview')
         const wz_snap = await snapshot_wizard(wz)
+        await wz.check('#spec_amp_PSD')
+        await wait_overlay(wz)
+        await wz.check('#spec_alias_fold')
+        await wait_overlay(wz)
+        const wz_snap_psd = await snapshot_wizard(wz)
 
-        // 3. Сравнение
-        const results = []
-        for (let t = 0; t < 3; t++) {
-            for (let a = 0; a < 3; a++) {
-                const fr_trace = fr_snap.traces[t * 3 + a]
-                const label = 'Гироскоп 1 · ' + WIZARD_TYPES[t] + ' · ' + AXES[a]
-                if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
-                    console.log('  пропуск ' + label + ': в FilterReview нет данных (' + FR_TYPES[t] + ' ' + AXES[a] + ')')
-                    continue
-                }
-                const wz_trace = wz_snap.traces[label]
-                results.push(compare_arrays(label + ' · x', fr_trace.x, wz_trace?.x))
-                results.push(compare_arrays(label + ' · y', fr_trace.y, wz_trace?.y))
-            }
-        }
-        results.push(compare_arrays('спектрограмма · x (время)', fr_snap.heat.x, wz_snap.heat.x))
-        results.push(compare_arrays('спектрограмма · y (частота)', fr_snap.heat.y, wz_snap.heat.y))
-        if (fr_snap.heat.rows !== wz_snap.heat.rows) {
-            results.push({ ok: false, count: 0, max_rel: 0, mismatch: 'спектрограмма: строк FilterReview ' + fr_snap.heat.rows + ', мастер ' + wz_snap.heat.rows })
-        }
-        for (let j = 0; j < fr_snap.heat.z.length; j++) {
-            results.push(compare_arrays('спектрограмма · z[' + j + ']', fr_snap.heat.z[j], wz_snap.heat.z[j]))
-        }
-
-        const failed = results.filter((r) => !r.ok)
-        const count = results.reduce((sum, r) => sum + r.count, 0)
-        const max_rel = results.reduce((max, r) => Math.max(max, r.max_rel), 0)
+        // 3. Сравнение обеих конфигураций
         assert.deepEqual(problems, [], 'ошибки страниц')
-        if (failed.length > 0) {
-            console.error('tunewizard-compare: расхождений ' + failed.length + ' из ' + results.length + ' массивов; первое: ' + failed[0].mismatch)
-            for (const r of failed.slice(1, 6)) {
-                console.error('  ' + r.mismatch)
+        const configs = [['дБ, без алиасинга', fr_snap, wz_snap], ['PSD, свёрнутый алиасинг', fr_snap_psd, wz_snap_psd]]
+        let failed_total = 0
+        const summary = []
+        for (const [label, fr_s, wz_s] of configs) {
+            const results = compare_snapshots(label, fr_s, wz_s)
+            const failed = results.filter((r) => !r.ok)
+            const count = results.reduce((sum, r) => sum + r.count, 0)
+            const max_rel = results.reduce((max, r) => Math.max(max, r.max_rel), 0)
+            if (failed.length > 0) {
+                console.error('tunewizard-compare: ' + label + ' — расхождений ' + failed.length + ' из ' + results.length + ' массивов; первое: ' + failed[0].mismatch)
+                for (const r of failed.slice(1, 6)) {
+                    console.error('  ' + r.mismatch)
+                }
+                failed_total += failed.length
             }
+            summary.push(label + ': ' + results.length + ' массивов, ' + count + ' значений, наибольшее относительное отклонение ' + max_rel.toExponential(2))
+        }
+        if (failed_total > 0) {
             process.exitCode = 1
             return
         }
-        console.log('tunewizard-compare: совпадение с FilterReview — ' + results.length + ' массивов, ' + count + ' значений, наибольшее относительное отклонение ' +
-            max_rel.toExponential(2) + ' (допуск ' + tolerance + '); интервал ' + fr_settings.start + '–' + fr_settings.end + ' с (у мастера по умолчанию ' + wz_default.join('–') + ' с), окон на пакет ' +
-            fr_settings.window_per_batch + ', окно ' + wz_window + ', строк спектрограммы ' + wz_snap.heat.rows)
+        console.log('tunewizard-compare: совпадение с FilterReview (допуск ' + tolerance + ') — ' + summary.join('; ') + '. Интервал ' + fr_settings.start + '–' +
+            fr_settings.end + ' с (у мастера по умолчанию ' + wz_default.join('–') + ' с), окон на пакет ' + fr_settings.window_per_batch + ', окно ' + wz_window +
+            ', версия фильтра ' + wz_fv + ', строк спектрограммы ' + wz_snap.heat.rows)
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения страниц:', problems)

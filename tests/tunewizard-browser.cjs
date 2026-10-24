@@ -56,8 +56,22 @@ function step1_summary(page) {
             verdict: document.getElementById('verdict1').textContent,
             verdict_class: document.getElementById('verdict1').className,
             window_size: document.getElementById('FFTWindow_size').value,
+            xaxis: spectrum.layout.xaxis.title.text,
+            xtype: spectrum.layout.xaxis.type,
+            sg_yaxis: document.getElementById('Spectrogram1').layout.yaxis.title.text,
+            sg_ytype: document.getElementById('Spectrogram1').layout.yaxis.type,
+            columns: [...document.querySelectorAll('#peaks1 thead th')].map((th) => th.textContent),
+            peak_rows: [...document.querySelectorAll('#peaks1 tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)),
         }
     })
+}
+
+// Запомнить объекты FFT экземпляров гироскопа и проверить, что они те же: перерисовка без пересчёта FFT
+function remember_fft(page) {
+    return page.evaluate(() => { window.__fft = state.gyro.map((g) => g?.FFT ?? null) })
+}
+function same_fft(page) {
+    return page.evaluate(() => state.gyro.every((g, i) => (g?.FFT ?? null) === window.__fft[i]) && state.gyro.some((g) => g?.FFT != null))
 }
 
 async function wait_for_server(page, url, server) {
@@ -134,10 +148,15 @@ async function main() {
         await page.fill('#TimeEnd', String(start - 1))
         await page.dispatchEvent('#TimeEnd', 'change')
         assert.equal(Number(await page.inputValue('#TimeEnd')), end, 'неверный интервал откатывается')
-        // Окно FFT — степени двойки
+        // Окно FFT действует только на raw-лог: в логе только batch — поле выключено сразу после загрузки.
+        // Округление к степени двойки проверяем, временно включив поле
+        const only_batch = await page.evaluate(() => !('GYR' in state.log.messageTypes))
+        assert.equal(await page.isDisabled('#FFTWindow_size'), only_batch, 'поле окна FFT выключено, если raw-лога нет')
+        await page.evaluate(() => { document.getElementById('FFTWindow_size').disabled = false })
         await page.fill('#FFTWindow_size', '1025')
         await page.dispatchEvent('#FFTWindow_size', 'change')
         assert.equal(await page.inputValue('#FFTWindow_size'), '2048', 'окно FFT округляется к степени двойки')
+        await page.evaluate((disabled) => { document.getElementById('FFTWindow_size').disabled = disabled }, only_batch)
 
         // Шаги и тема с данными
         // Проверка gyro_log и pid_log на реальном логе не fail — открыты все шаги
@@ -168,14 +187,47 @@ async function main() {
         assert.match(s1.verdict, /Гц/, 'вердикт называет частоту')
         assert.match(s1.verdict_class, /verdict--(ok|warn)/)
         assert.equal(await page.isDisabled('#open_filterreview'), false, '«Открыть в FilterReview» доступна с загруженным логом')
+        assert.deepEqual(s1.columns, ['Частота, Гц', 'Оси', 'Уровень, дБ', 'Над шумом, дБ', 'Источник'])
+        assert.ok(s1.peak_rows.every((row) => /^[XYZ](, [XYZ])*$/.test(row[1])), 'в столбце «Оси» — оси пика: ' + JSON.stringify(s1.peak_rows))
+        // Линии логированных notch (FTN в этом логе) — только в легенде, тонкие, как выключенный SpecNotchShowLogged в FilterReview
+        const logged_lines = await page.evaluate(() => document.getElementById('Spectrogram1').data.slice(1).map((t) => [t.visible, t.line.width]))
+        assert.ok(logged_lines.length > 0 && logged_lines.every(([visible, width]) => (visible === 'legendonly') && (width === 1)), 'линии notch: ' + JSON.stringify(logged_lines))
+        assert.equal(await page.isDisabled('#FFTWindow_size'), true, 'batch-лог: поле окна FFT шага 0 выключено')
+        assert.match(await page.textContent('#spec_wpb_hint'), /допустимо окон на пакет: 1, 3, 7, 15, 31, 62, 63$/, 'подсказка окон на пакет для пакета 1024 (floor(1024 / (1 + (w − 1)·0.5)) — степень двойки)')
 
-        // Шкала амплитуды перерисовывает без FFT
+        // Шкалы, единицы, ось и алиасинг перерисовывают без FFT: объекты FFT те же
+        await remember_fft(page)
         await page.check('#spec_amp_linear')
         await wait_overlay(page)
         assert.equal((await step1_summary(page)).yaxis, 'Амплитуда', 'линейная шкала')
         await page.check('#spec_amp_dB')
         await wait_overlay(page)
         assert.equal((await step1_summary(page)).yaxis, 'Амплитуда, дБ')
+        await page.check('#spec_freq_RPM')
+        await wait_overlay(page)
+        let view = await step1_summary(page)
+        assert.equal(view.xaxis, 'Обороты, RPM', 'ось спектра в RPM')
+        assert.equal(view.sg_yaxis, 'Обороты, RPM', 'ось спектрограммы в RPM')
+        await page.check('#spec_freq_log')
+        await wait_overlay(page)
+        view = await step1_summary(page)
+        assert.equal(view.xtype, 'log', 'логарифмическая ось спектра')
+        assert.equal(view.sg_ytype, 'log', 'логарифмическая ось спектрограммы')
+        await page.uncheck('#spec_freq_log')
+        await wait_overlay(page)
+        await page.check('#spec_freq_Hz')
+        await wait_overlay(page)
+        await page.check('#spec_alias_fold')
+        await wait_overlay(page)
+        view = await step1_summary(page)
+        assert.ok(view.x_len > 0 && view.x_len !== s1.x_len, 'свёрнутый спектр — своя сетка частот: ' + view.x_len)
+        assert.equal(await page.evaluate(() => Math.max(...document.getElementById('Spectrum1').data.find((t) => t.x.length > 0).x)), 200, 'свёрнутый спектр — до SCHED_LOOP_RATE / 2')
+        await page.check('#spec_alias_none')
+        await wait_overlay(page)
+        view = await step1_summary(page)
+        assert.equal(view.xtype, 'linear')
+        assert.equal(view.x_len, s1.x_len)
+        assert.equal(await same_fft(page), true, 'смена шкал и алиасинга не пересчитывала FFT')
 
         // Окон на пакет 2: окно floor(1024/1.5) = 682 не степень двойки — вердикт fail без ошибок консоли (так же в FilterReview)
         await page.fill('#spec_window_per_batch', '2')
@@ -212,9 +264,25 @@ async function main() {
         await page.click('#wizbar button:nth-child(1)')
         assert.deepEqual(await visible_steps(page), ['0'])
 
+        // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):
+        // шаг 1 считается заново начисто
+        await page.evaluate(() => { window.__old_log = state.log; window.__fft = null })
+        await page.setInputFiles('#fileItem', log_path)
+        await page.waitForFunction(() => (state.log != null) && (state.log !== window.__old_log) &&
+            (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
+        assert.equal(await page.evaluate(() => state.gyro === null), true, 'новый лог — гироскоп ещё не загружен')
+        await page.click('#wizbar button:nth-child(2)')
+        await wait_overlay(page)
+        const s4 = await step1_summary(page)
+        assert.ok(s4.with_data >= 3 && s4.peaks >= 1, 'после повторной загрузки спектр и пики снова есть')
+        assert.deepEqual(s4.peak_rows, s1.peak_rows, 'та же таблица пиков')
+        assert.equal(s4.verdict, s1.verdict, 'тот же вердикт')
+        await page.click('#wizbar button:nth-child(1)')
+
         assert.deepEqual(problems, [], 'ошибки консоли')
         console.log('tunewizard-browser: шаги 0–1 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
+        console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

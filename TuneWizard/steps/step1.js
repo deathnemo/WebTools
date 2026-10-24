@@ -9,13 +9,15 @@ const SPEC_TYPE_NAMES = { pre: "до", post: "после", est: "оценка" }
 const SPEC_AXES = ["x", "y", "z"]
 // Строк в таблице пиков
 const SPEC_MAX_PEAKS = 10
+// Наибольшее число окон на пакет в подсказке допустимых значений
+const SPEC_MAX_WINDOWS_PER_BATCH = 64
 
-// Внутреннее состояние шага: с какими настройками посчитан FFT и фильтры, текст ошибки расчёта
+// Внутреннее состояние шага: с какими настройками посчитан FFT и фильтры, ошибка и предупреждения расчёта FFT
 const step1 = {
     fft_key: null,        // "batch:<окон на пакет>" или "raw:<окно>" — настройки посчитанного FFT
     filters_key: null,    // версия фильтра, с которой посчитаны фильтры и передаточная функция
     error: null,          // ошибка загрузки гироскопа или FFT: показывается в вердикте вместо результатов
-    warnings: [],         // предупреждения загрузки, FFT и фильтров
+    fft_warnings: [],     // предупреждения последнего расчёта FFT (живут, пока FFT не пересчитан)
 }
 
 // Индекс трассы среднего спектра: сенсор s (0–2), тип t (0 до, 1 после, 2 оценка), ось a (0–2)
@@ -150,6 +152,15 @@ function radio_value(name) {
 function step1_init() {
     setup_step1_plots()
 
+    // Заголовок таблицы пиков и подсказка допустимых чисел окон на пакет — разметка шага
+    document.querySelector("#peaks1 thead").innerHTML =
+        "<tr><th>Частота, Гц</th><th>Оси</th><th>Уровень, дБ</th><th>Над шумом, дБ</th><th>Источник</th></tr>"
+    const hint = document.createElement("p")
+    hint.className = "note"
+    hint.id = "spec_wpb_hint"
+    hint.hidden = true
+    document.getElementById("spec_raw_note").before(hint)
+
     // Тип лога, окна и версия фильтра — до «Пересчитать»
     for (const id of ["spec_log_batch", "spec_log_raw", "spec_fv_1", "spec_fv_2", "spec_fv_3", "spec_fv_4"]) {
         document.getElementById(id).addEventListener("change", step1_panel_changed)
@@ -182,8 +193,8 @@ function step1_reset() {
     step1.fft_key = null
     step1.filters_key = null
     step1.error = null
-    step1.warnings = []
-    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note"]) {
+    step1.fft_warnings = []
+    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note", "spec_wpb_hint"]) {
         document.getElementById(id).hidden = true
     }
     document.getElementById("spec_info").textContent = ""
@@ -241,9 +252,11 @@ function step1_panel_changed() {
                   (pending.window_per_batch !== state.spectrum.window_per_batch) ||
                   (pending.filter_version !== state.spectrum.filter_version)
     document.getElementById("spec_recalc").classList.toggle("primary", stale)
-    // Поле окон на пакет — только для batch-лога; у raw окно задаётся на шаге 0
+    // Поле окон на пакет и подсказка — только для batch-лога; у raw окно задаётся на шаге 0
     const batch = pending.log_type === "batch"
     document.getElementById("spec_batch_field").hidden = !batch
+    const hint = document.getElementById("spec_wpb_hint")
+    hint.hidden = !batch || (hint.textContent === "")
     document.getElementById("spec_raw_note").hidden = batch || (pending.log_type == null)
 }
 
@@ -256,7 +269,28 @@ function step1_view_changed() {
     step1_run(() => redraw_step1())
 }
 
-// Панель по состоянию: применённые настройки, доступные типы лога, версия фильтра
+// Числа окон на пакет до SPEC_MAX_WINDOWS_PER_BATCH, при которых окно batch — степень двойки: формула run_batch_fft
+// floor(N / (1 + (w − 1)·0.5)) для длины пакета N каждого экземпляра (общие для всех экземпляров)
+function valid_windows_per_batch(gyro) {
+    let valid = null
+    for (let i = 0; i < gyro.length; i++) {
+        if ((gyro[i] == null) || (gyro[i].length == 0)) {
+            continue
+        }
+        const num_points = gyro[i][0].x.length
+        const list = []
+        for (let w = 1; w <= SPEC_MAX_WINDOWS_PER_BATCH; w++) {
+            const size = Math.floor(num_points / (1 + (w - 1) * 0.5))
+            if ((size >= 1) && Number.isInteger(Math.log2(size))) {
+                list.push(w)
+            }
+        }
+        valid = (valid == null) ? list : valid.filter((w) => list.includes(w))
+    }
+    return valid ?? []
+}
+
+// Панель по состоянию: применённые настройки, доступные типы лога, версия фильтра, подсказка окон на пакет
 function fill_step1_panel() {
     const log = state.log
     const have_batch = ("ISBH" in log.messageTypes) && ("ISBD" in log.messageTypes)
@@ -276,13 +310,22 @@ function fill_step1_panel() {
     document.getElementById("spec_freq_log").checked = state.spectrum.log_frequency
     document.getElementById("spec_alias_" + state.spectrum.aliasing).checked = true
     document.getElementById("open_filterreview").disabled = state.file == null
+
+    const hint = document.getElementById("spec_wpb_hint")
+    hint.textContent = ""
+    if ((state.gyro != null) && (state.gyro.error == null) && (state.gyro.type === "batch")) {
+        const valid = valid_windows_per_batch(state.gyro)
+        const lengths = [...new Set(state.gyro.filter((g) => (g != null) && (g.length > 0)).map((g) => g[0].x.length))]
+        hint.textContent = "Окно FFT — степень двойки, поэтому для пакета " + lengths.join(", ") + " отсчётов допустимо окон на пакет: " +
+            ((valid.length > 0) ? valid.join(", ") : "ни одного до " + SPEC_MAX_WINDOWS_PER_BATCH)
+    }
     step1_panel_changed()
 }
 
 // Сведения о сенсорах: имя и шина из INS_GYR*_ID, частота IMU, частота дискретизации и разрешение FFT
 function fill_step1_info() {
     const gyro = state.gyro
-    const info = (gyro != null) ? fft_info(gyro) : {}
+    const info = ((gyro != null) && (gyro.error == null)) ? fft_info(gyro) : {}
     const lines = []
     for (let s = 0; s < 3; s++) {
         const sensor = gyro?.gyro_info?.[s]
@@ -353,7 +396,7 @@ function default_spectrogram_selection() {
 // ---------- Расчёт ----------
 
 // Загрузить гироскоп, если ещё не загружен (или сменили тип лога): источники трекинга, логированные notch,
-// видимость трасс и выбор спектрограммы. false — данных нет, текст в step1.error
+// видимость трасс и выбор спектрограммы. false — данных нет, текст в step1.error; производные тогда сброшены
 function ensure_gyro() {
     if (state.gyro != null) {
         step1.error = state.gyro.error
@@ -361,6 +404,9 @@ function ensure_gyro() {
     }
     step1.fft_key = null
     step1.filters_key = null
+    step1.fft_warnings = []
+    state.tracking = null
+    state.logged = null
     state.filters = null
     state.gyro = load_gyro(state.log, state.env, { log_type: state.spectrum.log_type })
     if (state.gyro.error != null) {
@@ -370,8 +416,8 @@ function ensure_gyro() {
     state.spectrum.log_type = state.gyro.type
     state.tracking = create_tracking(state.log, state.env, state.gyro)
     state.logged = create_logged(state.log)
-    // Окно FFT шага 0 действует только на raw-лог; для batch оно вычисляется из числа окон на пакет
-    document.getElementById("FFTWindow_size").disabled = state.gyro.type === "batch"
+    // Окно FFT шага 0 действует только на raw-лог
+    document.getElementById("FFTWindow_size").disabled = !raw_window_used()
     default_spectrum_visibility()
     default_spectrogram_selection()
     return true
@@ -387,6 +433,7 @@ function ensure_fft() {
     if (key !== step1.fft_key) {
         step1.fft_key = null
         step1.filters_key = null
+        step1.fft_warnings = []
         state.filters = null
         clear_gyro_fft(gyro)
         let result
@@ -398,7 +445,7 @@ function ensure_fft() {
             step1.error = "Не удалось посчитать FFT: " + e.message
             return false
         }
-        step1.warnings.push(...result.warnings)
+        step1.fft_warnings = result.warnings
         interpolate_tracking(state.tracking, gyro)
         step1.fft_key = key
 
@@ -417,7 +464,6 @@ function ensure_fft() {
         // Источники трекинга держат ссылку на state.env — версию меняем на месте
         state.env.filter_version = state.spectrum.filter_version
         state.filters = load_filters(values_from_log(), state.env, state.tracking)
-        step1.warnings.push(...state.filters.warnings)
         // Логированные notch рисуются с гармониками из параметров лога (FR 2586)
         for (let i = 0; i < state.filters.notch.length; i++) {
             state.logged[i].harmonics = state.filters.notch[i].harmonics()
@@ -443,9 +489,7 @@ function step1_run(fn) {
 // Посчитать недостающее и перерисовать всё
 function compute_and_redraw_step1() {
     step1.error = null
-    step1.warnings = []
     if (ensure_gyro()) {
-        step1.warnings.push(...state.gyro.warnings)
         ensure_fft()
     }
     fill_step1_panel()
@@ -479,9 +523,19 @@ function step1_recalc() {
 
 // ---------- Перерисовка ----------
 
-// Данные для графиков есть: гироскоп загружен и FFT посчитан без ошибок
+// Расчёт шага актуален: гироскоп загружен, FFT посчитан с текущими настройками, источники трекинга и фильтры
+// текущей версии готовы. Шаг 2 опирается на это же состояние (state.gyro, state.tracking, state.filters)
 function step1_ready() {
-    return (step1.error == null) && (state.gyro != null) && (step1.fft_key != null)
+    if ((step1.error != null) || (state.gyro == null) || (state.gyro.error != null) || (step1.fft_key == null)) {
+        return false
+    }
+    const key = (state.gyro.type === "batch") ? "batch:" + state.spectrum.window_per_batch : "raw:" + state.settings.window_size
+    return (step1.fft_key === key) && (state.tracking != null) && (state.filters != null) && (step1.filters_key === state.spectrum.filter_version)
+}
+
+// Предупреждения шага, собранные заново из источников: загрузка лога и гироскопа, последний FFT, фильтры
+function step1_warnings() {
+    return [...new Set([...(state.load_warnings ?? []), ...(state.gyro?.warnings ?? []), ...step1.fft_warnings, ...(state.filters?.warnings ?? [])])]
 }
 
 function redraw_step1() {
@@ -544,6 +598,8 @@ function redraw_spectrum1() {
 function redraw_spectrogram1() {
     const p = plot("Spectrogram1")
     const heat = p.data[0]
+    // Видимость линий, выбранную в легенде, сохраняем между перерисовками (по подписи линии)
+    const line_visible = Object.fromEntries(p.data.slice(1).map((trace) => [trace.meta, trace.visible]))
     p.data.length = 1
     heat.x = []
     heat.y = []
@@ -574,21 +630,24 @@ function redraw_spectrogram1() {
             }
         }
 
-        // Линии логированных notch (FTN/FTNS), если они есть в логе
+        // Линии логированных notch (FTN/FTNS), если они есть в логе. По умолчанию только в легенде — как флажок
+        // SpecNotchShowLogged в FilterReview, выключенный по умолчанию
         const range = [state.settings.start, state.settings.end]
         const lines = tracking_lines(state.filters, state.logged, range)
         const line_hover = "<extra></extra>%{meta}<br>%{x:.2f} с<br>" + spec_freq_hover("y")
         for (let i = 0; i < lines.length; i++) {
             for (const line of lines[i].logged) {
                 const name = (line.harmonic == 1) ? "основная" : "гармоника " + line.harmonic
+                const meta = "Notch " + (i + 1) + " в логе: " + name
                 p.data.push({
                     type: "scatter",
                     mode: "lines",
                     name: name,
-                    meta: "Notch " + (i + 1) + " в логе: " + name,
+                    meta: meta,
                     legendgroup: "notch" + i,
                     legendgrouptitle: { text: "Notch " + (i + 1) + " в логе" },
-                    line: { width: 1.5, dash: "dashdot" },
+                    line: { width: 1, dash: "dashdot" },
+                    visible: line_visible[meta] ?? "legendonly",
                     hovertemplate: line_hover,
                     x: line.time,
                     y: freq.fun(line.freq),
@@ -606,16 +665,17 @@ function peak_source_text(peak) {
     return (peak.source === "motor") ? "моторы, гармоника " + peak.harmonic : "рама/резонанс"
 }
 
-// Пики первичного гироскопа (до фильтров, без них — после) в дБ при любой выбранной шкале, их происхождение,
-// таблица и вердикт шага. Оси складываются по мощности, как в автоподборе PR #363; без алиасинга —
-// пики на настоящих частотах
+// Пики первичного гироскопа (до фильтров, без них — после) в дБ при любой выбранной шкале и без алиасинга —
+// на настоящих частотах. Пики ищутся на каждой оси и сливаются по частоте (find_axis_peaks); происхождение —
+// по моторной частоте (медиана ESC или цели газа), уточнённой по пику первой гармоники (refine_fundamental).
+// Таблица, пояснение и вердикт шага
 function redraw_peaks1() {
     const table = document.getElementById("peaks1")
     const note = document.getElementById("peaks1_note")
-    const warnings = document.getElementById("warnings1")
-    const unique_warnings = [...new Set(step1.warnings)]
-    warnings.textContent = unique_warnings.join(" · ")
-    warnings.hidden = unique_warnings.length == 0
+    const warnings_box = document.getElementById("warnings1")
+    const warnings = step1_warnings()
+    warnings_box.textContent = warnings.join(" · ")
+    warnings_box.hidden = warnings.length == 0
 
     if (!step1_ready()) {
         table.hidden = true
@@ -644,34 +704,47 @@ function redraw_peaks1() {
     const range = [state.settings.start, state.settings.end]
     const FFT = gyro[instance].FFT
     const mean = mean_spectrum(FFT, spectrum_amplitude_scale("dB"), range, alias_obj(FFT, { mode: "none" }))
-    const power_dB = mean.bins.map((_, k) => 10 * Math.log10(10 ** (mean.x[k] / 10) + 10 ** (mean.y[k] / 10) + 10 ** (mean.z[k] / 10)))
+    const peaks_found = find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z })
 
     const values = values_from_log()
-    const fundamental = motor_fundamental(state.tracking, values, range)
-    const peaks = attribute_peaks(find_peaks(mean.bins, power_dB), fundamental)
+    const median_fundamental = motor_fundamental(state.tracking, values, range)
+    const fundamental = refine_fundamental(peaks_found, median_fundamental)
+    const peaks = attribute_peaks(peaks_found, fundamental)
 
     table.querySelector("tbody").innerHTML = peaks.slice(0, SPEC_MAX_PEAKS).map((peak) =>
-        '<tr><td class="num">' + peak.freq.toFixed(1) + '</td><td class="num">' + peak.amp_dB.toFixed(1) +
-        '</td><td class="num">' + peak.excess_dB.toFixed(1) + '</td><td>' + html_escape(peak_source_text(peak)) + '</td></tr>'
+        '<tr><td class="num">' + peak.freq.toFixed(1) + '</td><td class="num">' + peak.axes.join(", ") +
+        '</td><td class="num">' + peak.amp_dB.toFixed(1) + '</td><td class="num">' + peak.excess_dB.toFixed(1) +
+        '</td><td>' + html_escape(peak_source_text(peak)) + '</td></tr>'
     ).join("")
     table.hidden = peaks.length == 0
 
+    let motor_text
+    if (median_fundamental == null) {
+        motor_text = "Моторная частота не определена (нет ESC и цели газа) — все пики отнесены к раме."
+    } else if (fundamental !== median_fundamental) {
+        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + median_fundamental.toFixed(1) +
+                     " Гц, уточнена по пику первой гармоники до " + fundamental.toFixed(1) + " Гц."
+    } else {
+        motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + fundamental.toFixed(1) + " Гц."
+    }
     note.textContent = "Гироскоп " + (sensor + 1) + ", " + (gyro[instance].post_filter ? "после фильтров (записи «до» нет)" : "до фильтров") +
-        ", сумма осей X/Y/Z, пики не меньше " + peak_rules.min_excess_dB + " дБ над медианой шума в ±" + peak_rules.floor_half_width_hz + " Гц" +
-        ((peaks.length > SPEC_MAX_PEAKS) ? "; показаны " + SPEC_MAX_PEAKS + " из " + peaks.length : "") + ". " +
-        ((fundamental != null) ? "Моторная частота для атрибуции: " + fundamental.toFixed(1) + " Гц (медиана ESC или цели газа за интервал)."
-                               : "Моторная частота не определена (нет ESC и цели газа) — все пики отнесены к раме.")
+        ", пики по осям X/Y/Z не меньше " + peak_rules.min_excess_dB + " дБ над медианой шума в ±" + peak_rules.floor_half_width_hz + " Гц" +
+        ((peaks.length > SPEC_MAX_PEAKS) ? "; показаны " + SPEC_MAX_PEAKS + " из " + peaks.length : "") + ". " + motor_text +
+        " Гармоника N — если отношение частоты пика к моторной отличается от целого N не больше чем на " + peak_rules.harmonic_tolerance + "."
     note.hidden = false
 
+    // Шаг диагностический: ok с описанием шума; warn — только при предупреждениях загрузки, FFT или фильтров
+    const status = (warnings.length > 0) ? "warn" : "ok"
     const gyro_filter = values.INS_GYRO_FILTER
     const above = (gyro_filter > 0) ? peaks.filter((peak) => peak.freq > gyro_filter).length : 0
-    const tail = "Пики выше INS_GYRO_FILTER (" + gyro_filter + " Гц): " + above
+    const tail = (above > 0) ? "Пиков выше INS_GYRO_FILTER (" + gyro_filter + " Гц): " + above + " — их задача notch на шаге 2."
+                             : "Пиков выше INS_GYRO_FILTER (" + gyro_filter + " Гц) нет."
     if (peaks.length == 0) {
-        spec_verdict("ok", "Выраженных пиков шума нет. " + tail)
+        spec_verdict(status, "Выраженных пиков шума нет. " + tail)
         return
     }
     const main = peaks[0]
-    spec_verdict((above > 0) ? "warn" : "ok", "Главный шум: " + main.freq.toFixed(1) + " Гц (" + peak_source_text(main) + "), " +
+    spec_verdict(status, "Главный шум: " + main.freq.toFixed(1) + " Гц (" + peak_source_text(main) + "; оси " + main.axes.join(", ") + "), " +
         main.excess_dB.toFixed(1) + " дБ над фоном. " + tail)
 }
 
@@ -690,5 +763,5 @@ function open_in_filterreview() {
         spec_verdict("warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
         return
     }
-    w.addEventListener("load", () => w.postMessage({ type: "file", data: file }, "*"))
+    w.addEventListener("load", () => w.postMessage({ type: "file", data: file }, location.origin))
 }
