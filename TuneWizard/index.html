@@ -40,6 +40,7 @@
 <script type="text/javascript" src="core/params.js"></script>
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
+<script type="text/javascript" src="steps/common.js"></script>
 <script type="text/javascript" src="steps/step1.js"></script>
 <script type="text/javascript" src="steps/step2.js"></script>
 <script type="text/javascript" src="steps/step3.js"></script>
@@ -154,24 +155,24 @@ tr:last-child td{border-bottom:0}
 .check__b .fix{color:var(--ink-3); font-size:12.5px}
 .check__b .fix b{color:var(--ink-2); font-weight:600}
 
-/* Плитки с пояснением и таблицы вариантов шагов 2 и 3 */
+/* Плитки метрик (.metrics) и таблицы вариантов (.cands) шагов 2 и 3 */
 .stat__s{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); overflow-wrap:anywhere}
 .stat--bad .stat__v{color:var(--high)}
 .stat--good .stat__v{color:var(--ok)}
-#candidates2 td,#candidates3 td{vertical-align:top}
-#candidates2 td small,#candidates3 td small{display:block; font-size:11px; opacity:.8}
-#candidates2 th small,#candidates3 th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
-#candidates2 th.group,#candidates3 th.group{text-align:center; border-bottom:1px solid var(--line)}
+.cands td{vertical-align:top}
+.cands td small{display:block; font-size:11px; opacity:.8}
+.cands th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
+.cands th.group{text-align:center; border-bottom:1px solid var(--line)}
 #metrics2{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
 /* Восемь плиток шага 3 — по четыре в ряд: значения и шум, затем задержки путей */
 #metrics3{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))}
-#metrics2 .stat__v,#metrics3 .stat__v{font-size:16px}
-#candidates2 td.better,#candidates3 td.better{color:var(--ok)}
-#candidates2 td.worse,#candidates3 td.worse{color:var(--high)}
-#candidates2 tr.recommended td,#candidates3 tr.recommended td{background:var(--accent-soft)}
-#candidates2 tr.recommended td:first-child,#candidates3 tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
-#candidates2 input[type=radio],#candidates3 input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
-#candidates2 label,#candidates3 label{cursor:pointer}
+.metrics .stat__v{font-size:16px}
+.cands td.better{color:var(--ok)}
+.cands td.worse{color:var(--high)}
+.cands tr.recommended td{background:var(--accent-soft)}
+.cands tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.cands input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
+.cands label{cursor:pointer}
 /* Числа таблицы шага 3 не переносятся: длинная оценка забирает ширину у столбцов «30 / 20» и «D выкл.» */
 #candidates3 td.num{white-space:nowrap}
 /* Предупреждение у поля размера винта шага 3 */
@@ -179,39 +180,40 @@ tr:last-child td{border-bottom:0}
 .tag{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
   color:var(--accent); border:1px solid var(--accent); padding:1px 5px; white-space:nowrap}
 
-/* Формы параметров шагов 2 и 3. На шаге 2 подписи, описания, списки и флажки масок строит
+/* Формы параметров шагов 2 и 3 (.pform). На шаге 2 подписи, описания, списки и флажки масок строит
    Libraries/ParameterMetadata.js (load_param_inputs): у подписи-имени он ставит inline width:165px и margin — здесь
    они перебиваются. Флажки маски остаются прямыми детьми абзаца (их обработчик ищет поле через parentElement),
    строки флажков разбиты его <br>; отступ строк флажков — висячий отступ абзаца. Форму шага 3 (#lpf_form) строит
-   steps/step3.js той же разметкой: подпись, поле, единицы, «в логе» */
+   steps/step3.js той же разметкой: подпись, поле, единицы, «в логе». Списки, флажки масок и подпись из data-name
+   есть только у формы шага 2 (#notch_form) */
 .pgroups{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr)); gap:18px 32px}
 .pgroup{display:flex; flex-direction:column; gap:2px; min-width:0}
 .pgroup h3{font-size:13px; margin-bottom:4px}
 .pgroup--wide{grid-column:1/-1; flex-direction:row; flex-wrap:wrap; align-items:center; column-gap:40px}
 .pgroup--wide h3{flex-basis:100%}
-#notch_form p,#lpf_form p{padding-left:144px; text-indent:-144px; line-height:30px; color:var(--ink-3); font-size:12px}
-#notch_form p > *,#lpf_form p > *{text-indent:0}
-#notch_form p > label:not([for^="bit_"]),#lpf_form p > label{display:inline-block!important; width:136px!important; margin:0 8px 0 0!important; vertical-align:middle;
+.pform p{padding-left:144px; text-indent:-144px; line-height:30px; color:var(--ink-3); font-size:12px}
+.pform p > *{text-indent:0}
+.pform p > label:not([for^="bit_"]){display:inline-block!important; width:136px!important; margin:0 8px 0 0!important; vertical-align:middle;
   font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; line-height:1.3; color:var(--ink-2); overflow-wrap:anywhere; cursor:help}
 /* Описания из params.json не загрузились — имя параметра из data-name, чтобы поле не осталось без подписи */
 #notch_form p:not(:has(> label))::before{content:attr(data-name); display:inline-block; width:136px; margin-right:8px; text-indent:0;
   font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)}
-#notch_form input[type=number],#notch_form select,#lpf_form input[type=number]{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
+.pform input[type=number],.pform select{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
   vertical-align:middle; border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
 #notch_form input[type=number]{width:96px}
 /* Шире, чем на шаге 2: пределы ускорения из лога бывают вида 50045.707 */
 #lpf_form input[type=number]{width:112px}
 #notch_form select{max-width:220px}
-#notch_form input:disabled,#notch_form select:disabled,#lpf_form input:disabled{opacity:.45}
+.pform input:disabled,.pform select:disabled{opacity:.45}
 #notch_form select:focus-visible{outline:2px solid var(--low); outline-offset:2px}
-#notch_form .inlog,#lpf_form .inlog{margin-left:10px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); white-space:nowrap}
+.pform .inlog{margin-left:10px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); white-space:nowrap}
 #notch_form input[type=checkbox]{accent-color:var(--accent); margin:0 4px 0 0; vertical-align:middle}
 #notch_form p > label[for^="bit_"]{margin-right:10px; font-size:12px; line-height:24px; color:var(--ink-2); white-space:nowrap; cursor:pointer}
 #notch_form input[type=checkbox]:disabled + label{opacity:.45}
-#notch_form p.changed > input[type=number],#notch_form p.changed > select,#lpf_form p.changed > input[type=number]{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
-#notch_form p.changed > label:not([for^="bit_"]),#notch_form p.changed .inlog,#lpf_form p.changed > label,#lpf_form p.changed .inlog{color:var(--accent)}
+.pform p.changed > input[type=number],.pform p.changed > select{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+.pform p.changed > label:not([for^="bit_"]),.pform p.changed .inlog{color:var(--accent)}
 @media (max-width:600px){
-  #notch_form p,#lpf_form p{padding-left:0; text-indent:0}
+  .pform p{padding-left:0; text-indent:0}
 }
 
 /* Графики */
@@ -392,7 +394,7 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов notch</h2></div>
   <p class="note" id="candidates2_stale" hidden></p>
-  <div class="tablewrap" id="candidates2" hidden>
+  <div class="tablewrap cands" id="candidates2" hidden>
     <table>
       <thead></thead>
       <tbody></tbody>
@@ -415,7 +417,7 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров</h2></div>
   <div class="lab">
-    <div class="pgroups" id="notch_form">
+    <div class="pgroups pform" id="notch_form">
       <div class="pgroup pgroup--wide">
         <h3>Общие</h3>
         <p class="param" data-name="INS_GYRO_FILTER"><input type="number" id="INS_GYRO_FILTER" name="INS_GYRO_FILTER" step="0.1"><span class="inlog" data-for="INS_GYRO_FILTER"></span></p>
@@ -461,7 +463,7 @@ tr:last-child td{border-bottom:0}
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Посчитанные значения формы против лога</h2></div>
-  <div class="stats" id="metrics2" hidden></div>
+  <div class="stats metrics" id="metrics2" hidden></div>
   <div class="row">
     <button type="button" id="notch_accept" disabled>Принять</button>
   </div>
@@ -539,7 +541,7 @@ tr:last-child td{border-bottom:0}
   <p class="note" id="warnings3" hidden></p>
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов фильтров</h2></div>
-  <div class="tablewrap" id="candidates3" hidden>
+  <div class="tablewrap cands" id="candidates3" hidden>
     <table>
       <thead></thead>
       <tbody></tbody>
@@ -552,12 +554,12 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
-    <div class="pgroups" id="lpf_form"></div>
+    <div class="pgroups pform" id="lpf_form"></div>
     <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле и отрицательную частоту принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>
-  <div class="stats" id="metrics3" hidden></div>
+  <div class="stats metrics" id="metrics3" hidden></div>
   <div class="row">
     <button type="button" id="lpf_accept" disabled>Принять</button>
   </div>

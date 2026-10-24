@@ -7,10 +7,10 @@
 // параметра, а поле INS_GYRO_FILTER уже есть в форме шага 2. Поля шага 3 — id="lpf_<имя>".
 //
 // Нужны глобалы страницы: core/lowpass.js (lowpass_*, prop_*, LOWPASS_AXES), core/candidates.js (candidate_key),
-// Libraries/Param_Helpers.js (param_to_string), Libraries/LoadingOverlay.js (loading_call), plots.js (register_plot,
-// render_plot, plot), wizard.js (state, set_step, html_escape), steps/step1.js (step1, step1_ready, step1_prepare,
-// values_from_log, radio_value, SPEC_AXES) и steps/step2.js (step2_signed, step2_tile, step2_sensor — общий модуль
-// помощников шагов появится на этапе 4).
+// Libraries/Param_Helpers.js (param_to_string), plots.js (register_plot, render_plot, plot), wizard.js (state,
+// set_step, html_escape), steps/common.js (step_signed, step_tile, step_verdict, step_gyro_sensor, step_ensure_step1,
+// step_try, step_run, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js (step1, step1_ready,
+// values_from_log, radio_value, SPEC_AXES). От steps/step2.js шаг 3 не зависит: принятое шагом 2 читается из state.steps[2].
 
 // Внутреннее состояние шага
 const step3 = {
@@ -66,13 +66,6 @@ const bode3_parts = [
 
 // ---------- Подписи ----------
 
-function step3_verdict(status, text) {
-    const verdict = document.getElementById("verdict3")
-    verdict.className = "verdict verdict--" + status
-    verdict.textContent = text
-    verdict.hidden = false
-}
-
 // Значение параметра кратчайшей записью float32 (param_to_string); нечисловое — «—» (param_to_string(NaN) бросает)
 function step3_value_text(value) {
     return Number.isFinite(value) ? param_to_string(value) : "—"
@@ -80,7 +73,7 @@ function step3_value_text(value) {
 
 // Разница a − b со знаком и единицами; нечисловая — «не оценён»
 function step3_delta_text(a, b, digits, units) {
-    return (Number.isFinite(a) && Number.isFinite(b)) ? step2_signed(a - b, digits) + " " + units : "не оценён"
+    return (Number.isFinite(a) && Number.isFinite(b)) ? step_signed(a - b, digits) + " " + units : "не оценён"
 }
 
 // «что» для крена и тангажа одной строкой: одинаковые тексты — один раз, иначе «что крена A, тангажа B»
@@ -235,10 +228,10 @@ function step3_init() {
         if (e.target.name === "cand3") {
             step3.selected_id = e.target.value
             if (step3_ready() && (step3.candidates != null)) {
-                step3_try(() => {
+                step_try(() => {
                     step3_render_verdict()
                     step3_redraw_plots()
-                })
+                }, "verdict3", "шага 3")
             }
         }
     })
@@ -246,7 +239,7 @@ function step3_init() {
     for (const id of ["bode3_roll", "bode3_pitch"]) {
         document.getElementById(id).addEventListener("change", () => {
             if (step3_plots_ready()) {
-                step3_try(bode3_redraw)
+                step_try(bode3_redraw, "verdict3", "шага 3")
             }
         })
     }
@@ -407,7 +400,8 @@ function step3_flush_edits(force = false) {
         if (!step3.filled) {
             return
         }
-        if (step3_ensure_step1()) {
+        step3.error = step_ensure_step1()
+        if (step3.error == null) {
             if (step3_stale()) {
                 step3_compute()
             } else {
@@ -602,19 +596,9 @@ function step3_stale() {
     return (step3.candidates == null) || (step3.key !== step3_calc_key()) || (step3.gyro_ref !== state.gyro)
 }
 
-// Расчёт шага 1 актуален и нет своей ошибки
+// Расчёт шага 1 актуален и нет своей ошибки (её пишет step_ensure_step1 при расчёте)
 function step3_ready() {
     return step1_ready() && (step3.error == null)
-}
-
-// Расчёт шага 1 актуален или досчитан; иначе текст ошибки в step3.error
-function step3_ensure_step1() {
-    if (step1_ready() || step1_prepare()) {
-        step3.error = null
-        return true
-    }
-    step3.error = step1.error ?? "Расчёт спектра шага 1 не готов"
-    return false
 }
 
 // Варианты и их оценка против «Как в логе» для текущего интервала, notch-базы и размера винта. Выбор строки
@@ -638,7 +622,7 @@ function step3_compute() {
     step3.flags = null
     step3.custom_row = null
 
-    const sensor = step2_sensor()
+    const sensor = step_gyro_sensor()
     const range = [state.settings.start, state.settings.end]
     step3.ctx = (sensor != null) ? lowpass_ctx({ gyro: state.gyro, env: state.env, tracking: state.tracking, range: range, sensor: sensor }, base, step3_kd()) : null
     if (step3.ctx != null) {
@@ -747,34 +731,21 @@ function step3_prop_accel(row) {
 }
 
 // ---------- Действия ----------
-
-// Выполнить fn; неожиданная ошибка — в консоль и вердикт
-function step3_try(fn) {
-    try {
-        fn()
-    } catch (e) {
-        console.error(e)
-        step3_verdict("fail", "Ошибка шага 3: " + e.message)
-    }
-}
-
-// Выполнить fn под оверлеем загрузки (ошибка не оставляет оверлей висеть — step3_try)
-function step3_run(fn) {
-    loading_call(async () => step3_try(fn))
-}
+// Неожиданная ошибка действия — в консоль и вердикт «Ошибка шага 3: …»: step_try (сразу) и step_run (под оверлеем
+// загрузки). Расчёт шага 1 досчитывается step_ensure_step1, его ошибка — в step3.error
 
 // Пересчёт правок полей (step3_flush_edits) — сразу, в том же обработчике и без оверлея: «Применить вариант» и
 // «Принять» досчитывают правки в обработчике click и тут же читают таблицу и форму, а оверлей съел бы щелчок по
 // кнопке. Цена на тестовом логе (205 окон FFT): смена размера — оценка вариантов ≈ 0.1 с, а если выбрана строка
 // «По размеру винта», ещё бодэ её новых значений для графика ≈ 0.08 с (смена 10 → 12″ целиком ≈ 0.2 с); новые
 // значения формы — оценка строки «Свой» ≈ 0.03 с и её бодэ ≈ 0.08 с; повторные значения берут бодэ из кэша
-// (step3_bode). Оценка и бодэ растут с числом окон FFT. Если нужен расчёт шага 1, он идёт под оверлеем (step3_run),
+// (step3_bode). Оценка и бодэ растут с числом окон FFT. Если нужен расчёт шага 1, он идёт под оверлеем (step_run),
 // а кнопки тогда не действуют
 function step3_run_edit(fn) {
     if (step1_ready()) {
-        step3_try(fn)
+        step_try(fn, "verdict3", "шага 3")
     } else {
-        step3_run(fn)
+        step_run(fn, "verdict3", "шага 3")
     }
 }
 
@@ -784,7 +755,7 @@ function step3_show() {
     if (state.log == null) {
         return
     }
-    step3_run(() => {
+    step_run(() => {
         if (!step3.form_built) {
             step3_build_form()
         }
@@ -793,7 +764,8 @@ function step3_show() {
             step3.filled = true
         }
         step3_render_prop()
-        if (step3_ensure_step1()) {
+        step3.error = step_ensure_step1()
+        if (step3.error == null) {
             if (step3_stale()) {
                 step3_compute()
             } else {
@@ -805,7 +777,7 @@ function step3_show() {
         clearTimeout(step3.edit_timer)
         step3.edit_timer = null
         step3_edit_done()
-    })
+    }, "verdict3", "шага 3")
 }
 
 // «Применить вариант»: значения выбранной строки в форму. Сначала досчитать правки полей (щелчок мог прийти раньше
@@ -847,8 +819,11 @@ function step3_accept_refusal(values) {
 // отрицательные частоты принять нельзя (step3_accept_refusal)
 function step3_accept() {
     step3_flush_edits(true)
-    step3_run(() => {
-        if (!step3.filled || !step3_ensure_step1()) {
+    step_run(() => {
+        if (step3.filled) {
+            step3.error = step_ensure_step1()
+        }
+        if (!step3.filled || (step3.error != null)) {
             step3_redraw_all()
             return
         }
@@ -858,7 +833,7 @@ function step3_accept() {
         const values = step3_values_from_form()
         const refusal = step3_accept_refusal(values)
         if (refusal != null) {
-            step3_verdict("fail", refusal)
+            step_verdict("verdict3", "fail", refusal)
             return
         }
         step3_update_custom()
@@ -876,7 +851,7 @@ function step3_accept() {
         }
         step3_redraw_all()
         set_step(4)
-    })
+    }, "verdict3", "шага 3")
 }
 
 // ---------- Отрисовка ----------
@@ -890,7 +865,7 @@ function step3_redraw_all() {
             document.getElementById(id).hidden = true
         }
         document.getElementById("cand3_apply").disabled = true
-        step3_verdict("fail", step3.error ?? "Расчёт спектра шага 1 не готов")
+        step_verdict("verdict3", "fail", step3.error ?? "Расчёт спектра шага 1 не готов")
         step3_clear_plots()
         return
     }
@@ -927,7 +902,7 @@ function step3_noise_cell(own, base, is_log, flagged) {
     }
     const delta = (Number.isFinite(own) && Number.isFinite(base)) ? own - base : NaN
     const cls = flagged ? "worse" : ((delta < -0.005) ? "better" : "")
-    return step3_cell(Number.isFinite(delta) ? step2_signed(delta, 2) : "не оценён", null, cls, "уровень " + level(own) + ", у лога " + level(base))
+    return step3_cell(Number.isFinite(delta) ? step_signed(delta, 2) : "не оценён", null, cls, "уровень " + level(own) + ", у лога " + level(base))
 }
 
 // Ячейка задержки пути path оси axis на lowpass_lag_hz(): мс и разница к логу; остальные частоты — в подсказке.
@@ -945,7 +920,7 @@ function step3_lag_cell(e, log, axis, path, is_log, flagged) {
     }
     const delta = own - lag(log, hz)
     const cls = flagged ? "worse" : ((delta < -0.005) ? "better" : "")
-    return step3_cell(own.toFixed(2), is_log ? null : (Number.isFinite(delta) ? step2_signed(delta, 2) : "—"), cls, title)
+    return step3_cell(own.toFixed(2), is_log ? null : (Number.isFinite(delta) ? step_signed(delta, 2) : "—"), cls, title)
 }
 
 // Задержка пути path оси axis на частотах, кроме lowpass_lag_hz(), словами: «на 10 Гц 8.50 мс (к логу -0.28 мс)»;
@@ -1088,35 +1063,35 @@ function step3_render_metrics() {
     const flags = row.flags
     const hz = lowpass_lag_hz()
     const mod = (flagged, delta) => flagged ? "bad" : ((delta < -0.005) ? "good" : null)
-    const tiles = [step2_tile("Значения", row.title, step3_short_values(row.values), null)]
+    const tiles = [step_tile("Значения", row.title, step3_short_values(row.values), null)]
 
     const gyro_delta = e.gyro.band_dB - log.gyro.band_dB
-    tiles.push(step2_tile("Шум гироскопа " + lowpass_rules.band_hz.join("–") + " Гц", step3_delta_text(e.gyro.band_dB, log.gyro.band_dB, 2, "дБ"),
-                          "к логу; уровень " + (Number.isFinite(e.gyro.band_dB) ? e.gyro.band_dB.toFixed(2) + " дБ" : "не посчитан"),
-                          mod(flags?.noisier.includes("gyro"), gyro_delta)))
+    tiles.push(step_tile("Шум гироскопа " + lowpass_rules.band_hz.join("–") + " Гц", step3_delta_text(e.gyro.band_dB, log.gyro.band_dB, 2, "дБ"),
+                         "к логу; уровень " + (Number.isFinite(e.gyro.band_dB) ? e.gyro.band_dB.toFixed(2) + " дБ" : "не посчитан"),
+                         mod(flags?.noisier.includes("gyro"), gyro_delta)))
     for (const axis of Object.keys(lowpass_pid_axes)) {
         const absent = step3_dterm_absent(e, axis)
         const key = "Шум D " + step3_axis_names[axis].gen
         if (absent != null) {
-            tiles.push(step2_tile(key, (absent === "нет Kd") ? "нет Kd в логе" : "D выключен", "не сравнивается", null))
+            tiles.push(step_tile(key, (absent === "нет Kd") ? "нет Kd в логе" : "D выключен", "не сравнивается", null))
             continue
         }
         const own = e.dterm[axis].dB
         const base = log.dterm[axis]?.dB
-        tiles.push(step2_tile(key, step3_delta_text(own, base, 2, "дБ"), "к логу", mod(flags?.noisier.includes(axis), own - base)))
+        tiles.push(step_tile(key, step3_delta_text(own, base, 2, "дБ"), "к логу", mod(flags?.noisier.includes(axis), own - base)))
     }
     for (const path of ["P", "D"]) {
         for (const axis of Object.keys(lowpass_pid_axes)) {
             if ((path === "D") && (e.kd[axis] === 0)) {
-                tiles.push(step2_tile("Путь D " + step3_axis_names[axis].gen, "—", "D выключен", null))
+                tiles.push(step_tile("Путь D " + step3_axis_names[axis].gen, "—", "D выключен", null))
                 continue
             }
             const lag = (evaluation, f) => evaluation.lag_ms[axis][path][f]
             const own = lag(e, hz)
             const slower = flags?.slower.some((s) => (s.axis === axis) && (s.path === path)) ?? false
-            tiles.push(step2_tile("Путь " + path + " " + step3_axis_names[axis].gen, Number.isFinite(own) ? own.toFixed(2) + " мс" : "не оценена",
-                                  "на " + hz + " Гц, к логу " + step3_delta_text(own, lag(log, hz), 2, "мс") + "; " + step3_other_lags_text(e, log, axis, path),
-                                  mod(slower, own - lag(log, hz))))
+            tiles.push(step_tile("Путь " + path + " " + step3_axis_names[axis].gen, Number.isFinite(own) ? own.toFixed(2) + " мс" : "не оценена",
+                                 "на " + hz + " Гц, к логу " + step3_delta_text(own, lag(log, hz), 2, "мс") + "; " + step3_other_lags_text(e, log, axis, path),
+                                 mod(slower, own - lag(log, hz))))
         }
     }
     box.innerHTML = tiles.join("")
@@ -1165,7 +1140,7 @@ function step3_render_verdict() {
     if ((accepted != null) && step3.filled && (candidate_key(accepted.accepted) === candidate_key(step3_values_from_form()))) {
         // Принятое считалось для другого интервала, расчёта шага 1, notch-базы или размера винта — его метрики устарели
         if (accepted.calc_key !== step3_calc_key()) {
-            step3_verdict("warn", "Принято раньше для другого интервала, notch или размера винта — проверьте и примите заново." + base_note)
+            step_verdict("verdict3", "warn", "Принято раньше для другого интервала, notch или размера винта — проверьте и примите заново." + base_note)
             return
         }
         const match = step3_match(accepted.accepted)
@@ -1175,9 +1150,9 @@ function step3_render_verdict() {
         if (step3_flagged(accepted.flags)) {
             // name здесь начинает предложение: «свои значения» — с заглавной
             const sentence = name.charAt(0).toUpperCase() + name.slice(1)
-            step3_verdict("warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + sentence + tail + "." + base_note)
+            step_verdict("verdict3", "warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + sentence + tail + "." + base_note)
         } else {
-            step3_verdict("ok", "Принято: " + name + tail + "." + base_note)
+            step_verdict("verdict3", "ok", "Принято: " + name + tail + "." + base_note)
         }
         return
     }
@@ -1187,7 +1162,7 @@ function step3_render_verdict() {
     const compare_note = (no_compare != null) ? " Сравнить варианты с логом нельзя: " + no_compare + "." : ""
     const recommended_id = step3_recommended_id()
     if (recommended_id == null) {
-        step3_verdict("warn", "Введите размер винта: в логе его нет, а без него нет варианта по формуле Mission Planner и рекомендации." + compare_note + base_note)
+        step_verdict("verdict3", "warn", "Введите размер винта: в логе его нет, а без него нет варианта по формуле Mission Planner и рекомендации." + compare_note + base_note)
         return
     }
     const row = step3_rows().find((r) => r.id === recommended_id)
@@ -1199,7 +1174,7 @@ function step3_render_verdict() {
     if (recommended_id === "log") {
         // Форма уже ушла от лога — предложить вернуть его значения
         const back = (step3_form_row()?.id === "log") ? "" : " В форме сейчас другие значения — чтобы вернуть значения лога, выберите «Как в логе» и нажмите «Применить вариант»."
-        step3_verdict("ok", "Значения " + prop_title + " совпадают с логом — менять нечего." + back + accel_text + compare_note + base_note)
+        step_verdict("verdict3", "ok", "Значения " + prop_title + " совпадают с логом — менять нечего." + back + accel_text + compare_note + base_note)
         return
     }
 
@@ -1226,7 +1201,7 @@ function step3_render_verdict() {
     } else {
         action = "Выберите его в таблице и нажмите «Применить вариант», затем «Принять»."
     }
-    step3_verdict(status, "Рекомендуется «" + row.title + "»" + worse + ". Меняется: " + changes.join(", ") + "." + numbers + accel_text + " " + action + base_note)
+    step_verdict("verdict3", status, "Рекомендуется «" + row.title + "»" + worse + ". Меняется: " + changes.join(", ") + "." + numbers + accel_text + " " + action + base_note)
 }
 
 // ---------- Графики ----------
@@ -1287,11 +1262,6 @@ function bode3_theme(palette, data, layout) {
     }
 }
 
-// Ось графика шага: подпись, шкала type ("linear" | "log"), рамка
-function step3_plot_axis(title, type = "linear") {
-    return { title: { text: title }, type: type, zeroline: false, showline: true, mirror: true }
-}
-
 // Вертикаль на частоте x (положение и видимость меняет перерисовка): xref/yref — оси подграфика, dash — штрих.
 // На логарифмической оси x — в герцах: Plotly переводит положение фигур в логарифм сам. Слой — над трассами: слой
 // "below" лежит под сеткой, а на логарифмической оси линии сетки стоят ровно на 10 и 30 Гц и закрывают вертикаль
@@ -1326,8 +1296,8 @@ function step3_setup_plots() {
     }
     register_plot("Spectrum3", spec_data, {
         // Начальный вид — полоса шума 0…400 Гц; полный — двойным щелчком (Plotly: сброс к начальному, затем autorange)
-        xaxis: { ...step3_plot_axis("Частота, Гц"), range: [0, lowpass_rules.band_hz[1]] },
-        yaxis: step3_plot_axis("Амплитуда, дБ"),
+        xaxis: { ...plot_axis("Частота, Гц"), range: [0, lowpass_rules.band_hz[1]] },
+        yaxis: plot_axis("Амплитуда, дБ"),
         showlegend: true,
         legend: { groupclick: "toggleitem" },
         // INS_GYRO_FILTER лога — пунктир, выбранного — сплошная (name — тип)
@@ -1357,8 +1327,8 @@ function step3_setup_plots() {
         }
     }
     register_plot("DTerm3", dterm_data, {
-        xaxis: step3_plot_axis("Частота, Гц"),
-        yaxis: step3_plot_axis("D-составляющая, дБ (отн.)"),
+        xaxis: plot_axis("Частота, Гц"),
+        yaxis: plot_axis("D-составляющая, дБ (отн.)"),
         showlegend: true,
         legend: { groupclick: "toggleitem" },
         margin: margin,
@@ -1399,25 +1369,15 @@ function step3_setup_plots() {
         }
     }
     register_plot("Bode3", bode_data, {
-        xaxis: { type: "log", zeroline: false, showline: true, mirror: true },
-        xaxis2: { ...step3_plot_axis("Частота, Гц", "log"), matches: "x" },
-        yaxis: { ...step3_plot_axis("Амплитуда, дБ"), domain: [0.52, 1] },
-        yaxis2: { ...step3_plot_axis("Фаза, °"), domain: [0, 0.48] },
+        xaxis: plot_axis(null, "log"),
+        xaxis2: { ...plot_axis("Частота, Гц", "log"), matches: "x" },
+        yaxis: { ...plot_axis("Амплитуда, дБ"), domain: [0.52, 1] },
+        yaxis2: { ...plot_axis("Фаза, °"), domain: [0, 0.48] },
         showlegend: true,
         grid: { rows: 2, columns: 1, pattern: "independent" },
         shapes: bode_lines,
         margin: margin,
     }, { on_theme: bode3_theme })
-}
-
-// Видимость трассы после смены данных: без данных — вне легенды; с данными — выбранная пользователем в легенде,
-// а после очистки — по умолчанию shown (true или "legendonly")
-function step3_trace_visibility(trace, shown) {
-    if (trace.x.length == 0) {
-        trace.visible = false
-    } else if (trace.visible === false) {
-        trace.visible = shown
-    }
 }
 
 // Графикам есть что рисовать: расчёт шага 1 актуален и у «Как в логе» есть оценка (данные гироскопа до фильтров);
@@ -1426,22 +1386,10 @@ function step3_plots_ready() {
     return step3_ready() && (step3.evaluations?.log != null)
 }
 
-// Пустые графики шага: без расчёта (нет данных гироскопа, ошибка, новый лог)
+// Пустые графики шага: без расчёта (нет данных гироскопа, ошибка, новый лог) — трассы и вертикали скрыты
 function step3_clear_plots() {
     for (const id of ["Spectrum3", "DTerm3", "Bode3"]) {
-        const p = plot(id)
-        if (p == null) {
-            continue
-        }
-        for (const trace of p.data) {
-            trace.x = []
-            trace.y = []
-            trace.visible = false
-        }
-        for (const shape of p.layout.shapes ?? []) {
-            shape.visible = false
-        }
-        render_plot(id)
+        plot_clear(id)
     }
     for (const id of ["dterm3_absent", "bode3_absent"]) {
         document.getElementById(id).hidden = true
@@ -1501,7 +1449,7 @@ function spec3_redraw(row, log) {
                 trace.meta = step3_selected_title(row) + " · " + SPEC_AXES[a].toUpperCase()
                 trace.legendgrouptitle.text = step3_selected_title(row)
             }
-            step3_trace_visibility(trace, (type === "pre") ? "legendonly" : true)
+            plot_trace_visibility(trace, (type === "pre") ? "legendonly" : true)
         }
     }
     const hz = { log: log.values.INS_GYRO_FILTER, sel: row.values.INS_GYRO_FILTER }
@@ -1533,7 +1481,7 @@ function dterm3_redraw(row, log) {
                 trace.name = step3_selected_title(row)
                 trace.meta = step3_axis_names[axis].nom + " · " + step3_selected_title(row)
             }
-            step3_trace_visibility(trace, true)
+            plot_trace_visibility(trace, true)
         }
         const reason = step3_d_absent_reason(axis, log.kd[axis])
         if (reason != null) {
@@ -1610,7 +1558,7 @@ function bode3_redraw() {
                     trace.name = "путь " + path + " · " + step3_selected_title(row)
                     trace.meta = trace.name
                 }
-                step3_trace_visibility(trace, true)
+                plot_trace_visibility(trace, true)
             }
         }
     }
