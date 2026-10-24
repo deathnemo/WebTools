@@ -347,24 +347,34 @@ function esc_setup(options) {
 // метода PR #363 (окна, где резонанс случайно кратен оборотам), а не ошибка атрибуции
 const order_esc_hz = [50, 54, 57, 59, 60, 60, 60, 60, 60, 61, 63, 66, 70]
 
+// Пик среднего спектра, ближайший к частоте freq
+function nearest_peak(peaks, freq) {
+    return peaks.reduce((best, p) => (Math.abs(p.freq - freq) < Math.abs(best.freq - freq)) ? p : best)
+}
+
+// Средний спектр (дБ) и пики по осям экземпляра 0
+function mean_peaks(gyro, range) {
+    const FFT = gyro[0].FFT
+    const mean = mean_spectrum(FFT, spectrum_amplitude_scale('dB'), range, alias_obj(FFT, { mode: 'none' }))
+    return { mean, peaks: find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z }) }
+}
+
 test('motor_order_info + attribute_peaks_order: 60 и 120 Гц — моторы H1 и H2, фиксированные 155 Гц — рама', () => {
     const { gyro, tracking, range } = esc_setup({ esc_hz: order_esc_hz })
     const info = motor_order_info(gyro, tracking, range, 0)
     assert.equal(info.spectrum.tracked.length, order_esc_hz.length, 'по окну на частоту ESC')
     // Процентили как в auto_fit_esc: sorted[floor((n − 1)·p)] из 13 окон — 0-е, 6-е и 11-е
     assert.ok(Math.abs(info.p5 - 50) < 1e-9 && Math.abs(info.p50 - 60) < 1e-9 && Math.abs(info.p95 - 66) < 1e-9, [info.p5, info.p50, info.p95].join(', '))
+    assert.ok(Math.abs(info.bin_hz - 1000 / 1024) < 1e-9, 'шаг бинов FFT ' + info.bin_hz)
     const excess = info.order_peaks.map((p) => p.excess)
     assert.equal(info.order_peaks.length, auto_fit_rules.max_harmonic)
     assert.ok(excess[0] > 20 && excess[1] > 20, 'H1 и H2 следуют оборотам: ' + excess.slice(0, 2).map((e) => e.toFixed(1)).join(', '))
-    // 155 Гц лежит в диапазоне третьей гармоники [150, 198] Гц, но в порядковом спектре размазан — пика на H3 нет
+    // 155 Гц лежит в диапазоне третьей гармоники, но в порядковом спектре размазан — пика на H3 нет
     assert.ok(!(excess[2] >= peak_rules.min_excess_dB), 'H3 ' + excess[2])
 
-    const FFT = gyro[0].FFT
-    const mean = mean_spectrum(FFT, spectrum_amplitude_scale('dB'), range, alias_obj(FFT, { mode: 'none' }))
-    const peaks = attribute_peaks_order(find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z }), info)
-    const near = (freq) => peaks.reduce((best, p) => (Math.abs(p.freq - freq) < Math.abs(best.freq - freq)) ? p : best)
+    const peaks = attribute_peaks_order(mean_peaks(gyro, range).peaks, info)
     for (const [freq, source, harmonic] of [[60, 'motor', 1], [120, 'motor', 2], [155, 'frame', null]]) {
-        const peak = near(freq)
+        const peak = nearest_peak(peaks, freq)
         assert.ok(Math.abs(peak.freq - freq) < 1.5, 'пик около ' + freq + ' Гц: ' + peak.freq)
         assert.equal(peak.source, source, freq + ' Гц')
         assert.equal(peak.harmonic, harmonic, freq + ' Гц')
@@ -375,16 +385,39 @@ test('motor_order_info + attribute_peaks_order: 60 и 120 Гц — моторы 
     assert.ok(attribute_peaks(peaks, 60).every((p) => p.method === 'median'))
 })
 
-test('attribute_peaks_order: превышение гармоники и диапазон N·p5…N·p95, из нескольких N — ближе к медиане', () => {
-    const excess = [20, 15, 3, -Infinity, 2, 1, 0, -Infinity]
-    const info = { order_peaks: excess.map((e, n) => ({ harmonic: n + 1, excess: e })), p5: 47, p50: 72, p95: 110 }
-    const freqs = [78, 100, 105, 153, 235, 40, 900]
+test('attribute_peaks_order: ровное висение (ESC 60 Гц без разброса) — 60 и 120 Гц моторы, 155 Гц рама', () => {
+    // p5 = p95 = 60: без допуска окно гармоники — точка, и пик на бине 59.57 Гц (или 60.55 при 60.3 Гц) уходил в раму
+    for (const esc of [60, 60.3]) {
+        const { gyro, tracking, range } = esc_setup({ esc_hz: new Array(7).fill(esc) })
+        const info = motor_order_info(gyro, tracking, range, 0)
+        assert.ok(Math.abs(info.p5 - esc) < 1e-9 && Math.abs(info.p95 - esc) < 1e-9)
+        const peaks = attribute_peaks_order(mean_peaks(gyro, range).peaks, info)
+        for (const [freq, source, harmonic] of [[esc, 'motor', 1], [2 * esc, 'motor', 2], [155, 'frame', null]]) {
+            const peak = nearest_peak(peaks, freq)
+            assert.ok(Math.abs(peak.freq - freq) < 1, 'ESC ' + esc + ': пик около ' + freq + ' Гц — ' + peak.freq)
+            assert.equal(peak.source, source, 'ESC ' + esc + ', ' + peak.freq + ' Гц')
+            assert.equal(peak.harmonic, harmonic, 'ESC ' + esc + ', ' + peak.freq + ' Гц')
+        }
+    }
+})
+
+test('attribute_peaks_order: превышение гармоники, окно N·p5 − tol…N·p95 + tol, из нескольких N — ближе к медиане', () => {
+    const order_peaks = (excess) => excess.map((e, n) => ({ harmonic: n + 1, excess: e }))
+    const info = { order_peaks: order_peaks([20, 15, 3, -Infinity, 2, 1, 0, -Infinity]), p5: 47, p50: 72, p95: 110, bin_hz: 1 }
+    // Допуск max(max(2, 2·1), 0.1·72) = 7.2 Гц: H1 [39.8, 117.2], H2 [86.8, 227.2], H3 [133.8, 337.2]
+    const freqs = [78, 100, 105, 153, 235, 35, 900, 40]
     const result = attribute_peaks_order(freqs.map((freq) => ({ freq, excess_dB: 10 })), info)
-    // 78 — только H1 [47, 110]; 100 — H1 и H2 [94, 220]: 100/1 ближе к 72, чем 100/2; 105 — 52.5 ближе, чем 105 → H2;
-    // 153 — H2 (превышение 15); 235 — в диапазоне H3 [141, 330], но превышение 3 < 6 — рама; 40 и 900 — вне диапазонов
-    assert.deepEqual(result.map((p) => p.harmonic), [1, 1, 2, 2, null, null, null])
-    assert.deepEqual(result.map((p) => p.source), ['motor', 'motor', 'motor', 'motor', 'frame', 'frame', 'frame'])
+    // 78 — только H1; 100 — H1 и H2: 100/1 ближе к 72, чем 100/2; 105 — 52.5 ближе, чем 105 → H2; 153 — H2
+    // (превышение 15); 235 — в окне H3, но превышение 3 < 6 — рама; 35 и 900 — вне окон; 40 — ниже 47, но в допуске H1
+    assert.deepEqual(result.map((p) => p.harmonic), [1, 1, 2, 2, null, null, null, 1])
+    assert.deepEqual(result.map((p) => p.source), ['motor', 'motor', 'motor', 'motor', 'frame', 'frame', 'frame', 'motor'])
     assert.equal(result[0].excess_dB, 10, 'поля пика сохраняются')
+
+    // Низкие обороты и грубая сетка: допуск задаёт шаг бинов — max(2, 2·5) = 10 Гц больше 0.1·10 = 1 Гц
+    const slow = { order_peaks: order_peaks([20, 3, 3, 3, 3, 3, 3, 3]), p5: 10, p50: 10, p95: 10, bin_hz: 5 }
+    assert.deepEqual(attribute_peaks_order([{ freq: 19.5 }, { freq: 20.5 }], slow).map((p) => p.harmonic), [1, null])
+    // Без шага бинов — только peak_half_width_hz = 2 Гц
+    assert.deepEqual(attribute_peaks_order([{ freq: 11.5 }, { freq: 12.5 }], { ...slow, bin_hz: undefined }).map((p) => p.harmonic), [1, null])
 })
 
 test('motor_order_info: без ESC и без окон с работающими моторами — null', () => {
@@ -392,6 +425,31 @@ test('motor_order_info: без ESC и без окон с работающими 
     assert.equal(motor_order_info([], no_esc, [0, 1], 0), null)
     const { gyro, tracking, range } = esc_setup({ esc_hz: [5, 5, 5] })
     assert.equal(motor_order_info(gyro, tracking, range, 0), null, 'частота ESC ниже auto_fit_rules.min_freq — окна пропущены')
+})
+
+test('attribute_peaks_auto: по порядку при ESC, иначе по медиане с уточнением', () => {
+    const { gyro, tracking, range } = esc_setup({ esc_hz: order_esc_hz })
+    const { mean, peaks } = mean_peaks(gyro, range)
+    const order = attribute_peaks_auto(peaks, { gyro, tracking, range, esc_mask: 0, values: {}, bins: mean.bins })
+    assert.equal(order.method, 'order')
+    assert.equal(order.info.bin_hz, bin_spacing(mean.bins), 'шаг бинов — по сетке пиков')
+    assert.deepEqual(order.peaks, attribute_peaks_order(peaks, motor_order_info(gyro, tracking, range, 0)))
+    assert.equal(nearest_peak(order.peaks, 155).source, 'frame')
+
+    // Без ESC: цель газа 100·√(thr/0.25) — 100, 100, 200 Гц, медиана 100; первая гармоника среди пиков — 100 Гц
+    const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0.25, 0.25, 1.0] } } })
+    const throttle = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const values = { INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
+    const given = [{ freq: 100, excess_dB: 20 }, { freq: 200, excess_dB: 15 }, { freq: 57, excess_dB: 12 }]
+    const median = attribute_peaks_auto(given, { gyro: [], tracking: throttle, range: [0, 3], esc_mask: 0, values })
+    assert.equal(median.method, 'median')
+    assert.deepEqual(median.info, { median_hz: 100, fundamental_hz: 100 })
+    assert.deepEqual(median.peaks.map((p) => p.harmonic), [1, 2, null])
+    assert.ok(median.peaks.every((p) => p.method === 'median'))
+    // Ни ESC, ни газа — всё рама
+    const none = attribute_peaks_auto(given, { gyro: [], tracking: create_tracking(fake_log(), env, { start_time: 0, end_time: 3 }), range: [0, 3], esc_mask: 0, values })
+    assert.deepEqual(none.info, { median_hz: null, fundamental_hz: null })
+    assert.ok(none.peaks.every((p) => p.source === 'frame'))
 })
 
 // Значения параметров «как в логе» (как у пользователя: ESC по моторам, гармоники 1 и 3) и результат автоподбора
@@ -446,17 +504,22 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     const mean = mean_spectrum(FFT, amp, range, alias)
     const peaks = find_axis_peaks(mean.bins, { X: mean.x, Y: mean.y, Z: mean.z })
     assert.ok(peaks.length > candidate_rules.main_peaks, 'пиков больше, чем учитывается: ' + peaks.length)
-    const e = evaluate_candidate(values, { gyro, env: log_env, tracking, range, sensor: 0, peaks, loop_rate: 400 })
+    const ctx = { gyro, env: log_env, tracking, range, sensor: 0, peaks, loop_rate: 400 }
+    const e = evaluate_candidate(values, ctx)
 
+    // Оценка «после» — во всех бинах та же, что у estimate_post с FFT.H этих значений
+    for (const axis of ['x', 'y', 'z']) {
+        assert.equal(e.spectrum[axis].length, expected[axis].length)
+        for (let k = 0; k < expected[axis].length; k++) {
+            assert.ok(Math.abs(e.spectrum[axis][k] - expected[axis][k]) <= 1e-9, axis + '[' + k + ']: ' + e.spectrum[axis][k] + ' против ' + expected[axis][k])
+        }
+    }
+    assert.deepEqual(e.pre_spectrum, mean, 'средний спектр до фильтров')
     assert.equal(e.peaks.length, candidate_rules.main_peaks)
     for (const peak of e.peaks) {
         const k = FFT.bins.indexOf(peak.bin)
         assert.ok(k >= 0 && Math.abs(peak.bin - peak.freq) < 1e-9, 'частота пика шага 1 — бин FFT')
-        for (let n = Math.max(0, k - 3); n <= k + 3; n++) {
-            for (const axis of ['x', 'y', 'z']) {
-                assert.ok(Math.abs(e.spectrum[axis][n] - expected[axis][n]) <= 1e-9, peak.freq + ' Гц, ' + axis + ': ' + e.spectrum[axis][n] + ' против ' + expected[axis][n])
-            }
-        }
+        assert.equal(peak.source, 'main')
         for (const axis of peak.axes) {
             assert.equal(peak.by_axis[axis].post_dB, expected[axis.toLowerCase()][k])
             assert.equal(peak.by_axis[axis].pre_dB, mean[axis.toLowerCase()][k])
@@ -466,50 +529,138 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     }
     assert.deepEqual(e.bands.map((b) => b.band), [[20, 400], [60, 200], [200, 500]])
     assert.equal(e.band_dB, e.bands[0].dB)
-    // Полоса 20–400 Гц: среднее по бинам суммы мощностей осей
+    // Полоса 20–400 Гц: среднее по бинам суммы мощностей осей; band_f2_dB — то же с весом (f / 100 Гц)²
     let sum = 0
+    let sum_f2 = 0
     let count = 0
     FFT.bins.forEach((bin, k) => {
         if (bin >= 20 && bin <= 400) {
-            sum += 10 ** (expected.x[k] / 10) + 10 ** (expected.y[k] / 10) + 10 ** (expected.z[k] / 10)
+            const power = 10 ** (expected.x[k] / 10) + 10 ** (expected.y[k] / 10) + 10 ** (expected.z[k] / 10)
+            sum += power
+            sum_f2 += power * (bin / 100) ** 2
             count++
         }
     })
     assert.ok(Math.abs(e.band_dB - 10 * Math.log10(sum / count)) < 1e-9)
+    assert.ok(Math.abs(e.band_f2_dB - 10 * Math.log10(sum_f2 / count)) < 1e-9)
     assert.ok(e.lag_ms[10] > 0 && e.lag_ms[30] > 0, 'задержка на 10 и 30 Гц: ' + JSON.stringify(e.lag_ms))
     // Предупреждения — от load_filters (здесь ложное «неподдерживаемый режим 1» у выключенного INS_HNTC2: в логе
     // нет газа — дефект upstream 7, его исправит задача 8)
     assert.deepEqual(e.warnings, load_filters(values, log_env, tracking).warnings)
     assert.equal(e.values, values)
+    // Второй вариант на том же ctx берёт закэшированный спектр «до»
+    assert.equal(evaluate_candidate(other, ctx).pre_spectrum, e.pre_spectrum)
 
     // Состояние gyro не тронуто
     assert.equal(FFT.H, H, 'тот же массив FFT.H')
     assert.equal(FFT.bode.H, bode_H, 'тот же массив FFT.bode.H')
     assert.deepEqual(FFT.H.map((h) => [h[0].slice(), h[1].slice()]), H_copy)
     assert.deepEqual(FFT.bode.H.map((h) => [h[0].slice(), h[1].slice()]), bode_copy)
+
+    // ctx.sensor — индекс экземпляра; без экземпляра или без данных «до» (нет Z1) оценки нет
+    assert.equal(evaluate_candidate(values, { ...ctx, sensor: 5 }), null)
+    const post_only = [{ FFT: { ...FFT, Z1: null, Z2: null } }]
+    assert.equal(evaluate_candidate(values, { ...ctx, gyro: post_only }), null)
 })
 
-// Оценка варианта для rank_candidates: мощность в полосе, задержка на 30 Гц, уровни главных пиков после фильтров
-function eval_7a(band_dB, lag30, posts) {
-    return { band_dB, lag_ms: { 10: 8, 30: lag30 }, peaks: posts.map(([freq, post_dB]) => ({ freq, post_dB })) }
+// Плоский спектр 0…500 Гц шагом 2 Гц (−60 дБ, рябь ±0.3 дБ) — пиков «после» в нём нет
+function flat_spectrum_7a() {
+    const bins = Array.from({ length: 251 }, (_, i) => 2 * i)
+    const axis = (shift) => bins.map((bin, i) => -60 + 0.3 * Math.sin(i + shift))
+    return { bins, x: axis(0), y: axis(1), z: axis(2) }
 }
+
+// Оценка варианта для rank_candidates: мощность в полосе, задержка на 30 Гц, уровни главных пиков после фильтров;
+// spectrum — оценка «после» (по умолчанию плоская)
+function eval_7a(band_dB, lag30, posts, spectrum = flat_spectrum_7a()) {
+    return { band_dB, lag_ms: { 10: 8, 30: lag30 }, peaks: posts.map(([freq, post_dB]) => ({ freq, post_dB, source: 'main' })), spectrum, pre_spectrum: null }
+}
+
+const no_flags = { worse_peaks: [], lag_over: false, incomplete: false }
 
 test('rank_candidates: лучший по полосе среди не ухудшающих пики и задержку; иначе — лог', () => {
     const log = eval_7a(-40, 10, [[78, -64], [153, -62]])
     // Автоподбор лучше по полосе, но ухудшает 153 Гц на 14 дБ — остаётся лог
     const worse = rank_candidates({ log, fit: eval_7a(-45, 9.8, [[78, -66], [153, -48]]) })
     assert.equal(worse.best_id, 'log')
-    assert.deepEqual(worse.flags, { log: { worse_peaks: [], lag_over: false }, fit: { worse_peaks: [153], lag_over: false } })
+    assert.deepEqual(worse.flags, { log: no_flags, fit: { worse_peaks: [153], lag_over: false, incomplete: false } })
     // Ухудшение ровно на 3 дБ ещё допустимо, и лучший по полосе выигрывает
     const edge = rank_candidates({ log, fit: eval_7a(-41, 10, [[78, -61], [153, -63]]) })
     assert.equal(edge.best_id, 'fit')
-    assert.deepEqual(edge.flags.fit, { worse_peaks: [], lag_over: false })
+    assert.deepEqual(edge.flags.fit, no_flags)
     // Задержка на 30 Гц +0.6 мс — вариант отмечен, выбирается следующий по полосе
     const lag = rank_candidates({ log, fit: eval_7a(-41, 10.4, [[78, -65], [153, -62]]), combo: eval_7a(-42, 10.6, [[78, -67], [153, -63]]) })
     assert.equal(lag.best_id, 'fit')
-    assert.deepEqual(lag.flags.combo, { worse_peaks: [], lag_over: true })
+    assert.deepEqual(lag.flags.combo, { worse_peaks: [], lag_over: true, incomplete: false })
     // Неотмеченный, но хуже лога по полосе — остаётся лог
     assert.equal(rank_candidates({ log, a: eval_7a(-39, 10, [[78, -64], [153, -62]]) }).best_id, 'log')
+})
+
+test('rank_candidates: при сомнении вариант отмечается — NaN, нет пары пика, нет пиков или оценки', () => {
+    const log = eval_7a(-40, 10, [[78, -64], [153, -62]])
+    const good = [[78, -65], [153, -63]]
+    const check = (evaluation) => rank_candidates({ log, a: evaluation })
+    // Нечисловая задержка
+    for (const lag30 of [NaN, undefined]) {
+        const r = check(eval_7a(-45, lag30, good))
+        assert.equal(r.best_id, 'log', 'задержка ' + lag30)
+        assert.equal(r.flags.a.lag_over, true)
+    }
+    // Нечисловой уровень пика
+    const nan_peak = check(eval_7a(-45, 10, [[78, NaN], [153, -63]]))
+    assert.equal(nan_peak.best_id, 'log')
+    assert.deepEqual(nan_peak.flags.a.worse_peaks, [78])
+    // Пик, которого нет у лога, и пик лога, которого нет у варианта
+    const extra = check(eval_7a(-45, 10, [[78, -65], [153, -63], [200, -70]]))
+    assert.deepEqual(extra.flags.a.worse_peaks, [200])
+    const missing = check(eval_7a(-45, 10, [[78, -65]]))
+    assert.deepEqual(missing.flags.a.worse_peaks, [153])
+    assert.equal(missing.best_id, 'log')
+    // Нет списка пиков, нет спектра, нечисловая полоса, нет оценки — incomplete, без исключения
+    for (const broken of [{ ...eval_7a(-45, 10, good), peaks: undefined }, { ...eval_7a(-45, 10, good), spectrum: undefined },
+                          eval_7a(NaN, 10, good), null]) {
+        const r = check(broken)
+        assert.equal(r.best_id, 'log')
+        assert.deepEqual(r.flags.a, { worse_peaks: [], lag_over: false, incomplete: true })
+    }
+    // Без оценки лога сравнивать не с чем
+    const no_log = rank_candidates({ a: eval_7a(-45, 10, good) })
+    assert.equal(no_log.best_id, null)
+    assert.equal(no_log.flags.a.incomplete, true)
+})
+
+test('rank_candidates: при равной полосе — меньшая задержка на 30 Гц, затем порядок вариантов', () => {
+    const log = eval_7a(-40, 10, [[78, -64]])
+    const r = rank_candidates({ log, a: eval_7a(-42, 10.3, [[78, -64]]), b: eval_7a(-42, 10.1, [[78, -64]]), c: eval_7a(-42, 10.1, [[78, -64]]) })
+    assert.equal(r.best_id, 'b', 'b и c равны по полосе и задержке — остаётся раньше перечисленный')
+    assert.equal(rank_candidates({ log, c: eval_7a(-42, 10.1, [[78, -64]]), b: eval_7a(-42, 10.1, [[78, -64]]) }).best_id, 'c')
+    // Равная логу полоса и меньшая задержка — вариант лучше лога
+    assert.equal(rank_candidates({ log, a: eval_7a(-40, 9.9, [[78, -64]]) }).best_id, 'a')
+})
+
+test('rank_candidates: пики оценки «после» лога тоже проверяются (source "post"), повторный вызов их не дублирует', () => {
+    // У лога после фильтров остаётся пик 250 Гц по X (+10 дБ над фоном), главным пиком шага 1 он не был
+    const bump = (spectrum, dB) => ({ ...spectrum, x: spectrum.x.map((v, k) => (spectrum.bins[k] === 250) ? v + dB : v) })
+    const flat = flat_spectrum_7a()
+    const log = eval_7a(-40, 10, [[78, -64]], bump(flat, 10))
+    // Вариант лучше по полосе, но поднимает 250 Гц ещё на 5 дБ
+    const raised = eval_7a(-42, 10, [[78, -64]], bump(flat, 15))
+    const evaluations = { log, a: raised }
+    const r = rank_candidates(evaluations)
+    assert.equal(r.best_id, 'log')
+    assert.deepEqual(r.flags.a.worse_peaks, [250])
+    const post = log.peaks.filter((p) => p.source === 'post')
+    assert.deepEqual(post.map((p) => [p.freq, p.axes]), [[250, ['X']]])
+    assert.equal(post[0].pre_dB, null, 'спектра «до» у ручной оценки нет')
+    assert.ok(Math.abs(raised.peaks.find((p) => p.source === 'post').post_dB - post[0].post_dB - 5) < 1e-9)
+    rank_candidates(evaluations)
+    assert.equal(log.peaks.filter((p) => p.source === 'post').length, 1, 'пики «после» заменяются, а не добавляются')
+    // Тот же вариант, но 250 Гц на +2 дБ — проходит
+    assert.equal(rank_candidates({ log, a: eval_7a(-42, 10, [[78, -64]], bump(flat, 12)) }).best_id, 'a')
+    // Пик «после» рядом с главным пиком не дублируется
+    const near_main = eval_7a(-40, 10, [[249, -64]], bump(flat, 10))
+    rank_candidates({ log: near_main })
+    assert.equal(near_main.peaks.filter((p) => p.source === 'post').length, 0)
 })
 
 // Задержка дискретного ФНЧ Баттерворта 2-го порядка (DigitalBiquadFilter) на частоте f, мс — по формуле
@@ -552,11 +703,12 @@ test('filters_lag_ms: biquad 40 Гц — как bode_mean и формула; ф�
     assert.equal(filters_lag_ms(deep, gyro, 3, [10, 30], range), null, 'нет такого экземпляра')
 })
 
-// Оценка «после» лучшего варианта для second_notch_candidate: бины 0…500 Гц шагом 2, фон −60 дБ с рябью ±0.3 дБ,
-// bumps = { ось: { частота: дБ } }
-function post_eval_7a(bumps) {
+// Оценка «после» лучшего варианта для second_notch_candidate: бины 0…500 Гц шагом 2, фон −60 дБ с рябью ±ripple дБ,
+// bumps = { ось: { частота: дБ } или функция частоты → дБ }
+function post_eval_7a(bumps, ripple = 0.3) {
     const bins = Array.from({ length: 251 }, (_, i) => 2 * i)
-    const axis = (name) => bins.map((bin, i) => -60 + 0.3 * Math.sin(i + name.charCodeAt(0)) + (bumps[name]?.[bin] ?? 0))
+    const bump = (name, bin) => (typeof bumps[name] === 'function') ? bumps[name](bin) : (bumps[name]?.[bin] ?? 0)
+    const axis = (name) => bins.map((bin, i) => -60 + ripple * Math.sin(i + name.charCodeAt(0)) + bump(name, bin))
     return { spectrum: { bins, x: axis('x'), y: axis('y'), z: axis('z') } }
 }
 
@@ -568,8 +720,11 @@ test('second_notch_candidate: статический INS_HNTC2 только дл
     assert.equal(c.base, 'log')
     assert.equal(c.title, 'Как в логе + второй notch на 155 Гц')
     assert.equal(c.peak.freq, 155.3)
+    assert.equal(c.peak.axis, 'X')
     assert.ok(Math.abs(c.peak.excess_dB - 10) < 1, 'превышение ' + c.peak.excess_dB)
-    assert.deepEqual(c.values, { ...log_values_7a, INS_HNTC2_ENABLE: 1, INS_HNTC2_MODE: 0, INS_HNTC2_FREQ: 155, INS_HNTC2_BW: 78, INS_HNTC2_ATT: 30,
+    // Пик в один бин: ширина по −3 дБ ≈ 1.2 Гц, удвоенная — меньше 10 Гц, BW упирается в нижний предел
+    assert.ok(c.peak.width.width_hz < 2, 'ширина ' + c.peak.width.width_hz)
+    assert.deepEqual(c.values, { ...log_values_7a, INS_HNTC2_ENABLE: 1, INS_HNTC2_MODE: 0, INS_HNTC2_FREQ: 155, INS_HNTC2_BW: 10, INS_HNTC2_ATT: 30,
                                  INS_HNTC2_REF: 0, INS_HNTC2_FM_RAT: 1, INS_HNTC2_HMNCS: 1, INS_HNTC2_OPTS: 0, INS_HNTC2_ESCMSK: 0 })
     assert.equal(best.values.INS_HNTC2_ENABLE, 0, 'исходный вариант не меняется')
 
@@ -581,12 +736,51 @@ test('second_notch_candidate: статический INS_HNTC2 только дл
     assert.equal(second_notch_candidate(best, post_eval_7a({ y: { 156: 10 } }), [frame]), null)
     // Вне полосы 20–400 Гц
     assert.equal(second_notch_candidate(best, post_eval_7a({ x: { 450: 15 } }), [{ freq: 450, axes: ['X'], source: 'frame' }]), null)
-    // Второй notch уже включён
+    // Второй notch уже включён; оценки нет
     assert.equal(second_notch_candidate({ ...best, values: { ...log_values_7a, INS_HNTC2_ENABLE: 1 } }, post_eval_7a({ x: { 156: 10 } }), [frame]), null)
+    assert.equal(second_notch_candidate(best, null, [frame]), null)
     // Из двух немоторных — с большим превышением
     const two = second_notch_candidate(best, post_eval_7a({ x: { 156: 10 }, z: { 300: 14 } }), [frame, { freq: 300, axes: ['Z'], source: 'frame' }])
     assert.equal(two.values.INS_HNTC2_FREQ, 300)
-    assert.equal(two.values.INS_HNTC2_BW, 150)
+    assert.equal(two.peak.axis, 'Z')
+})
+
+test('second_notch_candidate: порог ровно 6 дБ включается, чуть ниже — нет', () => {
+    const best = { id: 'log', title: 'Как в логе', values: { ...log_values_7a } }
+    const frame = { freq: 156, axes: ['X'], source: 'frame' }
+    // Без ряби фон ровно −60 дБ, медиана шума — тоже, превышение равно добавке
+    const at = second_notch_candidate(best, post_eval_7a({ x: { 156: 6 } }, 0), [frame])
+    assert.equal(at.peak.excess_dB, 6)
+    assert.equal(at.values.INS_HNTC2_FREQ, 156)
+    assert.equal(second_notch_candidate(best, post_eval_7a({ x: { 156: 5.999 } }, 0), [frame]), null)
+})
+
+test('second_notch_candidate: BW — удвоенная ширина пика по −3 дБ в пределах 10 Гц…0.5·F', () => {
+    const best = { id: 'log', title: 'Как в логе', values: { ...log_values_7a } }
+    const frame = { freq: 155.3, axes: ['X'], source: 'frame' }
+    // Треугольный пик +12 дБ со скатом 1 дБ/Гц: −3 дБ на 153 и 159 Гц (интерполяция между бинами), ширина 6 → BW 12
+    const triangle = second_notch_candidate(best, post_eval_7a({ x: (f) => Math.max(0, 12 - Math.abs(f - 156)) }, 0), [frame])
+    assert.equal(triangle.peak.width.top_hz, 156)
+    assert.ok(Math.abs(triangle.peak.width.left_hz - 3) < 1e-9 && Math.abs(triangle.peak.width.right_hz - 3) < 1e-9, JSON.stringify(triangle.peak.width))
+    assert.equal(triangle.values.INS_HNTC2_BW, 12)
+    // Плато шириной 40 Гц: ширина 41 Гц, удвоенная 82 — больше round(0.5·155) = 78, BW = 78
+    const plateau = second_notch_candidate(best, post_eval_7a({ x: (f) => (Math.abs(f - 156) <= 20) ? 12 : 0 }, 0), [frame])
+    assert.ok(Math.abs(plateau.peak.width.width_hz - 41) < 1e-9, 'ширина ' + plateau.peak.width.width_hz)
+    assert.equal(plateau.values.INS_HNTC2_BW, 78)
+    // Вершина — наибольший бин рядом с ближайшим: пик на 158 Гц при частоте шага 1 155.3 Гц
+    const shifted = second_notch_candidate(best, post_eval_7a({ x: (f) => Math.max(0, 12 - Math.abs(f - 158)) }, 0), [frame])
+    assert.equal(shifted.peak.width.top_hz, 158)
+    assert.equal(shifted.values.INS_HNTC2_BW, 12)
+
+    // Справа уровень не падает на 3 дБ в пределах ±0.5·F — сторона берётся по пределу 0.5·F / (2·2) = 19.5 Гц
+    const bins = Array.from({ length: 251 }, (_, i) => 2 * i)
+    const shoulder = bins.map((f) => (f < 150) ? -60 : ((f <= 156) ? -48 : -49))
+    const width = peak_width_hz(bins, shoulder, 156, candidate_rules.second_notch)
+    assert.equal(width.found_left, true)
+    assert.equal(width.found_right, false)
+    assert.ok(Math.abs(width.left_hz - 6.5) < 1e-9, 'слева: −51 дБ между 150 и 148 Гц на 149.5 Гц')
+    assert.equal(width.right_hz, 19.5)
+    assert.equal(width.width_hz, 26)
 })
 
 test('notch_line_stats: NaN в ESC — среднее по числам (дефект upstream 8), без чисел — null', () => {

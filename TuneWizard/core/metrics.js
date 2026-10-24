@@ -4,7 +4,7 @@
 // Способов атрибуции два. Основной при ESC-телеметрии — порядковый спектр автоподбора PR #363
 // (motor_order_info + attribute_peaks_order, method "order"): спектр каждого окна нормирован на частоту моторов
 // в этот момент. Запасной без ESC — медианная моторная частота, уточнённая по пику первой гармоники
-// (motor_fundamental + refine_fundamental + attribute_peaks, method "median").
+// (motor_fundamental + refine_fundamental + attribute_peaks, method "median"). Выбирает метод attribute_peaks_auto.
 //
 // Нужны глобалы страницы: классы core/tracking/* (источники трекинга приходят аргументом tracking из create_tracking)
 // и core/autofit.js (auto_fit_rules, auto_fit_order_spectrum, auto_fit_harmonic_peaks, auto_fit_percentile) —
@@ -157,10 +157,14 @@ function attribute_peaks(peaks, fundamental_hz, rules = peak_rules) {
 
 // Порядковый спектр по ESC-телеметрии для атрибуции пиков — то же, что строит auto_fit_esc (core/autofit.js):
 // средняя частота моторов из маски esc_mask, окна с частотой ниже auto_fit_rules.min_freq пропускаются, сетка
-// 0.25…max_harmonic + 0.75 порядка шагом 0.005. Возвращает { spectrum, order_peaks, p5, p50, p95 }: spectrum —
-// результат auto_fit_order_spectrum, order_peaks — превышение пика на каждой гармонике (auto_fit_harmonic_peaks
-// при основной 1), p5/p50/p95 — процентили отслеживаемой частоты по окнам, Гц (auto_fit_percentile, как нижняя
-// частота в auto_fit_esc). null, если ESC-телеметрии нет или нет окон с работающими моторами [PR363]
+// 0.25…max_harmonic + 0.75 порядка шагом 0.005. Как в PR #363, порядковый спектр и процентили собираются по всем
+// экземплярам gyro до фильтров сразу (auto_fit_order_spectrum суммирует их окна), а пики шага 1 ищутся по одному
+// экземпляру — первичному гироскопу; на логах с одинаковыми гироскопами разницы нет.
+// Возвращает { spectrum, order_peaks, p5, p50, p95, bin_hz }: spectrum — результат auto_fit_order_spectrum,
+// order_peaks — превышение пика на каждой гармонике (auto_fit_harmonic_peaks при основной 1), p5/p50/p95 —
+// процентили отслеживаемой частоты по окнам, Гц (auto_fit_percentile, как нижняя частота в auto_fit_esc), bin_hz —
+// наибольший шаг бинов FFT этих экземпляров (для допуска атрибуции). null, если ESC-телеметрии нет или нет окон
+// с работающими моторами [PR363]
 function motor_order_info(gyro, tracking, range, esc_mask) {
     const esc = tracking.find((t) => t.name === "ESC")
     if ((esc == null) || !esc.have_data()) {
@@ -181,23 +185,39 @@ function motor_order_info(gyro, tracking, range, esc_mask) {
         return null
     }
 
+    // Шаг бинов тех же экземпляров, что вошли в порядковый спектр
+    let bin_hz = 0
+    for (const batch of gyro) {
+        if ((batch != null) && !batch.post_filter && (batch.FFT != null)) {
+            bin_hz = Math.max(bin_hz, bin_spacing(batch.FFT.bins))
+        }
+    }
+
     return {
         spectrum: spectrum,
         order_peaks: auto_fit_harmonic_peaks(spectrum, 1),
         p5: auto_fit_percentile(spectrum.tracked, 0.05),
         p50: auto_fit_percentile(spectrum.tracked, 0.5),
         p95: auto_fit_percentile(spectrum.tracked, 0.95),
+        bin_hz: bin_hz,
     }
 }
 
 // Атрибуция по порядковому спектру (info из motor_order_info): пик на частоте F — «моторы, гармоника N», если
-// у гармоники N в порядковом спектре превышение не меньше min_excess_dB и F лежит в [N·p5, N·p95] частоты ESC
-// за интервал; иначе «рама/резонанс». Шум, который следует за оборотами, в порядковом спектре собирается в пик
-// на N, а фиксированный резонанс размазывается — поэтому превышение отличает одно от другого [PR363], а диапазон
-// частот привязывает пик к гармонике. Если подходят несколько N (широкий разброс оборотов), берётся та, у которой
-// F/N ближе к медиане частоты ESC в логарифмическом смысле [наше]. Добавляет source, harmonic и method: "order";
-// возвращает новый массив, исходные объекты не меняются
+// у гармоники N в порядковом спектре превышение не меньше min_excess_dB и F лежит в [N·p5 − tol, N·p95 + tol]
+// частоты ESC за интервал; иначе «рама/резонанс». Шум, который следует за оборотами, в порядковом спектре
+// собирается в пик на N, а фиксированный резонанс размазывается — поэтому превышение отличает одно от другого
+// [PR363], а диапазон частот привязывает пик к гармонике.
+// Допуск tol = max(exclusion_hz, harmonic_tolerance · p50), exclusion_hz = max(peak_half_width_hz, 2 · info.bin_hz)
+// [наше]: пик среднего спектра стоит на бине (до половины шага от настоящей частоты) с главным лепестком окна
+// Ханна ±2 бина, а при ровном висении p5 = p95 и окно без допуска вырождается в точку — моторные гармоники
+// уходили в «раму». harmonic_tolerance · p50 — те же 0.1 порядка, что у медианного метода (harmonic_number).
+// Если подходят несколько N (широкий разброс оборотов), берётся та, у которой F/N ближе к медиане частоты ESC
+// в логарифмическом смысле [наше]. Добавляет source, harmonic и method: "order"; возвращает новый массив,
+// исходные объекты не меняются
 function attribute_peaks_order(peaks, info, rules = peak_rules) {
+    const exclusion_hz = Math.max(rules.peak_half_width_hz, 2 * (info.bin_hz ?? 0))
+    const tolerance_hz = Math.max(exclusion_hz, rules.harmonic_tolerance * info.p50)
     return peaks.map((peak) => {
         let harmonic = null
         let best_distance = Infinity
@@ -206,7 +226,7 @@ function attribute_peaks_order(peaks, info, rules = peak_rules) {
             if ((N > rules.max_harmonic) || !(order_peak.excess >= rules.min_excess_dB)) {
                 continue
             }
-            if ((peak.freq < N * info.p5) || (peak.freq > N * info.p95)) {
+            if ((peak.freq < N * info.p5 - tolerance_hz) || (peak.freq > N * info.p95 + tolerance_hz)) {
                 continue
             }
             const distance = Math.abs(Math.log(peak.freq / N / info.p50))
@@ -217,6 +237,25 @@ function attribute_peaks_order(peaks, info, rules = peak_rules) {
         }
         return { ...peak, source: (harmonic != null) ? "motor" : "frame", harmonic: harmonic, method: "order" }
     })
+}
+
+// Атрибуция пиков шага 1 подходящим методом: по порядковому спектру, если есть ESC-телеметрия с работающими
+// моторами (motor_order_info), иначе по медианной моторной частоте с уточнением по первой гармонике
+// (motor_fundamental + refine_fundamental + attribute_peaks).
+// ctx = { gyro, tracking, range, esc_mask, values, bins }: esc_mask — INS_HNTCH_ESCMSK (0 — все моторы), values —
+// параметры для цели газа (объект имя → число), bins — сетка спектра, на которой искали пики (её шаг задаёт
+// допуск атрибуции по порядку; без неё — шаг FFT экземпляров до фильтров).
+// Возвращает { peaks, method: "order" | "median", info }: info — результат motor_order_info (с bin_hz по bins)
+// или { median_hz, fundamental_hz } — медиана ESC/цели газа и уточнённая основная (обе могут быть null)
+function attribute_peaks_auto(peaks, ctx) {
+    const info = motor_order_info(ctx.gyro, ctx.tracking, ctx.range, ctx.esc_mask)
+    if (info != null) {
+        const order_info = (ctx.bins != null) ? { ...info, bin_hz: bin_spacing(ctx.bins) } : info
+        return { peaks: attribute_peaks_order(peaks, order_info), method: "order", info: order_info }
+    }
+    const median_hz = motor_fundamental(ctx.tracking, ctx.values ?? {}, ctx.range)
+    const fundamental_hz = refine_fundamental(peaks, median_hz)
+    return { peaks: attribute_peaks(peaks, fundamental_hz), method: "median", info: { median_hz: median_hz, fundamental_hz: fundamental_hz } }
 }
 
 // Уточнить моторную частоту по спектру: медиана ESC или цели газа отличается от положения пика первой гармоники

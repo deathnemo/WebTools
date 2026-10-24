@@ -596,7 +596,9 @@ function bode_mean(gyro, index, range) {
 }
 
 // Линии частот notch: для каждого notch { enabled, harmonics: [{ harmonic, mean, min, max }] } в герцах
-// по окнам диапазона range (у выключенного notch список пуст)
+// по окнам диапазона range (у выключенного notch список пуст). Нечисловые значения трекинга пропускаются
+// (дефект upstream 8); если в диапазоне нет ни одного числа, mean, min и max все равны null — и для одного
+// источника, и при трекинге по моторам (тогда — если чисел нет ни у одного мотора)
 function notch_line_stats(filters, range) {
     const stats = []
 
