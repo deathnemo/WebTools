@@ -290,9 +290,10 @@ function read_file(input) {
             try {
                 await load(reader.result)
             } catch (e) {
-                // Ошибка парсера или данных: показать в вердикте, а не оставлять оверлей
+                // Ошибка парсера или данных: сбросить состояние и показать в вердикте, а не оставлять оверлей
                 console.error(e)
-                show_verdict("fail", "Не удалось прочитать лог: " + e.message)
+                reset()
+                show_verdict("fail", "Не удалось прочитать лог «" + state.file_name + "»: " + e.message)
             }
         })
     }
