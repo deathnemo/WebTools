@@ -172,6 +172,8 @@ tr:last-child td{border-bottom:0}
 #candidates2 tr.recommended td:first-child,#candidates3 tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
 #candidates2 input[type=radio],#candidates3 input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
 #candidates2 label,#candidates3 label{cursor:pointer}
+/* Числа таблицы шага 3 не переносятся: длинная оценка забирает ширину у столбцов «30 / 20» и «D выкл.» */
+#candidates3 td.num{white-space:nowrap}
 /* Предупреждение у поля размера винта шага 3 */
 #prop_warn{border-left-color:var(--accent); color:var(--accent)}
 .tag{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
@@ -196,7 +198,9 @@ tr:last-child td{border-bottom:0}
   font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)}
 #notch_form input[type=number],#notch_form select,#lpf_form input[type=number]{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
   vertical-align:middle; border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
-#notch_form input[type=number],#lpf_form input[type=number]{width:96px}
+#notch_form input[type=number]{width:96px}
+/* Шире, чем на шаге 2: пределы ускорения из лога бывают вида 50045.707 */
+#lpf_form input[type=number]{width:112px}
 #notch_form select{max-width:220px}
 #notch_form input:disabled,#notch_form select:disabled,#lpf_form input:disabled{opacity:.45}
 #notch_form select:focus-visible{outline:2px solid var(--low); outline-offset:2px}
@@ -549,7 +553,7 @@ tr:last-child td{border-bottom:0}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
     <div class="pgroups" id="lpf_form"></div>
-    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля сразу пересчитывает метрики, в таблице появляется строка «Свой». Пустое поле — значение неизвестно: вариант отмечается, принять его нельзя. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
+    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>

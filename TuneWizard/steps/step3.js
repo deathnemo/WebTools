@@ -13,7 +13,7 @@ const step3 = {
     metadata: null,           // FilterReview/params.json; null — ещё не загружен или не загрузился
     metadata_requested: false, // запрос метаданных отправлен (один раз за жизнь страницы)
     base: null,               // notch-база расчёта: state.steps[2].accepted или values_from_log()
-    prop_in: null,            // размер винта расчёта, дюймы; null — не введён
+    prop_in: null,            // размер винта расчёта, дюймы; null — не введён или непригоден (prop_valid)
     ctx: null,                // lowpass_ctx расчёта; null — нет данных гироскопа до фильтров
     candidates: null,         // lowpass_candidates → [{ id, title, values, same_as, … }]
     evaluations: null,        // id → evaluate_lowpass (null — оценки нет)
@@ -23,10 +23,17 @@ const step3 = {
     key: null,                // для какого расчёта посчитаны варианты (step3_calc_key)
     gyro_ref: null,           // и для какого объекта state.gyro
     error: null,              // ошибка расчёта шага 1: показывается в вердикте вместо результатов
+    edit_key: null,           // отпечаток введённого (step3_edit_key), для которого пересчитано и отрисовано
+    edit_timer: null,         // отложенный пересчёт после набора в поле
+    edit_postponed: false,    // пересчёт отложен до отпускания кнопки мыши
+    pointer_down: false,      // кнопка мыши (касание) сейчас нажата
 }
 
 // Размер винта в памяти браузера
 const step3_storage_key = "tunewizard_prop_in"
+
+// Пауза в наборе, после которой поле пересчитывается, мс [наше]
+const step3_edit_delay_ms = 400
 
 // Оси с метриками словами: именительный и родительный падежи
 const step3_axis_names = { roll: { nom: "крен", gen: "крена" }, pitch: { nom: "тангаж", gen: "тангажа" } }
@@ -79,7 +86,9 @@ function step3_summary_text(current, log) {
     for (const path of ["P", "D"]) {
         const by_axis = {}
         for (const axis of Object.keys(lowpass_pid_axes)) {
-            by_axis[axis] = step3_delta_text(current.lag_ms?.[axis]?.[path]?.[hz], log.lag_ms?.[axis]?.[path]?.[hz], 2, "мс")
+            // Путь D оси с выключенным D (Kd = 0) не сравнивается
+            by_axis[axis] = ((path === "D") && (current.kd?.[axis] === 0)) ? "— (D выключен)"
+                : step3_delta_text(current.lag_ms?.[axis]?.[path]?.[hz], log.lag_ms?.[axis]?.[path]?.[hz], 2, "мс")
         }
         lag.push(step3_axes_text("путь " + path, by_axis))
     }
@@ -167,7 +176,16 @@ function step3_init() {
     }
     step3_render_prop()
 
-    document.getElementById("prop_in").addEventListener("change", step3_prop_changed)
+    // Правки полей (размер винта и форма; поля формы перерисовываются с новым логом — слушаем контейнер):
+    // набор — пересчёт после паузы, change — сразу или после отпускания мыши (см. «Правки полей»)
+    for (const id of ["prop_in", "lpf_form"]) {
+        document.getElementById(id).addEventListener("input", step3_edit_input)
+        document.getElementById(id).addEventListener("change", step3_edit_change)
+    }
+    document.addEventListener("pointerdown", () => { step3.pointer_down = true }, true)
+    for (const type of ["pointerup", "pointercancel"]) {
+        document.addEventListener(type, step3_pointer_released, true)
+    }
     document.getElementById("cand3_apply").addEventListener("click", step3_apply)
     document.getElementById("lpf_accept").addEventListener("click", step3_accept)
     // Выбор варианта в таблице (строки перерисовываются — слушаем таблицу)
@@ -179,8 +197,6 @@ function step3_init() {
             }
         }
     })
-    // Поля формы перерисовываются с новым логом — слушаем контейнер
-    document.getElementById("lpf_form").addEventListener("change", step3_form_changed)
 }
 
 // Новый лог или ошибка загрузки: забыть варианты, расчёт и форму (имена пределов ускорения зависят от лога).
@@ -188,8 +204,10 @@ function step3_init() {
 function step3_reset() {
     Object.assign(step3, {
         form_built: false, form_names: null, filled: false, base: null, prop_in: null, ctx: null, candidates: null, evaluations: null,
-        flags: null, custom_row: null, selected_id: null, key: null, gyro_ref: null, error: null,
+        flags: null, custom_row: null, selected_id: null, key: null, gyro_ref: null, error: null, edit_key: null, edit_postponed: false,
     })
+    clearTimeout(step3.edit_timer)
+    step3.edit_timer = null
     document.getElementById("lpf_form").innerHTML = ""
     for (const id of ["verdict3", "warnings3", "candidates3", "candidates3_note", "metrics3", "prop_hint"]) {
         document.getElementById(id).hidden = true
@@ -206,6 +224,13 @@ function step3_reset() {
 function step3_prop_value() {
     const text = document.getElementById("prop_in").value.trim()
     return (text === "") ? null : Number(text)
+}
+
+// Размер винта для расчёта: значение поля, если оно пригодно для формул (prop_valid), иначе null — непригодный
+// размер (−3, 0) считается как не введённый, о нём говорит предупреждение у поля
+function step3_prop_size() {
+    const p = step3_prop_value()
+    return prop_valid(p) ? p : null
 }
 
 // Размер винта из памяти браузера (строка) или null; хранилище может быть недоступно (приватный режим)
@@ -249,16 +274,76 @@ function step3_render_prop() {
     hint.hidden = false
 }
 
-// Правка размера винта: запомнить, пересчитать варианты и перерисовать
-function step3_prop_changed() {
+// ---------- Правки полей ----------
+// Пересчёт после правки размера винта или формы. Щелчок по кнопке сразу после набора не должен теряться: нажатие
+// кнопки уводит фокус из поля, поле даёт change, и перерисовка в этот момент (строка «Свой», вариант по размеру,
+// предупреждение у поля) сдвинула бы кнопку до отпускания мыши. Поэтому:
+// - набор (input) — пересчёт после паузы step3_edit_delay_ms: к уходу из поля обычно всё уже посчитано;
+// - change — пересчёт, только если введённое отличается от посчитанного; при нажатой кнопке мыши — после её
+//   отпускания, то есть после щелчка;
+// - «Применить вариант» и «Принять» сами досчитывают правки перед действием (step3_flush_edits), так что действие
+//   идёт по актуальным значениям полей, даже если щелчок пришёл раньше пересчёта.
+
+// Отпечаток введённого: текст размера винта и значения формы
+function step3_edit_key() {
+    return JSON.stringify([document.getElementById("prop_in").value.trim(), step3.filled ? candidate_key(step3_values_from_form()) : null])
+}
+
+// Набор в поле: пересчёт после паузы
+function step3_edit_input() {
+    clearTimeout(step3.edit_timer)
+    step3.edit_timer = setTimeout(step3_flush_edits, step3_edit_delay_ms)
+}
+
+// change поля (уход из поля, Enter, стрелки): сразу, а при нажатой кнопке мыши — после её отпускания
+function step3_edit_change() {
+    if (step3.pointer_down) {
+        step3.edit_postponed = true
+        return
+    }
+    step3_flush_edits()
+}
+
+// Кнопка мыши отпущена: отложенный пересчёт — следующей задачей, после щелчка (click идёт сразу за pointerup)
+function step3_pointer_released() {
+    step3.pointer_down = false
+    if (step3.edit_postponed) {
+        step3.edit_postponed = false
+        setTimeout(step3_flush_edits, 0)
+    }
+}
+
+// Применить правки, если введённое отличается от посчитанного: запомнить размер винта, подписи у поля, пересчёт
+// (варианты — при смене размера, строка «Свой» — при правке формы; выбрана строка формы, если менялась форма)
+// и перерисовка. При нажатой кнопке мыши (сработал отложенный пересчёт) — после её отпускания
+function step3_flush_edits() {
+    clearTimeout(step3.edit_timer)
+    step3.edit_timer = null
+    if (step3.pointer_down) {
+        step3.edit_postponed = true
+        return
+    }
+    const key = step3_edit_key()
+    if (key === step3.edit_key) {
+        return
+    }
+    const form_changed = (step3.edit_key == null) || (JSON.parse(step3.edit_key)[1] !== JSON.parse(key)[1])
+    step3.edit_key = key
     step3_prop_save(document.getElementById("prop_in").value.trim())
     step3_render_prop()
     if ((state.log == null) || !step3.filled) {
         return
     }
     step3_run_edit(() => {
-        if (step3_ensure_step1() && step3_stale()) {
-            step3_compute()
+        if (step3_ensure_step1()) {
+            if (step3_stale()) {
+                step3_compute()
+            } else {
+                step3_update_custom()
+            }
+            if (form_changed) {
+                step3.selected_id = step3_form_row()?.id ?? step3.selected_id
+            }
         }
         step3_redraw_all()
     })
@@ -406,25 +491,6 @@ function step3_mark_changed() {
     }
 }
 
-// Форма изменилась (правка поля или «Применить вариант»): строка «Свой», выбор строки формы, метрики и вердикт
-function step3_form_changed() {
-    if (!step3.filled) {
-        return
-    }
-    step3_mark_changed()
-    step3_run_edit(() => {
-        if (step3_ensure_step1()) {
-            if (step3_stale()) {
-                step3_compute()
-            } else {
-                step3_update_custom()
-            }
-            step3.selected_id = step3_form_row()?.id ?? step3.selected_id
-        }
-        step3_redraw_all()
-    })
-}
-
 // ---------- Расчёт ----------
 
 // Notch-база: значения, принятые на шаге 2, иначе notch из лога (values_from_log шага 1)
@@ -439,7 +505,7 @@ function step3_kd() {
 
 // Ключ расчёта: интервал, FFT и версия фильтра шага 1, notch-база и размер винта
 function step3_calc_key() {
-    return JSON.stringify([state.settings.start, state.settings.end, step1.fft_key, state.spectrum.filter_version, candidate_key(step3_base()), step3_prop_value()])
+    return JSON.stringify([state.settings.start, state.settings.end, step1.fft_key, state.spectrum.filter_version, candidate_key(step3_base()), step3_prop_size()])
 }
 
 // Варианты посчитаны для другого расчёта (или ещё не посчитаны)
@@ -470,7 +536,7 @@ function step3_compute() {
     step3.key = step3_calc_key()
     step3.gyro_ref = state.gyro
     step3.base = base
-    step3.prop_in = step3_prop_value()
+    step3.prop_in = step3_prop_size()
     step3.candidates = lowpass_candidates(lowpass_log_values(params), step3.prop_in, lowpass_accel_names(params))
     step3.evaluations = null
     step3.flags = null
@@ -568,9 +634,9 @@ function step3_run(fn) {
     })
 }
 
-// Пересчёт после правки поля (размер винта, форма): сразу, без оверлея загрузки. Правка завершается потерей фокуса
-// на нажатии кнопки, и оверлей, показанный в этот момент, перехватил бы щелчок («Принять», «Применить вариант»).
-// Это лёгкий расчёт — оценка вариантов, ≈ 0.1 с; если нужен расчёт шага 1, он идёт под оверлеем (step3_run)
+// Пересчёт правок полей (step3_flush_edits): сразу, без оверлея загрузки — оверлей, показанный при уходе из поля
+// на нажатии кнопки, перехватил бы щелчок. Это лёгкий расчёт — оценка вариантов, ≈ 0.1 с; если нужен расчёт
+// шага 1, он идёт под оверлеем (step3_run)
 function step3_run_edit(fn) {
     if (!step1_ready()) {
         step3_run(fn)
@@ -599,26 +665,44 @@ function step3_show() {
             step3.filled = true
         }
         step3_render_prop()
-        if (step3_ensure_step1() && step3_stale()) {
-            step3_compute()
+        if (step3_ensure_step1()) {
+            if (step3_stale()) {
+                step3_compute()
+            } else {
+                step3_update_custom()
+            }
         }
+        // Введённое учтено: отложенный пересчёт правок не нужен
+        clearTimeout(step3.edit_timer)
+        step3.edit_timer = null
+        step3.edit_key = step3_edit_key()
         step3_redraw_all()
     })
 }
 
-// «Применить вариант»: значения выбранной строки в форму
+// «Применить вариант»: значения выбранной строки в форму. Сначала досчитать правки полей: щелчок мог прийти раньше
+// их пересчёта, и строка выбирается уже в таблице для актуального размера винта
 function step3_apply() {
+    if (!step3.filled) {
+        return
+    }
+    step3_flush_edits()
+    if (!step3_ready() || (step3.candidates == null)) {
+        return
+    }
     const row = step3_rows().find((r) => r.id === radio_value("cand3"))
-    if ((row == null) || !step3.filled) {
+    if (row == null) {
         return
     }
     step3_set_form_values(row.values)
-    step3_form_changed()
+    step3_flush_edits()
 }
 
-// «Принять»: значения формы, их метрики и отметки против лога — в итог мастера, затем шаг 4 (если доступен).
-// Пустое поле принять нельзя: значение параметра неизвестно
+// «Принять»: значения формы, их метрики и отметки против лога и ключ расчёта — в итог мастера, затем шаг 4 (если
+// доступен). Правки полей сначала досчитываются (щелчок мог прийти раньше их пересчёта). Пустое поле принять
+// нельзя: значение параметра неизвестно
 function step3_accept() {
+    step3_flush_edits()
     step3_run(() => {
         if (!step3.filled || !step3_ensure_step1()) {
             step3_redraw_all()
@@ -643,6 +727,7 @@ function step3_accept() {
             prop_in: step3.prop_in,
             metrics: compared ? { current: step3_metrics_summary(row.evaluation), log: step3_metrics_summary(log) } : null,
             flags: compared ? lowpass_flags(row.evaluation, log) : null,
+            calc_key: step3.key,
             evaluated_at: Date.now(),
         }
         step3_redraw_all()
@@ -699,8 +784,12 @@ function step3_noise_cell(own, base, is_log, flagged) {
     return step3_cell(Number.isFinite(delta) ? step2_signed(delta, 2) : "не оценён", null, cls, "уровень " + level(own) + ", у лога " + level(base))
 }
 
-// Ячейка задержки пути path оси axis на lowpass_lag_hz(): мс и разница к логу; остальные частоты — в подсказке
+// Ячейка задержки пути path оси axis на lowpass_lag_hz(): мс и разница к логу; остальные частоты — в подсказке.
+// Путь D оси с выключенным D (Kd = 0) не сравнивается — «—»
 function step3_lag_cell(e, log, axis, path, is_log, flagged) {
+    if ((path === "D") && (e.kd[axis] === 0)) {
+        return step3_cell("—", null, "", "D выключен")
+    }
     const lag = (evaluation, f) => evaluation?.lag_ms?.[axis]?.[path]?.[f]
     const hz = lowpass_lag_hz()
     const title = lowpass_rules.lag_freqs_hz.filter((f) => f !== hz).map((f) => "на " + f + " Гц: " +
@@ -854,6 +943,10 @@ function step3_render_metrics() {
     }
     for (const path of ["P", "D"]) {
         for (const axis of Object.keys(lowpass_pid_axes)) {
+            if ((path === "D") && (e.kd[axis] === 0)) {
+                tiles.push(step2_tile("Путь D " + step3_axis_names[axis].gen, "—", "D выключен", null))
+                continue
+            }
             const lag = (evaluation, f) => evaluation.lag_ms[axis][path][f]
             const own = lag(e, hz)
             const slower = flags?.slower.some((s) => (s.axis === axis) && (s.path === path)) ?? false
@@ -907,14 +1000,13 @@ function step3_render_verdict() {
     const base_note = (state.steps[2] == null) ? " Notch — из лога (шаг 2 не принят)." : ""
     const accepted = state.steps[3]
     if ((accepted != null) && step3.filled && (candidate_key(accepted.accepted) === candidate_key(step3_values_from_form()))) {
-        // Принятый вариант по размеру винта перестаёт совпадать с вариантами, если размер потом сменили
-        const match = step3_match(accepted.accepted)
-        let name = "свои значения"
-        if (match != null) {
-            name = "«" + match.title + "»"
-        } else if (accepted.candidate_id === "prop") {
-            name = "значения по размеру винта " + accepted.prop_in + "″"
+        // Принятое считалось для другого интервала, расчёта шага 1, notch-базы или размера винта — его метрики устарели
+        if (accepted.calc_key !== step3_calc_key()) {
+            step3_verdict("warn", "Принято раньше для другого интервала, notch или размера винта — проверьте и примите заново." + base_note)
+            return
         }
+        const match = step3_match(accepted.accepted)
+        const name = (match != null) ? "«" + match.title + "»" : "свои значения"
         const metrics = accepted.metrics
         const tail = (metrics != null) ? " — " + step3_summary_text(metrics.current, metrics.log) + " (к логу)" : " (без сравнения с логом)"
         if (step3_flagged(accepted.flags)) {
