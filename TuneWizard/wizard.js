@@ -1,4 +1,4 @@
-// Мастер настройки: состояние, навигация по шагам, темы и графики. Математика — в core/.
+// Мастер настройки: состояние, навигация по шагам, тема и график полёта. Математика — в core/, реестр графиков — в plots.js.
 
 // Парсер логов — ES-модуль, подгружается асинхронно; load() ждёт import_done
 var DataflashParser
@@ -22,10 +22,6 @@ const state = {
 }
 
 // ---------- Тема ----------
-
-function css_token(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-}
 
 function apply_theme(name) {
     const root = document.documentElement
@@ -66,39 +62,25 @@ function init_theme() {
     })
 }
 
-// Цвета линий графиков из токенов: главная, вторая, хорошо, плохо
-function plot_colors() {
-    return [css_token("--accent"), css_token("--low"), css_token("--ok"), css_token("--high")]
-}
-
-// Общая часть layout Plotly под текущую тему
-function plot_layout_theme() {
-    const font = { family: '"IBM Plex Mono", ui-monospace, monospace', size: 11, color: css_token("--ink-2") }
-    return {
-        paper_bgcolor: css_token("--surface"),
-        plot_bgcolor: css_token("--surface"),
-        font,
-        axis: {
-            gridcolor: css_token("--line-soft"),
-            linecolor: css_token("--line"),
-            zerolinecolor: css_token("--line"),
-            tickfont: font,
-            title: { font },
-        },
-        // Ползунок диапазона под осью X: фон и рамка тоже из токенов, иначе в тёмной теме он остаётся светлым
-        rangeslider: { bgcolor: css_token("--surface-2"), bordercolor: css_token("--line") },
-    }
-}
-
 // ---------- График полёта ----------
 
 const flight_data = { data: [], layout: {} }
 
+// Цвета рядов и осей графика полёта из палитры темы
+function flight_plot_theme(palette, data, layout) {
+    for (let i = 0; i < data.length; i++) {
+        data[i].line.color = palette.series[i]
+        const axis = layout[(i == 0) ? "yaxis" : "yaxis" + (i + 1)]
+        axis.color = palette.series[i]
+        axis.title.font.color = palette.series[i]
+        axis.tickfont = { ...axis.tickfont, color: palette.series[i] }
+    }
+}
+
 function setup_flight_plot() {
     const names = ["Крен", "Тангаж", "Газ", "Высота"]
     const units = ["°", "°", "", "м"]
-    const colors = plot_colors()
-    const theme = plot_layout_theme()
+    const colors = plot_palette().series
 
     flight_data.data = []
     for (let i = 0; i < names.length; i++) {
@@ -114,11 +96,9 @@ function setup_flight_plot() {
         }
     }
 
+    // Поля темы (фоны, шрифт, сетка, ползунок) проставит реестр; здесь — только своё
     flight_data.layout = {
-        paper_bgcolor: theme.paper_bgcolor,
-        plot_bgcolor: theme.plot_bgcolor,
-        font: theme.font,
-        xaxis: { ...theme.axis, title: { text: "Время, с", font: theme.font }, domain: [0.07, 0.93], zeroline: false, showline: true, mirror: true, rangeslider: theme.rangeslider },
+        xaxis: { title: { text: "Время, с" }, domain: [0.07, 0.93], zeroline: false, showline: true, mirror: true, rangeslider: {} },
         showlegend: false,
         margin: { b: 50, l: 50, r: 50, t: 20 },
     }
@@ -126,9 +106,8 @@ function setup_flight_plot() {
     for (let i = 0; i < names.length; i++) {
         const key = (i == 0) ? "yaxis" : "yaxis" + (i + 1)
         flight_data.layout[key] = {
-            ...theme.axis,
-            title: { text: names[i], font: { ...theme.font, color: colors[i] } },
-            tickfont: { ...theme.font, color: colors[i] },
+            title: { text: names[i], font: { color: colors[i] } },
+            tickfont: { color: colors[i] },
             zeroline: false,
             showline: true,
             mirror: true,
@@ -141,12 +120,10 @@ function setup_flight_plot() {
         }
     }
 
-    const plot = document.getElementById("FlightData")
-    Plotly.purge(plot)
-    Plotly.newPlot(plot, flight_data.data, flight_data.layout, { displaylogo: false, responsive: true })
+    register_plot("FlightData", flight_data.data, flight_data.layout, { on_theme: flight_plot_theme })
 
     // Ползунок и зум по X задают интервал анализа
-    plot.on("plotly_relayout", (data) => {
+    document.getElementById("FlightData").on("plotly_relayout", (data) => {
         if (data["xaxis.range"] !== undefined) {
             set_interval(data["xaxis.range"][0], data["xaxis.range"][1])
         } else if ((data["xaxis.range[0]"] !== undefined) && (data["xaxis.range[1]"] !== undefined)) {
@@ -155,30 +132,6 @@ function setup_flight_plot() {
             set_interval(state.settings.min, state.settings.max)
         }
     })
-}
-
-// Перерисовать графики под новую тему, данные сохраняются
-function restyle_plots() {
-    if (typeof Plotly === "undefined" || document.getElementById("FlightData") == null || flight_data.data.length == 0) {
-        return
-    }
-    const colors = plot_colors()
-    const theme = plot_layout_theme()
-    flight_data.layout.paper_bgcolor = theme.paper_bgcolor
-    flight_data.layout.plot_bgcolor = theme.plot_bgcolor
-    flight_data.layout.font = theme.font
-    // range оси X при этом сохраняется: Object.assign только дописывает поля темы
-    Object.assign(flight_data.layout.xaxis, theme.axis, { title: { text: "Время, с", font: theme.font }, rangeslider: theme.rangeslider })
-    for (let i = 0; i < flight_data.data.length; i++) {
-        flight_data.data[i].line.color = colors[i]
-        const key = (i == 0) ? "yaxis" : "yaxis" + (i + 1)
-        Object.assign(flight_data.layout[key], theme.axis, {
-            title: { text: flight_data.data[i].name, font: { ...theme.font, color: colors[i] } },
-            tickfont: { ...theme.font, color: colors[i] },
-            color: colors[i],
-        })
-    }
-    Plotly.react("FlightData", flight_data.data, flight_data.layout, { displaylogo: false, responsive: true })
 }
 
 // ---------- Интервал анализа и окно FFT ----------
@@ -246,9 +199,8 @@ function set_step(n) {
         section.hidden = Number(section.dataset.step) !== n
     }
     update_wizbar()
-    if (n == 0) {
-        restyle_plots()
-    }
+    // Plotly не перерисовывает скрытый контейнер корректно: после показа секции обновить графики
+    restyle_plots()
 }
 
 function update_wizbar() {
@@ -345,11 +297,11 @@ function reset() {
         trace.y = []
     }
     // Пустой график перерисовать сразу, чтобы прошлый полёт не оставался на экране; диапазон — снова авто
-    if (flight_data.layout.xaxis) {
+    if (plot("FlightData")) {
         delete flight_data.layout.xaxis.range
         flight_data.layout.xaxis.autorange = true
+        render_plot("FlightData")
     }
-    restyle_plots()
     update_wizbar()
 }
 
@@ -503,5 +455,5 @@ function plot_flight() {
 
     flight_data.layout.xaxis.range = [state.settings.start, state.settings.end]
     flight_data.layout.xaxis.autorange = false
-    Plotly.react("FlightData", flight_data.data, flight_data.layout, { displaylogo: false, responsive: true })
+    render_plot("FlightData")
 }
