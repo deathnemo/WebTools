@@ -725,19 +725,18 @@ function step3_show() {
     })
 }
 
-// «Применить вариант»: значения выбранной строки в форму. Строка запоминается до досчёта правок полей (щелчок мог
-// прийти раньше их пересчёта) и ищется по id уже в пересчитанной таблице: «По размеру винта» даёт значения для
-// актуального размера; если строки больше нет — выбранная после пересчёта
+// «Применить вариант»: значения выбранной строки в форму. Сначала досчитать правки полей (щелчок мог прийти раньше
+// их пересчёта): step3_compute сохраняет выбор пользователя, а выбор по умолчанию переводит на новую рекомендацию,
+// поэтому строка берётся уже после пересчёта — «По размеру винта» даёт значения для актуального размера
 function step3_apply() {
     if (!step3.filled) {
         return
     }
-    const id = step3_selected_row()?.id ?? null
     step3_flush_edits(true)
     if (!step3_ready() || (step3.candidates == null)) {
         return
     }
-    const row = step3_rows().find((r) => r.id === id) ?? step3_selected_row()
+    const row = step3_selected_row()
     if (row == null) {
         return
     }
@@ -919,8 +918,10 @@ function step3_render_candidates() {
     const rows = step3_rows()
     step3.selected_id = step3_selected_row()?.id ?? null
     const selected = step3.selected_id
-    // Элемент таблицы с фокусом (радио после ухода из поля по Tab) пересоздаётся — фокус вернуть по id
-    const focused = box.contains(document.activeElement) ? document.activeElement.id : ""
+    // Элемент таблицы с фокусом (радио после ухода из поля по Tab) пересоздаётся — фокус вернуть: радио группы —
+    // на отмеченное (иначе пробел выбрал бы другую строку), прочее — по id
+    const active = box.contains(document.activeElement) ? document.activeElement : null
+    const focused = (active == null) ? "" : ((active.name === "cand3") ? "cand3_" + selected : active.id)
     let body = ""
     for (const row of rows) {
         const e = row.evaluation
