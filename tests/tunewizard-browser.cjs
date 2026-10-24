@@ -130,19 +130,30 @@ function wait_step3_row(page, title) {
         [...document.querySelectorAll('#candidates3 tbody label')].some((label) => label.textContent === title), title, { timeout: 30000 })
 }
 
-// Сводка графиков шага 3: трассы с данными, наибольшая частота, фон, видимые вертикали, видимость и подписи легенды
+// Сводка графиков шага 3 без жёстких индексов трасс: трассы с данными, наибольшая частота, фон, видимые вертикали;
+// группы легенды (legendgroup → видимость трасс и заголовок группы); трассы выбранной строки — по штриху step3_dash.sel:
+// их подписи в легенде и отпечаток данных (сумма конечных y по трассе) — чтобы заметить смену данных
 function step3_plots(page) {
     return page.evaluate(() => Object.fromEntries(['Spectrum3', 'DTerm3', 'Bode3'].map((id) => {
         const gd = document.getElementById(id)
         const with_data = gd.data.filter((t) => t.x.length > 0)
+        const groups = {}
+        for (const trace of gd.data) {
+            groups[trace.legendgroup] ??= { visible: [], title: trace.legendgrouptitle?.text ?? null }
+            groups[trace.legendgroup].visible.push(trace.visible)
+        }
+        const selected = gd.data.filter((t) => t.line.dash === step3_dash.sel)
         return [id, {
             with_data: with_data.length,
             traces: gd.data.length,
             max_x: with_data.length ? Math.max(...with_data.map((t) => Math.max(...t.x))) : null,
+            min_x: with_data.length ? Math.min(...with_data.map((t) => Math.min(...t.x))) : null,
+            xtype: gd.layout.xaxis.type,
             bg: gd.layout.paper_bgcolor,
             vlines: (gd.layout.shapes ?? []).filter((s) => s.visible).map((s) => [s.name, s.x0]),
-            visible: gd.data.map((t) => t.visible),
-            group_titles: gd.data.map((t) => t.legendgrouptitle?.text ?? null),
+            groups: groups,
+            selected_names: selected.filter((t) => t.showlegend !== false).map((t) => t.name),
+            selected_sums: selected.map((t) => Array.from(t.y).reduce((sum, v) => Number.isFinite(v) ? sum + v : sum, 0).toFixed(6)),
         }]
     })))
 }
@@ -548,25 +559,30 @@ async function main() {
 
         // Шаг 3: варианты низкочастотных фильтров, размер винта, графики, «Принять». Notch-база — принятое на шаге 2
         // (выше принят вариант хуже лога), интервал сдвинут на 20 с, поэтому числа сравниваются с «Как в логе» того же
-        // расчёта, а не с замером дизайна. Хранилище браузера теста пустое — размер винта начинается с пустого поля
+        // расчёта, а не с замером дизайна. Ожидания опираются на константы тестового лога: INS_GYRO_FILTER 40,
+        // ATC_RAT_RLL/PIT_FLTD 30, FLTE 0, пределы ускорения не заводские (ATC_ACCEL_R/P_MAX 90000 — AutoTune), Kd крена
+        // и тангажа не нулевые, SCHED_LOOP_RATE 400. Браузер теста — новый контекст с пустым хранилищем, поэтому поле
+        // размера винта при загрузке страницы осталось пустым
         await page.click('#wizbar button:nth-child(1)')
-        await page.evaluate(() => localStorage.removeItem('tunewizard_prop_in'))
         assert.equal(await page.inputValue('#prop_in'), '', 'размер винта пуст: хранилище браузера теста пустое')
         await page.click('#wizbar button:nth-child(4)')
-        assert.deepEqual(await visible_steps(page), ['3'])
+        assert.deepEqual(await visible_steps(page), ['3'], 'открыт шаг 3')
         await wait_overlay(page)
         const w1 = await step3_summary(page)
         assert.deepEqual(w1.titles, ['Как в логе', 'Лог + правило /2'], 'без размера винта — два варианта')
         assert.equal(w1.recommended_marks, 0, 'без размера винта рекомендации нет')
-        assert.match(w1.verdict_class, /verdict--warn/)
+        assert.match(w1.verdict_class, /verdict--warn/, 'без размера винта — предупреждение')
         assert.match(w1.verdict, /^Введите размер винта/, w1.verdict)
         assert.equal(await page.evaluate(() => candidate_key(step3.base) === candidate_key(state.steps[2].accepted)), true, 'notch-база — принятое на шаге 2')
-        assert.match(await page.textContent('#candidates3_note'), /Notch — принятый на шаге 2/)
+        assert.match(await page.textContent('#candidates3_note'), /Notch — принятый на шаге 2/, 'подпись таблицы называет notch-базу')
         const log3 = await page.evaluate(() => lowpass_log_values(state.params))
+        // Действие (щелчок или Tab) раньше пересчёта правки: отложенный пересчёт ещё не прошёл
+        const edit_pending = () => page.evaluate(() => step3.edit_timer != null)
 
         // Первый ввод размера и сразу «Применить вариант» — щелчок раньше пересчёта правки (400 мс): кнопка сама
         // досчитывает правку и применяет вариант по размеру для введённого размера
         await page.fill('#prop_in', '10')
+        assert.equal(await edit_pending(), true, 'действие раньше пересчёта правки')
         await page.click('#cand3_apply')
         await wait_overlay(page)
         assert.equal(await page.inputValue('#lpf_INS_GYRO_FILTER'), '42', 'набор размера и сразу «Применить вариант» — значения для 10″')
@@ -584,9 +600,9 @@ async function main() {
         assert.equal(prop10.accel_from_log, true, 'пределы ускорения не заводские (AutoTune) — из лога')
         assert.equal(prop10.values.ATC_ACCEL_R_MAX, 90000, 'ATC_ACCEL_R_MAX из лога')
         assert.equal(await page.inputValue('#lpf_ATC_ACCEL_R_MAX'), '90000', 'в форме — предел ускорения лога')
-        assert.match(w2.row_text.prop, /пределы ускорения — из лога/)
+        assert.match(w2.row_text.prop, /пределы ускорения — из лога/, 'строка по размеру поясняет пределы ускорения')
         assert.match(w2.verdict, /AutoTune/, 'вердикт объясняет пределы ускорения из лога: ' + w2.verdict)
-        assert.match(w2.verdict_class, /verdict--(ok|warn)/)
+        assert.match(w2.verdict_class, /verdict--(ok|warn)/, 'вердикт с рекомендацией')
 
         // «Лог + правило /2» (FLTD 30 → 20): шум D крена ниже лога, задержка пути D больше
         const half = await page.evaluate(() => {
@@ -600,6 +616,7 @@ async function main() {
         // пересчёте — применён half, а не вариант по размеру
         await page.check('#cand3_half')
         await page.fill('#prop_in', '20')
+        assert.equal(await edit_pending(), true, 'действие раньше пересчёта правки')
         await page.click('#cand3_apply')
         await wait_overlay(page)
         assert.equal(Number(await page.inputValue('#lpf_INS_GYRO_FILTER')), log3.INS_GYRO_FILTER, 'применён half: INS_GYRO_FILTER из лога')
@@ -618,13 +635,25 @@ async function main() {
         assert.match(w3.verdict_class, /verdict--warn/, 'рекомендованный хуже лога — предупреждение')
         assert.match(w3.verdict, /но он хуже лога/, w3.verdict)
 
-        // Набор размера и сразу Tab: пересчёт перерисовывает таблицу, фокус остаётся на радио таблицы, а не уходит в BODY
-        await page.fill('#prop_in', '10')
+        // Набор размера и сразу Tab: пересчёт перерисовывает таблицу, а фокус не уходит в BODY — остаётся на радио таблицы
+        await page.fill('#prop_in', '12')
+        assert.equal(await edit_pending(), true, 'действие раньше пересчёта правки')
         await page.keyboard.press('Tab')
+        await wait_step3_row(page, 'По размеру винта (12″)')
+        const focus = await page.evaluate(() => ({ tag: document.activeElement.tagName, name: document.activeElement.name }))
+        assert.deepEqual(focus, { tag: 'INPUT', name: 'cand3' }, 'фокус после Tab не ушёл в BODY — на радио таблицы')
+        // Перерисовка таблицы при фокусе на неотмеченном радио возвращает фокус на отмеченное (иначе пробел выбрал бы
+        // другую строку): фокус на «Как в логе» при выбранном half, правка размера — программно, чтобы фокус остался
+        // на радио, — и пересчёт после паузы в наборе
+        await page.focus('#cand3_log')
+        assert.deepEqual(await page.evaluate(() => [document.activeElement.id, step3.selected_id]), ['cand3_log', 'half'], 'фокус на неотмеченном радио «Как в логе»')
+        await page.evaluate(() => {
+            const field = document.getElementById('prop_in')
+            field.value = '10'
+            field.dispatchEvent(new Event('input', { bubbles: true }))
+        })
         await wait_step3_row(page, 'По размеру винта (10″)')
-        const focus = await page.evaluate(() => ({ tag: document.activeElement.tagName, name: document.activeElement.name, id: document.activeElement.id,
-                                                    checked: document.activeElement.checked }))
-        assert.deepEqual(focus, { tag: 'INPUT', name: 'cand3', id: 'cand3_half', checked: true }, 'фокус после Tab — на отмеченном радио таблицы')
+        assert.deepEqual(await page.evaluate(() => [document.activeElement.id, document.activeElement.checked]), ['cand3_half', true], 'после перерисовки фокус — на отмеченном радио')
 
         // Правка поля формы — строка «Свой» после паузы в наборе, она выбрана
         await page.fill('#lpf_ATC_RAT_RLL_FLTD', '25')
@@ -639,11 +668,17 @@ async function main() {
             assert.equal(g3[id].with_data, g3[id].traces, id + ': все трассы с данными')
             assert.equal(g3[id].bg, surface, id + ': фон — --surface')
         }
-        assert.deepEqual(g3.Spectrum3.visible.slice(0, 3), ['legendonly', 'legendonly', 'legendonly'], '«до фильтров» — только в легенде')
-        assert.ok(g3.Spectrum3.visible.slice(3).every((v) => v === true), 'как в логе и выбранный — видны')
-        assert.equal(g3.Spectrum3.group_titles[6], 'выбранный: Свой', 'в легенде — название выбранной строки')
+        assert.ok(g3.Spectrum3.groups.pre.visible.every((v) => v === 'legendonly'), '«до фильтров» — только в легенде: ' + JSON.stringify(g3.Spectrum3.groups.pre))
+        assert.ok([...g3.Spectrum3.groups.log.visible, ...g3.Spectrum3.groups.sel.visible].every((v) => v === true), 'как в логе и выбранный — видны')
+        assert.equal(g3.Spectrum3.groups.sel.title, 'выбранный: Свой', 'в легенде спектра — название выбранной строки')
+        for (const id of ['DTerm3', 'Bode3']) {
+            assert.ok((g3[id].selected_names.length > 0) && g3[id].selected_names.every((name) => name.endsWith('выбранный: Свой')),
+                      id + ': в легенде — название выбранной строки: ' + g3[id].selected_names.join('; '))
+        }
         assert.deepEqual(g3.Spectrum3.vlines, [['log', log3.INS_GYRO_FILTER], ['sel', log3.INS_GYRO_FILTER]], 'вертикали на INS_GYRO_FILTER лога и выбранного')
         assert.ok(Math.abs(g3.DTerm3.max_x - 200) < 0.01, 'D-составляющая — до SCHED_LOOP_RATE / 2 = 200 Гц: ' + g3.DTerm3.max_x)
+        assert.equal(g3.Bode3.xtype, 'log', 'бодэ — логарифмическая ось частот')
+        assert.ok((g3.Bode3.min_x >= 1) && (g3.Bode3.min_x < 1.1) && (Math.abs(g3.Bode3.max_x - 200) < 0.01), 'бодэ — от 1 Гц до 200 Гц: ' + g3.Bode3.min_x + '…' + g3.Bode3.max_x)
         assert.equal(g3.Bode3.vlines.length, 4, 'вертикали 10 и 30 Гц на обоих подграфиках бодэ')
         // У «Свой» FLTD крена 25, тангажа 20 — путь D выбранного у осей разный
         await page.evaluate(() => { window.__bode3_roll = Array.from(document.getElementById('Bode3').data[bode3_trace_index(0, 1, 1)].y) })
@@ -654,8 +689,18 @@ async function main() {
         }), true, 'бодэ тангажа — свои данные')
         await page.check('#bode3_roll')
 
-        // «Принять» рекомендованного: значения формы и вариант в state.steps[3], открыт шаг 4
+        // Один лишь выбор строки (без «Применить») перерисовывает графики: вертикаль, легенда и данные выбранного
         await page.check('#cand3_prop')
+        const g_prop = await step3_plots(page)
+        assert.deepEqual(g_prop.Spectrum3.vlines, [['log', log3.INS_GYRO_FILTER], ['sel', 42]], 'выбор строки — вертикаль INS_GYRO_FILTER выбранного 42 Гц')
+        assert.equal(g_prop.Spectrum3.groups.sel.title, 'выбранный: По размеру винта (10″)', 'выбор строки — название в легенде спектра')
+        for (const id of ['DTerm3', 'Bode3']) {
+            assert.notDeepEqual(g_prop[id].selected_sums, g3[id].selected_sums, id + ': выбор строки — данные выбранного сменились')
+            assert.ok(g_prop[id].selected_names.every((name) => name.endsWith('выбранный: По размеру винта (10″)')), id + ': выбор строки — название в легенде: ' +
+                      g_prop[id].selected_names.join('; '))
+        }
+
+        // «Принять» рекомендованного: значения формы и вариант в state.steps[3], открыт шаг 4
         await page.click('#cand3_apply')
         await wait_overlay(page)
         await page.click('#lpf_accept')
@@ -664,7 +709,7 @@ async function main() {
         const accepted3 = await page.evaluate(() => state.steps[3])
         assert.equal(accepted3.accepted.INS_GYRO_FILTER, 42, 'принятый INS_GYRO_FILTER — из формы')
         assert.equal(accepted3.candidate_id, 'prop', 'принят вариант по размеру')
-        assert.equal(accepted3.prop_in, 10)
+        assert.equal(accepted3.prop_in, 10, 'размер винта принятого')
         assert.ok((accepted3.metrics != null) && (accepted3.flags != null), 'метрики и отметки принятого')
         const verdict3_prop = await page.textContent('#verdict3')
         assert.match(verdict3_prop, /^Принято/, verdict3_prop)
@@ -673,13 +718,14 @@ async function main() {
         await page.click('#wizbar button:nth-child(4)')
         await wait_overlay(page)
         await page.fill('#lpf_INS_GYRO_FILTER', '38')
+        assert.equal(await edit_pending(), true, 'действие раньше пересчёта правки')
         await page.click('#lpf_accept')
         await wait_overlay(page)
-        assert.deepEqual(await visible_steps(page), ['4'])
+        assert.deepEqual(await visible_steps(page), ['4'], '«Принять» своих значений открывает шаг 4')
         const custom3 = await page.evaluate(() => state.steps[3])
         assert.equal(custom3.accepted.INS_GYRO_FILTER, 38, 'правка и сразу «Принять» — значение формы')
         assert.equal(custom3.candidate_id, 'custom', 'правка вручную — вариант «custom»')
-        assert.match(await page.textContent('#verdict3'), /^Принято/)
+        assert.match(await page.textContent('#verdict3'), /^Принято/, 'вердикт шага 3 — «Принято»')
 
         // Скриншот шага 3: принятые свои значения, строка «Свой» выбрана
         await page.click('#wizbar button:nth-child(4)')
@@ -713,7 +759,10 @@ async function main() {
         assert.deepEqual(w5.titles, w2.titles, 'после повторной загрузки — те же три варианта, без «Свой»')
         assert.equal(await page.evaluate(() => candidate_key(step3_values_from_form()) === candidate_key(lowpass_log_values(state.params))), true, 'форма шага 3 снова из лога')
         assert.doesNotMatch(w5.verdict, /^Принято/, 'вердикт шага 3 — не «Принято»: ' + w5.verdict)
-        assert.equal((await step3_plots(page)).Bode3.with_data, 8, 'графики шага 3 снова с данными')
+        const g5 = await step3_plots(page)
+        for (const id of ['Spectrum3', 'DTerm3', 'Bode3']) {
+            assert.equal(g5[id].with_data, g5[id].traces, id + ': после повторной загрузки — снова с данными')
+        }
         // Шаг 1 после этого — тот же, что при первом прогоне
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
