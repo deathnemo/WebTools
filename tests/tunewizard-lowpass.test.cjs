@@ -505,12 +505,12 @@ test('pid_lowpass_lag_ms: 20 Гц на 30 и 10 Гц, 30 Гц на 30 Гц пр�
     }
 })
 
-test('derivative_gain2: |(1 − z⁻¹)/dt|² при dt = 1 / loop_rate', () => {
-    assert.ok(Math.abs(derivative_gain2(100, 400) - 320000) <= 1e-6, String(derivative_gain2(100, 400)))
-    assert.equal(derivative_gain2(0, 400), 0)
+test('pid_lowpass_derivative_gain2: |(1 − z⁻¹)/dt|² при dt = 1 / loop_rate', () => {
+    assert.ok(Math.abs(pid_lowpass_derivative_gain2(100, 400) - 320000) <= 1e-6, String(pid_lowpass_derivative_gain2(100, 400)))
+    assert.equal(pid_lowpass_derivative_gain2(0, 400), 0)
     // На частоте Найквиста контура: (2·loop_rate)²; на низких частотах ≈ (2π·f)², как у непрерывной производной
-    assert.ok(Math.abs(derivative_gain2(200, 400) - 800 ** 2) < 1e-6)
-    assert.ok(Math.abs(derivative_gain2(1, 400) / (2 * Math.PI) ** 2 - 1) < 1e-4)
+    assert.ok(Math.abs(pid_lowpass_derivative_gain2(200, 400) - 800 ** 2) < 1e-6)
+    assert.ok(Math.abs(pid_lowpass_derivative_gain2(1, 400) / (2 * Math.PI) ** 2 - 1) < 1e-4)
 })
 
 test('модель ПИД сходится с разностными уравнениями AC_PID::update_all во времени: пути P и D, амплитуда и фаза', () => {
@@ -529,8 +529,8 @@ test('модель ПИД сходится с разностными уравн�
             const lag = -sim.E.phase / (2 * Math.PI * f) * 1000
             assert.ok(Math.abs(lag - pid_lowpass_lag_ms(flte, rate, f)) < 1e-4, label + ': задержка FLTE ' + lag)
         }
-        // Путь D: |H_E|·√derivative_gain2·|H_D|, фаза — FLTE + производная (π/2 − π·f/rate) + FLTD
-        const amp_D = Math.hypot(he[0], he[1]) * Math.sqrt(derivative_gain2(f, rate)) * Math.hypot(hd[0], hd[1])
+        // Путь D: |H_E|·√pid_lowpass_derivative_gain2·|H_D|, фаза — FLTE + производная (π/2 − π·f/rate) + FLTD
+        const amp_D = Math.hypot(he[0], he[1]) * Math.sqrt(pid_lowpass_derivative_gain2(f, rate)) * Math.hypot(hd[0], hd[1])
         assert.ok(Math.abs(sim.D.amp / amp_D - 1) < 1e-4, label + ': амплитуда D ' + sim.D.amp + ' против ' + amp_D)
         const phase_D = Math.atan2(he[1], he[0]) + (Math.PI / 2 - Math.PI * f / rate) + Math.atan2(hd[1], hd[0])
         assert.ok(Math.abs(phase_diff(sim.D.phase, phase_D)) < 1e-4, label + ': фаза D ' + phase_diff(sim.D.phase, phase_D))

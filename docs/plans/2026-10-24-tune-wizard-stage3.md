@@ -75,7 +75,7 @@ const lowpass_rules = {
     // Заводские фильтры Copter: AP_InertialSensor.cpp (DEFAULT_GYRO_FILTER, DEFAULT_ACCEL_FILTER),
     // AC_AttitudeControl_Multi.h (FLTT, FLTD 20 Гц по всем осям, FLTE крена/тангажа 0, рыскания 2.5 Гц) [код]
     defaults: { gyro_hz: 20, accel_hz: 20, fltt_hz: 20, fltd_hz: 20, flte_rp_hz: 0, flte_y_hz: 2.5 },
-    prop_range_in: [3, 40],             // размер винта без предупреждения у поля [наше]
+    prop_range_in: [4, 40],             // размер винта без предупреждения у поля [наше]
     band_hz: [20, 400],                 // полоса шума гироскопа; для D — до частоты Найквиста контура [наше]
     lag_freqs_hz: [10, 30],             // частоты задержки [наше]
     max_noise_increase_dB: 3,           // «шумнее лога» [наше, как на шаге 2]
@@ -133,7 +133,7 @@ function pid_lowpass_response(fc, loop_rate, f) { … }
 // Задержка этого фильтра на частоте f, мс: −arg(H) / (2π·f) · 1000
 function pid_lowpass_lag_ms(fc, loop_rate, f) { … }
 // |(1 − z⁻¹) / dt|² на частоте f при dt = 1 / loop_rate: (2·sin(π·f/loop_rate) · loop_rate)²
-function derivative_gain2(f, loop_rate) { … }
+function pid_lowpass_derivative_gain2(f, loop_rate) { … }
 ```
 
 ```js
@@ -157,7 +157,7 @@ function evaluate_lowpass(values, ctx) { … }
 
 1. Фильтры гироскопной части — `load_filters({ ...ctx.notch, INS_GYRO_FILTER: values.INS_GYRO_FILTER }, ctx.env, ctx.tracking)`, `H = filter_transfer(…, FFT.Z1, FFT.Z2)` по окнам до конца интервала (как в `evaluate_candidate`).
 2. `post = estimate_post(gyro, sensor, spectrum_amplitude_scale("PSD"), range, alias_obj(FFT, { mode: "fold", loop_rate }), H)` — PSD (дБ/Гц), свёрнутая к `loop_rate / 2`; `bins = alias.bins`.
-3. В каждом бине `k`: `D[k] = kd² · 10^(post[k]/10) · derivative_gain2(f_k) · |H_FLTE(f_k)|² · |H_FLTD(f_k)|²` (FLTE и FLTD оси из `values`, `pid_lowpass_response` на `loop_rate`).
+3. В каждом бине `k`: `D[k] = kd² · 10^(post[k]/10) · pid_lowpass_derivative_gain2(f_k) · |H_FLTE(f_k)|² · |H_FLTD(f_k)|²` (FLTE и FLTD оси из `values`, `pid_lowpass_response` на `loop_rate`).
 4. `dB = 10·log10(среднее D[k] по бинам band_hz[0] ≤ f ≤ min(band_hz[1], loop_rate/2))`; `spectrum = 10·log10(D[k])` по всем бинам.
 
 Задержка оси: гироскопная часть — `gyro.lag_ms` (это `filters_lag_ms` внутри `evaluate_candidate`), путь P = она + `pid_lowpass_lag_ms(FLTE)`, путь D = путь P + `pid_lowpass_lag_ms(FLTD)`. Сама производная в задержку не входит (одинакова у всех вариантов и в разнице сокращается).
@@ -187,7 +187,7 @@ function lowpass_model_warnings(params) { … }
 
 `tests/tunewizard-lowpass.test.cjs` (без гироскопа):
 - `pid_lowpass_response(0, 400, f)` = `[1, 0]`; `pid_lowpass_lag_ms(20, 400, 30)` = 4.3531 (±1e-3), `(20, 400, 10)` = 7.1117, `(30, 400, 30)` = 3.5223; независимая проверка — фаза `alpha / (1 − (1 − alpha)·e^(−jω))`, посчитанная в тесте комплексной арифметикой; задержка убывает с ростом `fc`.
-- `derivative_gain2(100, 400)` = 320000 (±1e-6), `derivative_gain2(0, 400)` = 0.
+- `pid_lowpass_derivative_gain2(100, 400)` = 320000 (±1e-6), `pid_lowpass_derivative_gain2(0, 400)` = 0.
 - `lowpass_flags`: ровно +3 дБ и ровно +1 мс — без отметки; +3.0001 дБ / +1.0001 мс — с отметкой; `NaN` в задержке или шуме — отметка; оценки нет — `incomplete`; ось без Kd — `incomplete_axes`.
 - `lowpass_model_warnings`: `ATC_RAT_RLL_NEF 1` → одна строка с именем; нули и отсутствие параметров → пусто.
 

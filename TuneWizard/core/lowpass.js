@@ -281,7 +281,7 @@ function pid_lowpass_lag_ms(fc, loop_rate, f) {
 
 // |(1 − z⁻¹) / dt|² на частоте f при dt = 1 / loop_rate: (2·sin(π·f/loop_rate) · loop_rate)² — квадрат усиления
 // производной ошибки в ПИД (AC_PID.cpp: (_error − error_last) / dt) [код]
-function derivative_gain2(f, loop_rate) {
+function pid_lowpass_derivative_gain2(f, loop_rate) {
     return (2 * Math.sin(Math.PI * f / loop_rate) * loop_rate)**2
 }
 
@@ -308,7 +308,7 @@ function lowpass_ctx(base, notch, kd) {
 }
 
 // Шум D-составляющей одной оси: psd_dB — PSD гироскопа после фильтров (дБ/Гц), свёрнутая к loop_rate / 2, по бинам
-// bins. D[k] = kd² · 10^(psd_dB[k]/10) · derivative_gain2(f_k) · |H_FLTE(f_k)|² · |H_FLTD(f_k)|².
+// bins. D[k] = kd² · 10^(psd_dB[k]/10) · pid_lowpass_derivative_gain2(f_k) · |H_FLTE(f_k)|² · |H_FLTD(f_k)|².
 // Возвращает { dB, spectrum }: spectrum = 10·log10(D[k]) по всем бинам (на 0 Гц производная равна нулю — −Infinity),
 // dB = 10·log10 среднего D[k] по бинам band_hz[0] ≤ f ≤ min(band_hz[1], loop_rate / 2) (null, если таких нет).
 // null, если kd не ненулевое конечное число (нет в логе или D выключен): D-составляющей у оси нет
@@ -324,7 +324,7 @@ function lowpass_dterm(bins, psd_dB, kd, flte, fltd, loop_rate) {
     let count = 0
     for (let k = 0; k < bins.length; k++) {
         const f = bins[k]
-        const D = kd * kd * 10**(psd_dB[k] / 10) * derivative_gain2(f, loop_rate) *
+        const D = kd * kd * 10**(psd_dB[k] / 10) * pid_lowpass_derivative_gain2(f, loop_rate) *
                   abs2(pid_lowpass_response(flte, loop_rate, f)) * abs2(pid_lowpass_response(fltd, loop_rate, f))
         spectrum[k] = 10 * Math.log10(D)
         if ((f >= band[0]) && (f <= top)) {

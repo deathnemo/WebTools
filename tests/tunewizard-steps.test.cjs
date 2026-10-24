@@ -670,7 +670,7 @@ test('evaluate_lowpass: шум гироскопа «как в логе» — т�
         let sum = 0
         let count = 0
         alias.bins.forEach((f, k) => {
-            const D = kd ** 2 * 10 ** (psd[key][k] / 10) * derivative_gain2(f, 400) * abs2(pid_lowpass_response(flte, 400, f)) * abs2(pid_lowpass_response(fltd, 400, f))
+            const D = kd ** 2 * 10 ** (psd[key][k] / 10) * pid_lowpass_derivative_gain2(f, 400) * abs2(pid_lowpass_response(flte, 400, f)) * abs2(pid_lowpass_response(fltd, 400, f))
             const got = e.dterm[axis].spectrum[k]
             assert.ok((k == 0) ? (got === -Infinity) : (Math.abs(got - 10 * Math.log10(D)) < 1e-9), axis + ' ' + f + ' Гц: ' + got + ' против ' + 10 * Math.log10(D))
             if ((f >= 20) && (f <= 200)) {
@@ -779,6 +779,28 @@ test('evaluate_lowpass: нечисловые FLTE/FLTD — задержка и �
     assert.deepEqual(flags.noisier, ['roll', 'pitch'])
     assert.deepEqual(flags.slower, [{ axis: 'roll', path: 'P' }, { axis: 'roll', path: 'D' }, { axis: 'pitch', path: 'D' }])
     assert.deepEqual(flags.incomplete_axes, [], 'шум D посчитан, но нечисловой — отметка, а не неполная ось')
+})
+
+test('evaluate_lowpass: нечисловой INS_GYRO_FILTER (пустое поле формы) — шум гироскопа, шум D и задержки NaN, вариант отмечается', () => {
+    const { ctx } = lowpass_setup()
+    const log = evaluate_lowpass(lowpass_values_8, ctx)
+    // Пустое поле формы даёт NaN (step3_values_from_form). Отсутствующее значение (undefined) — другое: load_filters,
+    // как upstream, берёт для него 0, то есть фильтр выключен
+    const broken = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: NaN }, ctx)
+    assert.ok(broken != null, 'оценка есть')
+    assert.ok(!Number.isFinite(broken.gyro.band_dB), 'шум гироскопа нечисловой: ' + broken.gyro.band_dB)
+    for (const axis of ['roll', 'pitch']) {
+        assert.ok(!Number.isFinite(broken.dterm[axis].dB), axis + ': шум D нечисловой')
+        for (const path of ['P', 'D']) {
+            assert.ok(!Number.isFinite(broken.lag_ms[axis][path][30]), axis + ' ' + path + ': задержка нечисловая')
+        }
+    }
+    // Отказ при сомнении: полоса гироскопа нечисловая — оценка неполная, вариант отмечен (сравнивать не с чем,
+    // поэтому списки «шумнее» и «медленнее» не заполняются)
+    const flags = lowpass_flags(broken, log)
+    assert.equal(flags.incomplete, true, 'вариант отмечен как неполный')
+    assert.deepEqual([flags.noisier, flags.slower], [[], []], 'списки «шумнее» и «медленнее» пусты')
+    assert.equal(lowpass_flags(log, broken).incomplete, true, 'и лог с таким значением тоже не сравнивается')
 })
 
 test('evaluate_lowpass: контур 1000 Гц на гироскопе 1000 Гц — полоса D 20…400 Гц, а не до 500 (min(band_hz[1], Найквист))', () => {

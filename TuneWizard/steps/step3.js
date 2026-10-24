@@ -382,7 +382,8 @@ function step3_pointer_released() {
 // (варианты — при смене размера, строка «Свой» — при правке формы; выбрана строка формы, если менялась форма)
 // и перерисовка. При нажатой кнопке мыши — после её отпускания; force — без этой проверки (кнопки шага: к click
 // кнопка мыши уже отпущена, а с клавиатуры флаг не нужен). Введённое отмечается посчитанным только после
-// успешного расчёта: после исключения те же значения посчитаются снова
+// успешного расчёта: после исключения те же значения посчитаются снова (и варианты — тоже: step3_compute пишет
+// ключ расчёта только после успешной оценки)
 function step3_flush_edits(force = false) {
     clearTimeout(step3.edit_timer)
     step3.edit_timer = null
@@ -463,12 +464,17 @@ function step3_load_metadata() {
     }
     step3.metadata_requested = true
     fetch("../FilterReview/params.json")
-        .then((res) => res.json())
+        .then((res) => {
+            if (!res.ok) {
+                throw new Error("HTTP " + res.status + (res.statusText ? " " + res.statusText : "") + " для " + res.url)
+            }
+            return res.json()
+        })
         .then((data) => {
             step3.metadata = data
             step3_apply_metadata()
         })
-        .catch((e) => console.warn("Шаг 3: описания параметров не загрузились — " + e.message))
+        .catch((e) => console.warn("Шаг 3: описания параметров (FilterReview/params.json) не загрузились, в форме только имена полей — " + e.message))
 }
 
 // Описания (title у подписи и поля) и единицы из метаданных в поля формы; без метаданных — только имена
@@ -613,15 +619,18 @@ function step3_ensure_step1() {
 
 // Варианты и их оценка против «Как в логе» для текущего интервала, notch-базы и размера винта. Выбор строки
 // сохраняется, если пользователь выбрал не строку по умолчанию (рекомендованную или «Как в логе») и такая строка
-// осталась; иначе выбрана новая рекомендованная. Без данных гироскопа до фильтров — варианты без оценки
+// осталась; иначе выбрана новая рекомендованная. Без данных гироскопа до фильтров или с неположительной частотой
+// контура notch-базы — варианты без оценки (step3_no_compare_reason). Ключи расчёта (key, context_key, gyro_ref)
+// сбрасываются в начале и пишутся только после успешной оценки: после исключения step3_stale() даст true, и
+// следующий показ или правка посчитают варианты заново
 function step3_compute() {
     const previous = step3.selected_id
     const previous_default = (step3.candidates != null) ? (step3_recommended_id() ?? "log") : null
     const params = state.params
     const base = step3_base()
-    step3.key = step3_calc_key()
-    step3.context_key = step3_context_key()
-    step3.gyro_ref = state.gyro
+    step3.key = null
+    step3.context_key = null
+    step3.gyro_ref = null
     step3.base = base
     step3.prop_in = step3_prop_size()
     step3.candidates = lowpass_candidates(lowpass_log_values(params), step3.prop_in, lowpass_accel_names(params))
@@ -643,6 +652,23 @@ function step3_compute() {
     step3_update_custom()
     const keep = (previous != null) && (previous !== previous_default) && step3_rows().some((r) => r.id === previous)
     step3.selected_id = keep ? previous : (step3_recommended_id() ?? "log")
+    step3.key = step3_calc_key()
+    step3.context_key = step3_context_key()
+    step3.gyro_ref = state.gyro
+}
+
+// Почему варианты не сравниваются с логом (у «Как в логе» нет оценки): частота контура notch-базы не положительна
+// (ядро тогда оценки не даёт) или нет данных гироскопа до фильтров; null — оценка есть
+function step3_no_compare_reason() {
+    if (step3.evaluations?.log != null) {
+        return null
+    }
+    const loop_rate = step3.base?.SCHED_LOOP_RATE
+    if (!(Number.isFinite(loop_rate) && (loop_rate > 0))) {
+        return "частота контура SCHED_LOOP_RATE " + ((state.steps[2] != null) ? "(принята на шаге 2)" : "(из лога)") + " — " + step3_value_text(loop_rate) +
+            ", а нужна положительная"
+    }
+    return "нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT / INS_RAW_LOG_OPT)"
 }
 
 // Строка «Свой»: значения формы, если они не совпали ни с одним вариантом, с оценкой и отметками против лога.
@@ -1147,7 +1173,9 @@ function step3_render_verdict() {
         const metrics = accepted.metrics
         const tail = (metrics != null) ? " — " + step3_summary_text(metrics.current, metrics.log) + " (к логу)" : " (без сравнения с логом)"
         if (step3_flagged(accepted.flags)) {
-            step3_verdict("warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + name + tail + "." + base_note)
+            // name здесь начинает предложение: «свои значения» — с заглавной
+            const sentence = name.charAt(0).toUpperCase() + name.slice(1)
+            step3_verdict("warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + sentence + tail + "." + base_note)
         } else {
             step3_verdict("ok", "Принято: " + name + tail + "." + base_note)
         }
@@ -1155,7 +1183,8 @@ function step3_render_verdict() {
     }
 
     const log = step3.evaluations?.log ?? null
-    const compare_note = (log == null) ? " Сравнить варианты с логом нельзя: нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT / INS_RAW_LOG_OPT)." : ""
+    const no_compare = step3_no_compare_reason()
+    const compare_note = (no_compare != null) ? " Сравнить варианты с логом нельзя: " + no_compare + "." : ""
     const recommended_id = step3_recommended_id()
     if (recommended_id == null) {
         step3_verdict("warn", "Введите размер винта: в логе его нет, а без него нет варианта по формуле Mission Planner и рекомендации." + compare_note + base_note)
