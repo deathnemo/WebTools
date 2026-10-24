@@ -1,5 +1,6 @@
 // Тесты метрик шагов мастера настройки (TuneWizard/core/metrics.js): пики спектра, атрибуция (по медиане
-// и по порядковому спектру), моторная частота; сравнение вариантов notch (TuneWizard/core/candidates.js)
+// и по порядковому спектру), моторная частота; сравнение вариантов notch (TuneWizard/core/candidates.js),
+// оценка вариантов низкочастотных фильтров шага 3 (TuneWizard/core/lowpass.js: шум D, задержка путей P и D, бодэ)
 // и статистика линий notch с NaN в трекинге (дефект upstream 8, core/filters.js).
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-core.test.cjs).
@@ -40,6 +41,7 @@ load_page_scripts([
     'TuneWizard/core/metrics.js',
     'TuneWizard/core/autofit.js',
     'TuneWizard/core/candidates.js',
+    'TuneWizard/core/lowpass.js',
 ])
 
 // Параметры без лога: values = { имя: значение }
@@ -561,6 +563,261 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     assert.equal(evaluate_candidate(values, { ...ctx, sensor: 5 }), null)
     const post_only = [{ FFT: { ...FFT, Z1: null, Z2: null } }]
     assert.equal(evaluate_candidate(values, { ...ctx, gyro: post_only }), null)
+})
+
+// ---------- Оценка вариантов низкочастотных фильтров шага 3 (core/lowpass.js) ----------
+
+// Значения шага 3 «как в логе» (как у пользователя: FLTD 30, FLTT 20, FLTE крена и тангажа 0)
+const lowpass_values_8 = {
+    INS_GYRO_FILTER: 40, INS_ACCEL_FILTER: 10,
+    ATC_RAT_RLL_FLTT: 20, ATC_RAT_RLL_FLTE: 0, ATC_RAT_RLL_FLTD: 30,
+    ATC_RAT_PIT_FLTT: 20, ATC_RAT_PIT_FLTE: 0, ATC_RAT_PIT_FLTD: 30,
+    ATC_RAT_YAW_FLTT: 20, ATC_RAT_YAW_FLTE: 1, ATC_RAT_YAW_FLTD: 0,
+    ATC_ACCEL_R_MAX: 90000, ATC_ACCEL_P_MAX: 90000, ATC_ACCEL_Y_MAX: 50000,
+}
+const lowpass_kd_8 = { roll: 0.004, pitch: 0.005 }
+
+// Синтетический гироскоп 1000 Гц (esc_setup) и контекст шага 3: notch-база — значения лога этапа 2 (контур 400 Гц)
+function lowpass_setup({ options = { esc_hz: [56, 58, 60, 60, 60, 62, 64] }, kd = lowpass_kd_8 } = {}) {
+    const setup = esc_setup(options)
+    const base = { gyro: setup.gyro, env: setup.env, tracking: setup.tracking, range: setup.range, sensor: 0 }
+    return { ...setup, base, ctx: lowpass_ctx(base, { ...log_values_7a }, kd) }
+}
+
+// Метрики оценки одним объектом для сравнения: шум гироскопа, шум D осей, задержки путей
+function lowpass_metrics(e) {
+    return { gyro: e.gyro.band_dB, roll: e.dterm.roll?.dB, pitch: e.dterm.pitch?.dB, lag: e.lag_ms }
+}
+
+// Индекс наибольшего конечного значения
+function argmax_finite(values) {
+    let best = -1
+    values.forEach((v, k) => {
+        if (Number.isFinite(v) && ((best < 0) || (v > values[best]))) {
+            best = k
+        }
+    })
+    return best
+}
+
+test('evaluate_lowpass: одинаковые значения — разница ровно 0; FLTT, INS_ACCEL_FILTER, рыскание и пределы в метрики не входят', () => {
+    const { ctx, env: log_env, tracking } = lowpass_setup()
+    assert.equal(ctx.loop_rate, 400, 'контур — SCHED_LOOP_RATE notch-базы')
+    assert.deepEqual(ctx.peaks, [])
+    assert.equal(ctx.sensor, 0)
+    assert.deepEqual(ctx.kd, lowpass_kd_8)
+
+    const a = evaluate_lowpass(lowpass_values_8, ctx)
+    const b = evaluate_lowpass({ ...lowpass_values_8 }, ctx)
+    assert.equal(b.gyro.band_dB - a.gyro.band_dB, 0)
+    assert.equal(b.dterm.roll.dB - a.dterm.roll.dB, 0)
+    assert.equal(b.dterm.pitch.dB - a.dterm.pitch.dB, 0)
+    assert.deepEqual(b.lag_ms, a.lag_ms)
+    assert.deepEqual(lowpass_flags(b, a), { noisier: [], slower: [], incomplete: false, incomplete_axes: [] })
+
+    // То, что не стоит на пути гироскоп → P/D крена и тангажа, метрики не меняет
+    const other = evaluate_lowpass({ ...lowpass_values_8, ATC_RAT_RLL_FLTT: 5, ATC_RAT_PIT_FLTT: 50, INS_ACCEL_FILTER: 20,
+                                     ATC_RAT_YAW_FLTE: 2.5, ATC_RAT_YAW_FLTD: 20, ATC_ACCEL_R_MAX: 1 }, ctx)
+    assert.deepEqual(lowpass_metrics(other), lowpass_metrics(a))
+
+    // Форма результата
+    assert.equal(a.values, lowpass_values_8)
+    assert.deepEqual(a.warnings, load_filters(log_values_7a, log_env, tracking).warnings)
+    assert.equal(a.dterm.bins[0], 0)
+    assert.equal(a.dterm.bins[a.dterm.bins.length - 1], 200, 'до частоты Найквиста контура')
+    for (const axis of ['roll', 'pitch']) {
+        assert.equal(a.dterm[axis].spectrum.length, a.dterm.bins.length)
+        assert.equal(a.dterm[axis].spectrum[0], -Infinity, 'на 0 Гц производная равна нулю')
+        assert.ok(Number.isFinite(a.dterm[axis].dB))
+        for (const path of ['P', 'D']) {
+            assert.deepEqual(Object.keys(a.lag_ms[axis][path]), ['10', '30'])
+        }
+    }
+    assert.deepEqual(Object.keys(a.gyro).sort(), ['band_dB', 'lag_ms', 'pre_spectrum', 'spectrum'])
+})
+
+test('evaluate_lowpass: шум гироскопа «как в логе» — тот же, что на шаге 2; шум D — свёрнутая PSD × производная × FLTE × FLTD', () => {
+    const { gyro, env: log_env, tracking, range, ctx } = lowpass_setup()
+    const values = { ...lowpass_values_8, ATC_RAT_RLL_FLTE: 10, ATC_RAT_PIT_FLTD: 15 }
+    const e = evaluate_lowpass(values, ctx)
+
+    // Шаг 2 с той же notch-базой: то же число, та же задержка гироскопной части
+    const step2 = evaluate_candidate(log_values_7a, { gyro, env: log_env, tracking, range, sensor: 0, peaks: [], loop_rate: 400 })
+    assert.equal(e.gyro.band_dB, step2.band_dB)
+    assert.deepEqual(e.gyro.lag_ms, step2.lag_ms)
+    assert.deepEqual(e.gyro.spectrum, step2.spectrum)
+
+    // Задержка: путь P = гироскопная часть + FLTE оси, путь D = путь P + FLTD оси
+    for (const [axis, flte, fltd] of [['roll', 10, 30], ['pitch', 0, 15]]) {
+        for (const f of [10, 30]) {
+            const P = step2.lag_ms[f] + pid_lowpass_lag_ms(flte, 400, f)
+            assert.ok(Math.abs(e.lag_ms[axis].P[f] - P) < 1e-12, axis + ' P на ' + f + ' Гц')
+            assert.ok(Math.abs(e.lag_ms[axis].D[f] - P - pid_lowpass_lag_ms(fltd, 400, f)) < 1e-12, axis + ' D на ' + f + ' Гц')
+        }
+    }
+
+    // Шум D отдельно: PSD после фильтров базы через FFT.H (calculate_transfer_function), свёрнутая к 200 Гц;
+    // крен — ось X, тангаж — ось Y
+    calculate_transfer_function(load_filters(log_values_7a, log_env, tracking), gyro)
+    const alias = alias_obj(gyro[0].FFT, { mode: 'fold', loop_rate: 400 })
+    const psd = estimate_post(gyro, 0, spectrum_amplitude_scale('PSD'), range, alias)
+    assert.deepEqual(e.dterm.bins, alias.bins)
+    const abs2 = (h) => h[0] ** 2 + h[1] ** 2
+    for (const [axis, key, kd, flte, fltd] of [['roll', 'x', 0.004, 10, 30], ['pitch', 'y', 0.005, 0, 15]]) {
+        let sum = 0
+        let count = 0
+        alias.bins.forEach((f, k) => {
+            const D = kd ** 2 * 10 ** (psd[key][k] / 10) * derivative_gain2(f, 400) * abs2(pid_lowpass_response(flte, 400, f)) * abs2(pid_lowpass_response(fltd, 400, f))
+            const got = e.dterm[axis].spectrum[k]
+            assert.ok((k == 0) ? (got === -Infinity) : (Math.abs(got - 10 * Math.log10(D)) < 1e-9), axis + ' ' + f + ' Гц: ' + got + ' против ' + 10 * Math.log10(D))
+            if ((f >= 20) && (f <= 200)) {
+                sum += D
+                count++
+            }
+        })
+        assert.ok(Math.abs(e.dterm[axis].dB - 10 * Math.log10(sum / count)) < 1e-9, axis + ': среднее по 20–200 Гц')
+    }
+})
+
+test('evaluate_lowpass: FLTD 30 → 15 — шум D крена и тангажа ниже, путь D медленнее, путь P прежний', () => {
+    const { ctx } = lowpass_setup()
+    const log = evaluate_lowpass(lowpass_values_8, ctx)
+    const half = evaluate_lowpass({ ...lowpass_values_8, ATC_RAT_RLL_FLTD: 15, ATC_RAT_PIT_FLTD: 15 }, ctx)
+    for (const axis of ['roll', 'pitch']) {
+        assert.ok(half.dterm[axis].dB < log.dterm[axis].dB - 1, axis + ': ' + log.dterm[axis].dB + ' → ' + half.dterm[axis].dB)
+        assert.deepEqual(half.lag_ms[axis].P, log.lag_ms[axis].P)
+        for (const f of [10, 30]) {
+            assert.ok(half.lag_ms[axis].D[f] > log.lag_ms[axis].D[f], axis + ' D на ' + f + ' Гц')
+            // Разница — ровно разница задержек FLTD
+            const expected = pid_lowpass_lag_ms(15, 400, f) - pid_lowpass_lag_ms(30, 400, f)
+            assert.ok(Math.abs(half.lag_ms[axis].D[f] - log.lag_ms[axis].D[f] - expected) < 1e-9)
+        }
+    }
+    assert.equal(half.gyro.band_dB, log.gyro.band_dB, 'гироскоп не меняется')
+    assert.deepEqual(lowpass_flags(half, log).slower, ['roll D', 'pitch D'], '30 → 15 Гц добавляет на 30 Гц больше 1 мс')
+    assert.deepEqual(lowpass_flags(half, log).noisier, [])
+})
+
+test('evaluate_lowpass: INS_GYRO_FILTER 80 → 40 — шум гироскопа ниже, пути P и D медленнее', () => {
+    const { ctx } = lowpass_setup()
+    const fast = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 80 }, ctx)
+    const slow = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 40 }, ctx)
+    assert.ok(slow.gyro.band_dB < fast.gyro.band_dB - 1, fast.gyro.band_dB + ' → ' + slow.gyro.band_dB)
+    for (const axis of ['roll', 'pitch']) {
+        assert.ok(slow.dterm[axis].dB < fast.dterm[axis].dB, axis + ': шум D тоже ниже')
+        for (const f of [10, 30]) {
+            const gyro_delta = slow.gyro.lag_ms[f] - fast.gyro.lag_ms[f]
+            assert.ok(gyro_delta > 0, 'гироскопная часть медленнее на ' + f + ' Гц')
+            // Фильтры ПИД те же — пути P и D замедляются ровно на гироскопную часть
+            assert.ok(Math.abs(slow.lag_ms[axis].P[f] - fast.lag_ms[axis].P[f] - gyro_delta) < 1e-9)
+            assert.ok(Math.abs(slow.lag_ms[axis].D[f] - fast.lag_ms[axis].D[f] - gyro_delta) < 1e-9)
+        }
+    }
+    const flags = lowpass_flags(slow, fast)
+    assert.deepEqual(flags.noisier, [])
+    assert.deepEqual(flags.slower, ['roll P', 'roll D', 'pitch P', 'pitch D'])
+    assert.deepEqual(lowpass_flags(fast, slow).noisier, ['gyro', 'roll', 'pitch'], 'обратно — шумнее больше чем на 3 дБ')
+})
+
+test('evaluate_lowpass: тон 233 Гц на гироскопе 1000 Гц сворачивается в спектре D-составляющей к 167 Гц (контур 400 Гц)', () => {
+    // Только тон и слабый шум (0.1), ФНЧ гироскопа 80 Гц: тон над шумом D на 22 дБ по крену и 15 дБ по тангажу
+    // (по Y тон вдвое слабее). С шумом 0.3 и ФНЧ 40 Гц у тангажа шум D около 18 Гц выше тона
+    const { ctx } = lowpass_setup({ options: { esc_hz: [60, 60, 60, 60, 60], motor: [], fixed: [[233, 1.5]], noise: 0.1 } })
+    const e = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 80 }, ctx)
+    const bins = e.dterm.bins
+    for (const axis of ['roll', 'pitch']) {
+        const k = argmax_finite(e.dterm[axis].spectrum)
+        assert.ok(Math.abs(bins[k] - 167) <= 1, axis + ': пик D на ' + bins[k] + ' Гц')
+    }
+    // Сам тон — на 233 Гц в спектре гироскопа (без свёртки)
+    const gyro_bins = e.gyro.spectrum.bins
+    const peak = argmax_finite(e.gyro.spectrum.x.map((v, k) => (gyro_bins[k] >= 100) ? v : -Infinity))
+    assert.ok(Math.abs(gyro_bins[peak] - 233) <= 1, 'тон гироскопа на ' + gyro_bins[peak] + ' Гц')
+})
+
+test('evaluate_lowpass: Kd — удвоение даёт +6.02 дБ в каждом бине; без Kd (null или 0) — dterm оси null', () => {
+    const { base } = lowpass_setup()
+    const notch = { ...log_values_7a }
+    const one = evaluate_lowpass(lowpass_values_8, lowpass_ctx(base, notch, { roll: 0.004, pitch: 0.005 }))
+    const two = evaluate_lowpass(lowpass_values_8, lowpass_ctx(base, notch, { roll: 0.008, pitch: 0.005 }))
+    const six = 20 * Math.log10(2)
+    one.dterm.roll.spectrum.forEach((dB, k) => {
+        const got = two.dterm.roll.spectrum[k]
+        assert.ok(Number.isFinite(dB) ? (Math.abs(got - dB - six) < 1e-9) : (got === dB), k + ': ' + dB + ' → ' + got)
+    })
+    assert.ok(Math.abs(two.dterm.roll.dB - one.dterm.roll.dB - six) < 1e-9)
+    assert.deepEqual(two.dterm.pitch, one.dterm.pitch, 'Kd тангажа тот же')
+
+    for (const kd of [{ roll: null, pitch: 0.005 }, { roll: 0, pitch: 0.005 }, { pitch: 0.005 }]) {
+        const e = evaluate_lowpass(lowpass_values_8, lowpass_ctx(base, notch, kd))
+        assert.equal(e.dterm.roll, null, JSON.stringify(kd))
+        assert.deepEqual(e.dterm.pitch, one.dterm.pitch)
+        assert.deepEqual(e.lag_ms, one.lag_ms, 'задержка от Kd не зависит')
+        assert.deepEqual(lowpass_flags(e, e).incomplete_axes, ['roll'])
+    }
+    const none = evaluate_lowpass(lowpass_values_8, lowpass_ctx(base, notch, null))
+    assert.equal(none.dterm.roll, null)
+    assert.equal(none.dterm.pitch, null)
+})
+
+test('lowpass_bode: при FLTE 0 путь P — гироскопная часть (фаза как у filters_lag_ms), D − P = FLTD; сетка 0…200 Гц', () => {
+    const { ctx } = lowpass_setup()
+    const values = { ...lowpass_values_8, ATC_RAT_PIT_FLTE: 10, ATC_RAT_PIT_FLTD: 15 }
+    const e = evaluate_lowpass(values, ctx)
+    const lag_at = (phase, f) => -phase / 360 / f * 1000
+    const deg = (h) => Math.atan2(h[1], h[0]) * 180 / Math.PI
+    const db = (h) => 20 * Math.log10(Math.hypot(h[0], h[1]))
+
+    const roll = lowpass_bode(values, ctx, 'roll')
+    assert.equal(roll.freq.length, 4001)
+    assert.equal(roll.freq[0], 0)
+    assert.equal(roll.freq[4000], 200)
+    for (const f of [10, 30]) {
+        const k = Math.round(f / 0.05)
+        assert.equal(roll.freq[k], f)
+        // FLTE крена 0: путь P — это гироскопная часть, её задержка — filters_lag_ms внутри evaluate_candidate
+        assert.ok(Math.abs(lag_at(roll.P.phase_deg[k], f) - e.gyro.lag_ms[f]) < 1e-6, 'P на ' + f + ' Гц: ' + lag_at(roll.P.phase_deg[k], f) + ' против ' + e.gyro.lag_ms[f])
+        assert.ok(Math.abs(lag_at(roll.D.phase_deg[k], f) - e.lag_ms.roll.D[f]) < 1e-6, 'D на ' + f + ' Гц')
+    }
+    const k30 = 600
+    assert.ok(Math.abs(roll.D.phase_deg[k30] - roll.P.phase_deg[k30] - deg(pid_lowpass_response(30, 400, 30))) < 1e-6)
+    assert.ok(Math.abs(roll.D.amp_dB[k30] - roll.P.amp_dB[k30] - db(pid_lowpass_response(30, 400, 30))) < 1e-9)
+
+    // Тангаж: свои FLTE 10 и FLTD 15; разница с креном по пути P — ровно FLTE
+    const pitch = lowpass_bode(values, ctx, 'pitch')
+    assert.ok(Math.abs(pitch.P.phase_deg[k30] - roll.P.phase_deg[k30] - deg(pid_lowpass_response(10, 400, 30))) < 1e-9)
+    assert.ok(Math.abs(pitch.D.phase_deg[k30] - pitch.P.phase_deg[k30] - deg(pid_lowpass_response(15, 400, 30))) < 1e-6)
+    assert.ok(Math.abs(lag_at(pitch.P.phase_deg[k30], 30) - e.lag_ms.pitch.P[30]) < 1e-6)
+    assert.ok(Math.abs(lag_at(pitch.D.phase_deg[k30], 30) - e.lag_ms.pitch.D[30]) < 1e-6)
+    // Амплитуда на 0 Гц — 0 дБ (ФНЧ и notch постоянную составляющую пропускают)
+    assert.ok(Math.abs(pitch.D.amp_dB[0]) < 1e-9)
+
+    // Свой шаг сетки
+    assert.equal(lowpass_bode(values, ctx, 'roll', 0.5).freq.length, 401)
+})
+
+test('evaluate_lowpass и lowpass_bode: без FFT или данных «до» — null; FFT.H и FFT.bode.H не меняются', () => {
+    const { gyro, env: log_env, tracking, ctx } = lowpass_setup()
+    const other = { INS_GYRO_FILTER: 80, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 0, INS_HNTCH_FREQ: 100, INS_HNTCH_BW: 50, INS_HNTCH_ATT: 40, INS_HNTCH_HMNCS: 1, INS_HNTCH_FM_RAT: 1, INS_HNTC2_ENABLE: 0 }
+    calculate_transfer_function(load_filters(other, log_env, tracking), gyro)
+    const FFT = gyro[0].FFT
+    const H = FFT.H
+    const bode_H = FFT.bode.H
+    const H_copy = H.map((h) => [h[0].slice(), h[1].slice()])
+    const bode_copy = bode_H.map((h) => [h[0].slice(), h[1].slice()])
+
+    evaluate_lowpass(lowpass_values_8, ctx)
+    evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 20 }, ctx)
+    lowpass_bode(lowpass_values_8, ctx, 'roll')
+    assert.equal(FFT.H, H, 'тот же массив FFT.H')
+    assert.equal(FFT.bode.H, bode_H, 'тот же массив FFT.bode.H')
+    assert.deepEqual(FFT.H.map((h) => [h[0].slice(), h[1].slice()]), H_copy)
+    assert.deepEqual(FFT.bode.H.map((h) => [h[0].slice(), h[1].slice()]), bode_copy)
+
+    assert.equal(evaluate_lowpass(lowpass_values_8, { ...ctx, sensor: 5 }), null)
+    assert.equal(lowpass_bode(lowpass_values_8, { ...ctx, sensor: 5 }, 'roll'), null)
+    const post_only = [{ FFT: { ...FFT, Z1: null, Z2: null } }]
+    assert.equal(evaluate_lowpass(lowpass_values_8, { ...ctx, gyro: post_only }), null)
 })
 
 // Плоский спектр 0…500 Гц шагом 2 Гц (−60 дБ, рябь ±0.3 дБ) — пиков «после» в нём нет

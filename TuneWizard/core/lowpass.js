@@ -33,6 +33,10 @@ const lowpass_rules = {
 
 const LOWPASS_AXES = ["RLL", "PIT", "YAW"]
 
+// Оси с метриками D и задержки: имя в параметрах ATC_RAT_<имя>_* и ось гироскопа (крен ↔ X, тангаж ↔ Y).
+// Рыскание — по правилу wiki, без метрик: FLTE 2 Гц даёт задержку, несравнимую с остальными осями (дизайн, раздел 4)
+const lowpass_pid_axes = { roll: { param: "RLL", gyro: "x" }, pitch: { param: "PIT", gyro: "y" } }
+
 // Math.Round из C# (по умолчанию — к чётному): так округляет Mission Planner
 function mp_round_half_even(value) {
     const floor = Math.floor(value)
@@ -236,4 +240,262 @@ function lowpass_candidates(log_values, prop_in, names) {
         }
     }
     return [...kept.values()]
+}
+
+// ---------- Модель ПИД и оценка вариантов ----------
+// ПИД крена и тангажа (AC_PID.cpp, update_all) считается на частоте контура SCHED_LOOP_RATE: ошибка = цель после
+// FLTT − гироскоп после notch и INS_GYRO_FILTER; FLTE — на ошибке (действует на P, I и D); производная ошибки
+// (error − error_last) / dt; FLTD — на производной (только D). Все три — первого порядка (calc_lowpass_alpha_dt) [код].
+// Отсюда путь P = гироскопная часть + FLTE, путь D = путь P + производная + FLTD; FLTT стоит на цели и в метрики
+// не входит. Гироскоп ПИД получает с частотой контура, поэтому шум выше её половины отражается вниз (свёртка).
+
+// Фильтр первого порядка ArduPilot на частоте контура loop_rate: y += alpha·(x − y), alpha = dt / (dt + 1/(2π·fc))
+// (calc_lowpass_alpha_dt); H(z) = alpha / (1 − (1 − alpha)·z⁻¹) при z = e^(j·2π·f/loop_rate). fc не больше нуля
+// или не число — без фильтра (H = 1): calc_lowpass_alpha_dt при fc = 0 даёт alpha = 1, отрицательную частоту
+// прошивка тоже не применяет [код]. Возвращает [re, im] на частоте f
+function pid_lowpass_response(fc, loop_rate, f) {
+    if (!(fc > 0)) {
+        return [1, 0]
+    }
+    const dt = 1 / loop_rate
+    const alpha = dt / (dt + 1 / (2 * Math.PI * fc))
+    const w = 2 * Math.PI * f / loop_rate
+    // Знаменатель 1 − (1 − alpha)·e^(−jω) = (1 − (1 − alpha)·cos ω) + j·(1 − alpha)·sin ω
+    const re = 1 - (1 - alpha) * Math.cos(w)
+    const im = (1 - alpha) * Math.sin(w)
+    const norm = re * re + im * im
+    return [alpha * re / norm, -alpha * im / norm]
+}
+
+// Задержка этого фильтра на частоте f > 0, мс: −arg(H) / (2π·f) · 1000 (фаза первого порядка по модулю меньше 90°,
+// развёртка не нужна); без фильтра — 0
+function pid_lowpass_lag_ms(fc, loop_rate, f) {
+    const [re, im] = pid_lowpass_response(fc, loop_rate, f)
+    return (0 - Math.atan2(im, re)) / (2 * Math.PI * f) * 1000
+}
+
+// |(1 − z⁻¹) / dt|² на частоте f при dt = 1 / loop_rate: (2·sin(π·f/loop_rate) · loop_rate)² — квадрат усиления
+// производной ошибки в ПИД (AC_PID.cpp: (_error − error_last) / dt) [код]
+function derivative_gain2(f, loop_rate) {
+    return (2 * Math.sin(Math.PI * f / loop_rate) * loop_rate)**2
+}
+
+// Контекст оценки: контекст evaluate_candidate (gyro, env, tracking, range, sensor — индекс экземпляра в gyro,
+// как у шага 2) с пустыми пиками и loop_rate = notch.SCHED_LOOP_RATE; notch — значения notch-базы (принятые на шаге 2
+// или из лога: INS_GYRO_FILTER, SCHED_LOOP_RATE, INS_HNTCH_*, INS_HNTC2_*), kd — { roll: ATC_RAT_RLL_D,
+// pitch: ATC_RAT_PIT_D } (null — нет в логе, 0 — D выключен: шум D такой оси не считается). Один объект на все
+// варианты: по нему evaluate_candidate кэширует спектр «до». base = { gyro, env, tracking, range, sensor }
+function lowpass_ctx(base, notch, kd) {
+    return { ...base, peaks: [], loop_rate: notch.SCHED_LOOP_RATE, notch: notch, kd: kd }
+}
+
+// Шум D-составляющей одной оси: psd_dB — PSD гироскопа после фильтров (дБ/Гц), свёрнутая к loop_rate / 2, по бинам
+// bins. D[k] = kd² · 10^(psd_dB[k]/10) · derivative_gain2(f_k) · |H_FLTE(f_k)|² · |H_FLTD(f_k)|².
+// Возвращает { dB, spectrum }: spectrum = 10·log10(D[k]) по всем бинам (на 0 Гц производная равна нулю — −Infinity),
+// dB = 10·log10 среднего D[k] по бинам band_hz[0] ≤ f ≤ min(band_hz[1], loop_rate / 2) (null, если таких нет).
+// null, если kd не ненулевое конечное число (нет в логе или D выключен): D-составляющей у оси нет
+function lowpass_dterm(bins, psd_dB, kd, flte, fltd, loop_rate) {
+    if (!Number.isFinite(kd) || (kd == 0)) {
+        return null
+    }
+    const band = lowpass_rules.band_hz
+    const top = Math.min(band[1], loop_rate / 2)
+    const abs2 = (h) => h[0] * h[0] + h[1] * h[1]
+    const spectrum = new Array(bins.length)
+    let sum = 0
+    let count = 0
+    for (let k = 0; k < bins.length; k++) {
+        const f = bins[k]
+        const D = kd * kd * 10**(psd_dB[k] / 10) * derivative_gain2(f, loop_rate) *
+                  abs2(pid_lowpass_response(flte, loop_rate, f)) * abs2(pid_lowpass_response(fltd, loop_rate, f))
+        spectrum[k] = 10 * Math.log10(D)
+        if ((f >= band[0]) && (f <= top)) {
+            sum += D
+            count++
+        }
+    }
+    return { dB: (count > 0) ? 10 * Math.log10(sum / count) : null, spectrum: spectrum }
+}
+
+// Оценка варианта values (объект имя → число, имена lowpass_param_names) на контексте lowpass_ctx.
+// Гироскопная часть — notch-база с INS_GYRO_FILTER варианта; FLTE и FLTD крена и тангажа — из values.
+// Возвращает null, если у экземпляра нет FFT или Z1 (только «после»), иначе {
+//   values, warnings (filters.warnings гироскопной части, как в evaluate_candidate),
+//   gyro: { band_dB, lag_ms: { 10, 30 }, spectrum, pre_spectrum } — evaluate_candidate({ ...ctx.notch, INS_GYRO_FILTER }):
+//         шум гироскопа после фильтров в band_hz и задержка гироскопной части (filters_lag_ms),
+//   dterm: { bins, roll: { dB, spectrum }, pitch: { dB, spectrum } } — шум D-составляющей (lowpass_dterm): PSD
+//          гироскопа после фильтров варианта (оси X и Y), свёрнутая к loop_rate / 2 (alias_obj, режим "fold");
+//          bins — 0…loop_rate / 2; у оси без Kd (ctx.kd оси null или 0) — null. Kd в сравнении вариантов
+//          сокращается: метрика относительная,
+//   lag_ms: { roll: { P: { 10, 30 }, D: { 10, 30 } }, pitch: { … } } — путь P = гироскопная часть + FLTE,
+//           путь D = путь P + FLTD (производная одинакова у всех вариантов и в задержку не входит)
+// }. Частоты задержки — lag_freqs_hz. Состояние gyro (FFT.H, FFT.bode.H) не меняется
+function evaluate_lowpass(values, ctx) {
+    const gyro_values = { ...ctx.notch, INS_GYRO_FILTER: values.INS_GYRO_FILTER }
+    const gyro_eval = evaluate_candidate(gyro_values, ctx)
+    if (gyro_eval == null) {
+        return null
+    }
+    const gyro = ctx.gyro
+    const index = ctx.sensor
+    const FFT = gyro[index].FFT
+    const loop_rate = ctx.loop_rate
+
+    // PSD после фильтров варианта, свёрнутая к частоте Найквиста контура. Своя H на сетке FFT, как в
+    // evaluate_candidate: FFT.H не трогаем; окна — до конца диапазона
+    const filters = load_filters(gyro_values, ctx.env, ctx.tracking)
+    const end_index = find_end_index(FFT.time, ctx.range) + 1
+    const H = filter_transfer(filters, index, FFT.time.slice(0, end_index), FFT.average_sample_rate, FFT.Z1, FFT.Z2)
+    const alias = alias_obj(FFT, { mode: "fold", loop_rate: loop_rate })
+    const psd = estimate_post(gyro, index, spectrum_amplitude_scale("PSD"), ctx.range, alias, H)
+
+    const dterm = { bins: alias.bins }
+    const lag_ms = {}
+    for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
+        const flte = values["ATC_RAT_" + names.param + "_FLTE"]
+        const fltd = values["ATC_RAT_" + names.param + "_FLTD"]
+        dterm[axis] = lowpass_dterm(alias.bins, psd[names.gyro], ctx.kd?.[axis], flte, fltd, loop_rate)
+
+        const P = {}
+        const D = {}
+        for (const f of lowpass_rules.lag_freqs_hz) {
+            P[f] = gyro_eval.lag_ms[f] + pid_lowpass_lag_ms(flte, loop_rate, f)
+            D[f] = P[f] + pid_lowpass_lag_ms(fltd, loop_rate, f)
+        }
+        lag_ms[axis] = { P: P, D: D }
+    }
+
+    return {
+        values: values,
+        warnings: gyro_eval.warnings,
+        gyro: { band_dB: gyro_eval.band_dB, lag_ms: gyro_eval.lag_ms, spectrum: gyro_eval.spectrum, pre_spectrum: gyro_eval.pre_spectrum },
+        dterm: dterm,
+        lag_ms: lag_ms,
+    }
+}
+
+// Бодэ путей P и D оси (axis — "roll" | "pitch") для графика. H гироскопной части (notch-база с INS_GYRO_FILTER
+// варианта) на сетке 0…loop_rate / 2 шагом step (0.05 Гц, как в filters_lag_ms: get_phase считает спад больше 45°
+// за шаг переносом фазы, поэтому сетка плотная и от нуля): filter_transfer на exp_jw(сетка, FFT.average_sample_rate)
+// по окнам до конца интервала, средние по окнам интервала амплитуда (complex_abs) и развёрнутая фаза (get_phase).
+// Путь P — она, умноженная на FLTE оси, путь D — на FLTE·FLTD (фаза фильтров ПИД прибавляется: по модулю меньше 90°,
+// развёртка не нужна). → { freq, P: { amp_dB, phase_deg }, D: { amp_dB, phase_deg } } (амплитуда 20·log10, фаза
+// в градусах без свёртки); null, если у экземпляра нет FFT. Состояние gyro не меняется
+function lowpass_bode(values, ctx, axis, step = 0.05) {
+    const gyro = ctx.gyro
+    const index = ctx.sensor
+    if ((gyro[index] == null) || (gyro[index].FFT == null) || (gyro[index].FFT.x.length == 0)) {
+        return null
+    }
+    const FFT = gyro[index].FFT
+    const loop_rate = ctx.loop_rate
+    const names = lowpass_pid_axes[axis]
+    const flte = values["ATC_RAT_" + names.param + "_FLTE"]
+    const fltd = values["ATC_RAT_" + names.param + "_FLTD"]
+
+    // Сетка k·step до loop_rate / 2 включительно (допуск — чтобы не потерять последнюю точку на округлении)
+    const freq = []
+    const count = Math.floor((loop_rate / 2) / step + 1e-9)
+    for (let k = 0; k <= count; k++) {
+        freq.push(k * step)
+    }
+
+    const filters = load_filters({ ...ctx.notch, INS_GYRO_FILTER: values.INS_GYRO_FILTER }, ctx.env, ctx.tracking)
+    const start_index = find_start_index(FFT.time, ctx.range)
+    const end_index = find_end_index(FFT.time, ctx.range) + 1
+    const Z = exp_jw(freq, FFT.average_sample_rate)
+    const H = filter_transfer(filters, index, FFT.time.slice(0, end_index), FFT.average_sample_rate, complex_inverse(Z), complex_inverse(complex_square(Z)))
+
+    // Средние по окнам интервала
+    const amp = new Array(freq.length).fill(0)
+    const phase = new Array(freq.length).fill(0)
+    for (let j = start_index; j < end_index; j++) {
+        const window_amp = complex_abs(H[j])
+        const window_phase = get_phase(H[j])
+        for (let k = 0; k < freq.length; k++) {
+            amp[k] += window_amp[k]
+            phase[k] += window_phase[k]
+        }
+    }
+    const mean_length = end_index - start_index
+
+    const P = { amp_dB: new Array(freq.length), phase_deg: new Array(freq.length) }
+    const D = { amp_dB: new Array(freq.length), phase_deg: new Array(freq.length) }
+    for (let k = 0; k < freq.length; k++) {
+        const e = pid_lowpass_response(flte, loop_rate, freq[k])
+        const d = pid_lowpass_response(fltd, loop_rate, freq[k])
+        const amp_P = amp[k] / mean_length * Math.hypot(e[0], e[1])
+        const phase_P = phase[k] / mean_length + Math.atan2(e[1], e[0]) * 180 / Math.PI
+        P.amp_dB[k] = 20 * Math.log10(amp_P)
+        P.phase_deg[k] = phase_P
+        D.amp_dB[k] = 20 * Math.log10(amp_P * Math.hypot(d[0], d[1]))
+        D.phase_deg[k] = phase_P + Math.atan2(d[1], d[0]) * 180 / Math.PI
+    }
+    return { freq: freq, P: P, D: D }
+}
+
+// Отметки варианта evaluation против лога log (обе — evaluate_lowpass, могут быть null):
+//   noisier — что шумнее лога больше чем на max_noise_increase_dB: "gyro" (полоса гироскопа), "roll", "pitch" (шум D);
+//   slower — пути, где задержка на старшей из lag_freqs_hz (30 Гц) больше лога на max_lag_increase_ms:
+//            "roll P", "roll D", "pitch P", "pitch D";
+//   incomplete — нет оценки варианта или лога, полоса гироскопа у одного из них нечисловая; тогда остальные проверки
+//                не делаются (списки пусты);
+//   incomplete_axes — оси, у которых шума D нет хотя бы у одного (нет Kd): у обоих нет — без отметки шума, у одного —
+//                     сравнивать не с чем, ось ещё и в noisier.
+// Проверки отказывают при сомнении: !(разница ≤ порога), разница нечисловых значений (NaN, null, нет поля) — NaN,
+// поэтому такие места отмечаются. Ровно на пороге — без отметки [наше].
+// → { noisier: [...], slower: [...], incomplete, incomplete_axes: [...] }
+function lowpass_flags(evaluation, log, rules = lowpass_rules) {
+    const flags = { noisier: [], slower: [], incomplete: false, incomplete_axes: [] }
+    const complete = (e) => (e != null) && Number.isFinite(e.gyro?.band_dB)
+    if (!complete(evaluation) || !complete(log)) {
+        flags.incomplete = true
+        return flags
+    }
+    const delta = (a, b) => (Number.isFinite(a) && Number.isFinite(b)) ? a - b : NaN
+    const lag_hz = rules.lag_freqs_hz[rules.lag_freqs_hz.length - 1]
+
+    if (!(delta(evaluation.gyro.band_dB, log.gyro.band_dB) <= rules.max_noise_increase_dB)) {
+        flags.noisier.push("gyro")
+    }
+    for (const axis of Object.keys(lowpass_pid_axes)) {
+        const own = evaluation.dterm?.[axis]
+        const base = log.dterm?.[axis]
+        if ((own == null) || (base == null)) {
+            flags.incomplete_axes.push(axis)
+        }
+        if (((own != null) || (base != null)) && !(delta(own?.dB, base?.dB) <= rules.max_noise_increase_dB)) {
+            flags.noisier.push(axis)
+        }
+    }
+    for (const axis of Object.keys(lowpass_pid_axes)) {
+        for (const path of ["P", "D"]) {
+            if (!(delta(evaluation.lag_ms?.[axis]?.[path]?.[lag_hz], log.lag_ms?.[axis]?.[path]?.[lag_hz]) <= rules.max_lag_increase_ms)) {
+                flags.slower.push(axis + " " + path)
+            }
+        }
+    }
+    return flags
+}
+
+// Предупреждения о том, чего модель не учитывает: notch-фильтры ПИД крена и тангажа (ATC_RAT_RLL/PIT_NTF — на цели,
+// NEF — на ошибке, AC_PID.cpp [код]) с ненулевым индексом фильтра → строка на ось с их именами и значениями.
+// Рыскания модель не касается вовсе, поэтому его notch не упоминается. params — log_params (get → число или null)
+function lowpass_model_warnings(params) {
+    const titles = { roll: "крена", pitch: "тангажа" }
+    const warnings = []
+    for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
+        const enabled = []
+        for (const suffix of ["NTF", "NEF"]) {
+            const name = "ATC_RAT_" + names.param + "_" + suffix
+            const value = params.get(name)
+            if ((value != null) && (value != 0)) {
+                enabled.push(name + " = " + value)
+            }
+        }
+        if (enabled.length > 0) {
+            warnings.push("Notch-фильтры ПИД " + titles[axis] + " (" + enabled.join(", ") + ") модель шага не учитывает")
+        }
+    }
+    return warnings
 }
