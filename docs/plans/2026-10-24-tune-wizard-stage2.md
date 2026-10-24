@@ -180,7 +180,7 @@ function restyle_plots() {
     ```
   - вешает обработчик `plotly_relayout` как раньше (`document.getElementById("FlightData").on(...)`).
 - `plot_flight()` и `reset()` вместо `Plotly.react("FlightData", …)` зовут `render_plot("FlightData")`; `interval_input_changed` оставляет `Plotly.relayout`.
-- `set_step(n)` зовёт `restyle_plots()` при показе любого шага (не только 0): Plotly не умеет перерисовывать скрытый контейнер корректно.
+- `set_step(n)` зовёт `show_plots(section)` для показанной секции: скрытые графики не рисуются (dirty) и дорисовываются при показе, чистым подгоняется размер (`Plots.resize`); смена темы по-прежнему зовёт `restyle_plots()`.
 
 **Шаг 3: `index.html`** — добавить `<script type="text/javascript" src="plots.js"></script>` сразу перед `wizard.js`.
 
@@ -533,7 +533,7 @@ function motor_fundamental(tracking, values, range)
 - `state.spectrum = { log_type: null, window_per_batch: 1, amplitude: "dB", frequency: "Hz", log_frequency: false, aliasing: "none", filter_version: null }`; `state.gyro = null`, `state.tracking = null`, `state.logged = null`, `state.filters = null`, `state.env = null`.
 - После успешной загрузки лога: `state.env = { params, build_type, filter_version: info.filter_version ?? 4, decode_devid }`, `state.spectrum.filter_version = state.env.filter_version`.
 - `step_available(n)`: 1–3 требуют `checks` без `fail` у `gyro_log`; 4 — без `fail` у `pid_log`; 5 — лог загружен. (Обновить `tests/tunewizard-browser.cjs`: на реальном логе все доступны.)
-- `set_step(n)`: после показа секции вызывать `on_show_step(n)` — функция-диспетчер: `if (n === 1) step1_show()`; `if (n === 2) step2_show()` (определены в `steps/*.js`; проверка `typeof step1_show === "function"`), затем `restyle_plots()`.
+- `set_step(n)`: после показа секции вызывать `on_show_step(n)` — функция-диспетчер: `if (n === 1) step1_show()`; `if (n === 2) step2_show()` (определены в `steps/*.js`; проверка `typeof step1_show === "function"`), затем `show_plots(section)`.
 - Сброс (`reset`) обнуляет новые поля и зовёт `step1_reset()`/`step2_reset()`, если определены.
 
 **`steps/step1.js`:**

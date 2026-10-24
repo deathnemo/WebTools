@@ -29,11 +29,15 @@ globalThis.document = {
 }
 globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => tokens[name] ?? '' })
 
-// Стаб Plotly: запоминаем id перерисованных графиков
+// Стаб Plotly: запоминаем id перерисованных (react) и подогнанных по размеру (Plots.resize) графиков
 const react_ids = []
-globalThis.Plotly = { purge() {}, newPlot() {}, react(id) { react_ids.push(id) } }
+const resize_ids = []
+globalThis.Plotly = { purge() {}, newPlot() {}, react(id) { react_ids.push(id) }, Plots: { resize(div) { resize_ids.push(div.id) } } }
 function reacts(id) {
     return react_ids.filter((x) => x === id).length
+}
+function resizes(id) {
+    return resize_ids.filter((x) => x === id).length
 }
 
 const plots_js = path.join(__dirname, '..', 'TuneWizard', 'plots.js')
@@ -128,7 +132,7 @@ test('apply_plot_theme: шрифты легенды и colorbar дополняю
     assert.equal(layout.legend.font.size, 9)
 })
 
-test('скрытый график: restyle_plots и render_plot откладывают рисование (dirty), show_plots дорисовывает', () => {
+test('скрытый график: restyle_plots и render_plot откладывают рисование (dirty), show_plots дорисовывает и подгоняет размер', () => {
     tokens = LIGHT
     const p = register_plot('h', [{ x: [], y: [] }], { xaxis: {} })
     assert.equal(p.dirty, false)
@@ -153,11 +157,14 @@ test('скрытый график: restyle_plots и render_plot откладыв
     show_plots({ contains: (div) => div.id === 'h' })
     assert.equal(p.dirty, false)
     assert.equal(reacts('h'), 1, 'показ шага дорисовал график')
+    assert.equal(resizes('h'), 0, 'dirty-графику размер отдельно не подгоняется: его даёт react')
     assert.equal(p.layout.paper_bgcolor, LIGHT['--surface'], 'с актуальной темой')
 
-    // Повторный показ без изменений не перерисовывает
+    // Повторный показ чистого графика: не перерисовывает, а подгоняет размер — обработчик responsive
+    // у Plotly ужимает графики в скрытой секции до 100 px, и сам показ секции этого не чинит
     show_plots({ contains: (div) => div.id === 'h' })
     assert.equal(reacts('h'), 1)
+    assert.equal(resizes('h'), 1, 'чистому графику — Plots.resize')
 
     // Зарегистрированный в скрытом контейнере — дорисуется при показе
     hidden_ids.add('late')
@@ -167,6 +174,12 @@ test('скрытый график: restyle_plots и render_plot откладыв
     show_plots({ contains: (div) => div.id === 'late' })
     assert.equal(late.dirty, false)
     assert.equal(reacts('late'), 1)
+    assert.equal(resizes('h'), 1, 'график вне показанной секции не трогается')
+
+    // Секции нет — ничего не делаем
+    const calls = [react_ids.length, resize_ids.length]
+    show_plots(null)
+    assert.deepEqual([react_ids.length, resize_ids.length], calls)
 })
 
 test('render_plot: незарегистрированный график — ошибка', () => {
