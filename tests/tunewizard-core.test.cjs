@@ -36,6 +36,7 @@ load_page_scripts([
     'TuneWizard/core/tracking/FFT.js',
     'TuneWizard/core/tracking/Logged.js',
     'TuneWizard/core/filters.js',
+    'TuneWizard/core/spectrum.js',
 ])
 
 // Параметры без лога: values = { имя: значение }
@@ -504,4 +505,90 @@ test('load_filters: предупреждения трекинга попадаю
     tracking[2].warnings.push(expected)
     const filters = load_filters({ INS_HNTCH_ENABLE: 0, INS_HNTC2_ENABLE: 0 }, env, tracking)
     assert.deepEqual(filters.warnings, [expected])
+})
+
+test('spectrum_amplitude_scale / spectrum_frequency_scale: русские подписи, функции библиотеки', () => {
+    const db = spectrum_amplitude_scale('dB')
+    assert.equal(db.label, 'Амплитуда, дБ')
+    assert.ok(Math.abs(db.scale([10])[0] - 20) < 1e-9)
+    assert.equal(spectrum_amplitude_scale('PSD').label, 'PSD, дБ/Гц')
+    assert.equal(spectrum_amplitude_scale('linear').label, 'Амплитуда')
+    const rpm = spectrum_frequency_scale('RPM', true)
+    assert.equal(rpm.label, 'Обороты, RPM')
+    assert.equal(rpm.type, 'log')
+    assert.deepEqual(rpm.fun([1]), [60])
+    assert.equal(spectrum_frequency_scale('Hz', false).label, 'Частота, Гц')
+})
+
+test('mean_spectrum: синусоида 100 Гц → максимум около 100 Гц и ≈ 6 дБ', () => {
+    const log = synthetic_batch_log({ freq: 100, amp: 2 })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
+    const FFT = gyro[0].FFT
+    const scale = spectrum_amplitude_scale('dB')
+    const alias = alias_obj(FFT, { mode: 'none', loop_rate: 400 })
+    const mean = mean_spectrum(FFT, scale, [gyro.start_time, gyro.end_time + 10], alias)
+    const peak = mean.x.indexOf(Math.max(...mean.x))
+    assert.ok(Math.abs(mean.bins[peak] - 100) < 1.0)
+    assert.ok(Math.abs(mean.x[peak] - 20 * Math.log10(2)) < 1.0, 'пик ≈ 6 дБ, получили ' + mean.x[peak].toFixed(2))
+    assert.ok(mean.y.every((v) => v < -100), 'тишина по Y в дБ')
+    assert.equal(mean_spectrum(null, scale, [0, 1], alias), null)
+})
+
+test('alias_obj: режим fold сворачивает 300 Гц в 100 Гц при SCHED_LOOP_RATE 400', () => {
+    const log = synthetic_batch_log({ freq: 300, amp: 2 })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
+    const FFT = gyro[0].FFT
+    const linear = spectrum_amplitude_scale('linear')
+    const none = mean_spectrum(FFT, linear, [0, 1e9], alias_obj(FFT, { mode: 'none', loop_rate: 400 }))
+    const fold = mean_spectrum(FFT, linear, [0, 1e9], alias_obj(FFT, { mode: 'fold', loop_rate: 400 }))
+    const only = mean_spectrum(FFT, linear, [0, 1e9], alias_obj(FFT, { mode: 'only', loop_rate: 400 }))
+    // Ближайший бин: 300 Гц лежит между бинами 299.8 и 300.8 Гц, и на дальнем (0.8 бина) окно Ханна
+    // оставляет лишь 0.65 амплитуды; на ближнем (0.2 бина) — 0.97. Бины свёртки шагом 200/2048 Гц попадают в 100 Гц точно
+    const near = (bins, f) => bins.reduce((best, b, i) => (Math.abs(b - f) < Math.abs(bins[best] - f)) ? i : best, 0)
+    assert.ok(none.x[near(none.bins, 300)] > 1.5, 'без сворачивания пик на 300 Гц')
+    assert.ok(fold.bins[fold.bins.length - 1] <= 200 + 1e-9, 'после сворачивания ось до частоты Найквиста контура')
+    assert.ok(fold.x[near(fold.bins, 100)] > 1.0, 'пик свёрнут в 100 Гц')
+    assert.ok(only.x[near(only.bins, 100)] > 1.0, 'режим only тоже показывает свёрнутый пик')
+})
+
+test('spectrogram_matrix: по строке на окно, разрыв по времени даёт пустые строки', () => {
+    const log = synthetic_batch_log({ batches: 6 })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
+    const FFT = gyro[0].FFT
+    // Искусственный разрыв: сдвигаем время последних двух окон на 10 с
+    for (let j = FFT.time.length - 2; j < FFT.time.length; j++) FFT.time[j] += 10
+    const scale = spectrum_amplitude_scale('dB')
+    const alias = alias_obj(FFT, { mode: 'none', loop_rate: 400 })
+    const spec = spectrogram_matrix(gyro, find_instance(gyro, 0, false), 'x', false, scale, alias)
+    assert.equal(spec.x.length, FFT.time.length + 2, 'два маркера разрыва')
+    assert.equal(spec.z.length, spec.x.length)
+    assert.equal(spec.bins.length, FFT.bins.length)
+    const gap_rows = spec.z.filter((row) => row[0] === undefined).length
+    assert.equal(gap_rows, 2)
+    const peak = FFT.bins.findIndex((b) => b >= 100)
+    assert.ok(spec.z[0][peak] > 0, 'пик в первой строке положителен в дБ')
+    assert.equal(spectrogram_matrix(gyro, null, 'x', false, scale, alias), null)
+    assert.equal(spectrogram_matrix(gyro, 0, 'x', true, scale, alias), null, 'оценка без H невозможна')
+})
+
+test('tracking_lines: статический notch с гармониками 1 и 3 → линии 80 и 240 Гц', () => {
+    const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.3, 0.3] } } })
+    const gyro = { start_time: 0, end_time: 1 }
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    const logged = create_logged(log)
+    const values = { INS_GYRO_FILTER: 0, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 0, INS_HNTCH_FREQ: 80, INS_HNTCH_BW: 40, INS_HNTCH_ATT: 30, INS_HNTCH_REF: 0, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 5, INS_HNTCH_OPTS: 0, INS_HNTCH_ESCMSK: 0, INS_HNTC2_ENABLE: 0 }
+    const filters = load_filters(values, env, tracking)
+    const lines = tracking_lines(filters, logged, [0, 1])
+    assert.equal(lines.length, 2)
+    assert.equal(lines[0].enabled, true)
+    assert.deepEqual(lines[0].harmonics.map((h) => h.harmonic), [1, 3])
+    assert.deepEqual(lines[0].harmonics[0].freq, [80, 80])
+    assert.deepEqual(lines[0].harmonics[1].freq, [240, 240])
+    assert.deepEqual(lines[0].harmonics[0].time, [0, 1])
+    assert.deepEqual(lines[0].logged, [])
+    assert.equal(lines[1].enabled, false)
 })
