@@ -1,6 +1,7 @@
 // Трекинг по бортовому FFT.
 // Перенос из FilterReview/tracking/FFT.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s.
+// Исправлен дефект upstream 6 (задача 8): отсутствующие экземпляры FTN2 пропускаются, как в ESCTarget.
 class FFTTarget extends NotchTarget {
     constructor(log, env) {
         super(log, env, "FTN1", "PkAvg", "FFT", 4)
@@ -48,6 +49,11 @@ class FFTTarget extends NotchTarget {
         }
         this.data.interpolated[instance] = []
         for (var j=0; j < this.data.length; j++) {
+            // исправление дефекта upstream 6 (tracking/FFT.js interpolate): экземпляры FTN2 могут идти с пропусками
+            // (например, только 1), и upstream падал на отсутствующем
+            if (this.data[j] == null) {
+                continue
+            }
             this.data.interpolated[instance][j] = linear_interp(this.data[j].freq, this.data[j].time, time)
         }
         this.data.interpolated[instance].value = linear_interp(this.data.value, this.data.time, time)
@@ -60,10 +66,14 @@ class FFTTarget extends NotchTarget {
 
         const dynamic = (config.options & (1<<1)) != 0
         if (dynamic) {
+            // исправление дефекта upstream 6: только присутствующие экземпляры, как в ESCTarget
             const len = this.data.length
-            let ret = new Array(len)
+            let ret = []
             for (var j=0; j < len; j++) {
-                ret[j] = this.get_target(config, this.data.interpolated[instance][j][index])
+                if (this.data.interpolated[instance][j] == null) {
+                    continue
+                }
+                ret.push(this.get_target(config, this.data.interpolated[instance][j][index]))
             }
             return ret
         }
@@ -89,19 +99,23 @@ class FFTTarget extends NotchTarget {
         const dynamic = (config.options & (1<<1)) != 0
         if (dynamic) {
             // Несколько пиков
+            // исправление дефекта upstream 6: только присутствующие экземпляры, как в ESCTarget
             const len = this.data.length
-            let freq = new Array(len)
-            let time = new Array(len)
+            let freq = []
+            let time = []
 
             for (let i = 0; i < len; i++) {
+                if (this.data[i] == null) {
+                    continue
+                }
                 const inst_len = this.data[i].freq.length
                 let inst_freq = new Array(inst_len)
                 for (let j = 0; j < inst_len; j++) {
                     inst_freq[j] = this.get_target(config, this.data[i].freq[j])
                 }
 
-                time[i] = this.data[i].time
-                freq[i] = inst_freq
+                time.push(this.data[i].time)
+                freq.push(inst_freq)
             }
             return { freq:freq, time:time }
         }

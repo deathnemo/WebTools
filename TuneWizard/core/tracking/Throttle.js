@@ -3,6 +3,7 @@
 // env.build_type; get_param_value(PARM, name) → this.env.params.get(name) (строка const PARM = log.get("PARM")
 // поэтому не нужна); get_filter_version() → this.env.filter_version; alert → this.warnings.push;
 // no_data_error возвращает текст; TimeUS_to_seconds → us_to_s.
+// Исправлен дефект upstream 4 (задача 8): без RATE и CTUN источник остаётся режимом 1 без данных.
 class ThrottleTarget extends NotchTarget {
     constructor(log, env) {
         const build_type = env.build_type
@@ -15,10 +16,10 @@ class ThrottleTarget extends NotchTarget {
             super(log, env, "CTUN", "ThO", "Throttle", 1)
         } else {
             // Конструктор базового класса вызывается всегда.
-            // upstream: mode_value = null, и источник с режимом 1 в списке трекинга не находится —
-            // HarmonicNotchFilter сообщает «неподдерживаемый режим» вместо «нет данных»
-            // (FilterReview/tracking/Throttle.js:14; исправление — задача 8)
-            super(null, env, null, null, "Throttle", null)
+            // исправление дефекта upstream 4 (tracking/Throttle.js:14): режим остаётся 1. В upstream mode_value = null,
+            // источник с режимом 1 в списке трекинга не находился, и HarmonicNotchFilter сообщал «неподдерживаемый
+            // режим» вместо «нет данных газа»
+            super(null, env, null, null, "Throttle", 1)
         }
 
         // Для notch по отдельным моторам нужны выходы RC
@@ -321,6 +322,10 @@ class ThrottleTarget extends NotchTarget {
             if (this.env.filter_version < 2) {
                 return "Notch по газу отдельных моторов доступен только с версии фильтра 2"
             }
+        }
+        if (!("value" in this.data)) {
+            // Источник без среднего газа (исправление дефекта upstream 4)
+            return "Нет данных газа для notch по газу: в логе нет RATE.AOut (и CTUN.ThO на Copter)"
         }
         return super.no_data_error()
     }

@@ -14,8 +14,9 @@
 //                                                     а смена INS_LOG_BAT_OPT / INS_RAW_LOG_OPT даёт предупреждение
 //   decode_devid(ID, DEVICE_TYPE_IMU)               → без замены: оба — глобалы страницы из Libraries/DecodeDevID.js,
 //                                                     вызов под охраной typeof decode_devid
-// Известные дефекты upstream сохранены и помечены комментариями «upstream» с двоеточием — их исправляет задача 8
-// (docs/plans/2026-10-24-tune-wizard-stage2.md), после регрессионной сверки с FilterReview.
+// Дефекты upstream 1, 2, 3, 5 исправлены в задаче 8 (docs/plans/2026-10-24-tune-wizard-stage2.md) после регрессионной
+// сверки с FilterReview; места помечены комментариями «исправление дефекта upstream N (FR …)». Ожидаемые расхождения
+// с FilterReview — в docs/plans/2026-10-24-tune-wizard-stage2-design.md, раздел 2.
 //
 // Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/Array_Math.js, Libraries/fft.js,
 // decode_devid и DEVICE_TYPE_IMU (Libraries/DecodeDevID.js) и US2S (core/log.js).
@@ -54,23 +55,9 @@ function run_batch_fft(data_set, opts) {
     const num_batch = data_set.length
     const num_points = data_set[0].x.length
 
-    var sample_rate_sum = 0
-    var sample_rate_count = 0
-    for (let i=0;i<num_batch;i++) {
-        // upstream: window_size объявлен ниже через var и здесь ещё undefined — сравнение всегда ложно,
-        // пакеты короче окна не пропускаются (FilterReview.js:284; исправление — задача 8)
-        if (data_set[i].x.length < window_size) {
-            // Участок лога слишком короткий, пропускаем
-            continue
-        }
-        sample_rate_count++
-        // upstream: суммируется data_set[0].sample_rate, а не data_set[i] (FilterReview.js:289; задача 8)
-        sample_rate_sum += data_set[0].sample_rate
-    }
-
-    // Средний период дискретизации
-    const sample_time = sample_rate_count / sample_rate_sum
-
+    // исправление дефекта upstream 1 (FR 284, 296–315): размер окна определяется до усреднения частоты.
+    // В upstream window_size объявлен ниже через var, при усреднении он ещё undefined, и пакеты короче окна
+    // в среднюю частоту попадали
 
     // Перекрытие окон жёстко 50 %
     const window_overlap = 0.5
@@ -91,6 +78,29 @@ function run_batch_fft(data_set, opts) {
     if (!Number.isInteger(Math.log2(window_size))) {
         throw new Error("Размер окна FFT должен быть степенью двойки")
     }
+
+    var sample_rate_sum = 0
+    var sample_rate_count = 0
+    for (let i=0;i<num_batch;i++) {
+        if (data_set[i].x.length < window_size) {
+            // Участок лога слишком короткий, пропускаем
+            continue
+        }
+        sample_rate_count++
+        // исправление дефекта upstream 1 (FR 289): частота каждого пакета, а не первого (data_set[0])
+        sample_rate_sum += data_set[i].sample_rate
+    }
+    if (sample_rate_count == 0) {
+        // Все пакеты короче окна: окон не будет, но бины и сетка бодэ должны остаться числами, поэтому средняя —
+        // по всем пакетам (в upstream такого случая не было: при усреднении пакеты не пропускались)
+        for (let i=0;i<num_batch;i++) {
+            sample_rate_count++
+            sample_rate_sum += data_set[i].sample_rate
+        }
+    }
+
+    // Средний период дискретизации
+    const sample_time = sample_rate_count / sample_rate_sum
 
     const window_spacing = Math.round(window_size * (1 - window_overlap))
     const windowing_function = hanning(window_size)
@@ -257,6 +267,9 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
     const ISBH = log.get("ISBH")
     const ISBD = log.get("ISBD")
 
+    // Пропущенные повреждённые пакеты (исправление дефекта upstream 3)
+    let skipped_batches = 0
+
     for (let i = 0; i < ISBH.N.length; i++) {
         // Разбор заголовков
         if (ISBH.type[i] != IMU_SENSOR_TYPE_GYRO) {
@@ -292,13 +305,16 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
         let z = []
         const num_samples = ISBH.smp_cnt[i]
         const num_data_msg = num_samples / 32
+        let bad_batch = false
         for (let j = 0; j < num_data_msg; j++) {
             // Читаем ожидаемое число отсчётов
             if ((ISBD.N[data_index] != seq_num) || (ISBD.seqno[data_index] != j)) {
                 console.log("Missing or extra data msg")
-                // upstream: ранний return оставляет gyro недостроенным — без pre/post, частот и времени
-                // (FilterReview.js:2109; задача 8)
-                return
+                // исправление дефекта upstream 3 (FR 2109): ранний return оставлял gyro недостроенным — без pre/post,
+                // частот и времени. Пакет пропускается; несовпавшее сообщение не съедено, и поиск следующего пакета
+                // начнётся с него
+                bad_batch = true
+                break
             }
 
             // Копим данные этого пакета
@@ -308,21 +324,28 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
 
             data_index++
             if (data_index >= ISBD.N.length) {
-                // upstream: срабатывает и когда последний пакет лога дочитан целиком (j+1 == num_data_msg) —
-                // такой пакет теряется (FilterReview.js:2118–2122; задача 8)
-                console.log("Sequence incomplete " + i + " of " + (ISBH.N.length-1) + ", Got " + (j+1) + " batches out of " + num_data_msg)
-                decode_complete = true
+                // исправление дефекта upstream 5 (FR 2118–2122): пакет, дочитанный целиком на последнем сообщении
+                // лога (j+1 == num_data_msg), полный и сохраняется; неполным считается только оборванный
+                if (j + 1 < num_data_msg) {
+                    console.log("Sequence incomplete " + i + " of " + (ISBH.N.length-1) + ", Got " + (j+1) + " batches out of " + num_data_msg)
+                    decode_complete = true
+                }
                 break
             }
         }
         if (decode_complete) {
             break
         }
+        if (bad_batch) {
+            skipped_batches++
+            continue
+        }
 
         if ((x.length != num_samples) || (y.length != num_samples) || (z.length != num_samples)) {
             console.log("sample length wrong")
-            // upstream: ранний return оставляет gyro недостроенным (FilterReview.js:2130; задача 8)
-            return
+            // исправление дефекта upstream 3 (FR 2130): вместо раннего return пакет пропускается
+            skipped_batches++
+            continue
         }
 
         // Снимаем масштаб логирования
@@ -337,6 +360,9 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
                               x: x,
                               y: y,
                               z: z })
+    }
+    if (skipped_batches > 0) {
+        warnings.push("Batch-лог: пропущено повреждённых пакетов (недостающие или лишние сообщения ISBD, неверное число отсчётов) — " + skipped_batches)
     }
 
     // Убираем экземпляры без данных
@@ -490,13 +516,13 @@ function load_from_raw_log(log, gyro, num_gyro, gyro_rate, params, warnings) {
                     sample_rate_sum += sample_rate
                     sample_rate_count++
 
-                    // upstream: slice(batch_start, j-i) — i здесь номер экземпляра гироскопа, а не смещение
-                    // (FilterReview.js:2295–2297; задача 8)
+                    // исправление дефекта upstream 2 (FR 2295–2297): срез до j для всех экземпляров. В upstream
+                    // slice(batch_start, j-i), где i — номер экземпляра гироскопа; для экземпляра 0 это то же, что здесь
                     gyro[i].push({ sample_time: time[batch_start] * US2S,
                                    sample_rate: sample_rate,
-                                   x: GyrX.slice(batch_start, j-i),
-                                   y: GyrY.slice(batch_start, j-i),
-                                   z: GyrZ.slice(batch_start, j-i) })
+                                   x: GyrX.slice(batch_start, j),
+                                   y: GyrY.slice(batch_start, j),
+                                   z: GyrZ.slice(batch_start, j) })
                 }
 
                 // Следующий пакет начинается отсюда

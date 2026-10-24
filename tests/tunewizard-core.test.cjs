@@ -84,8 +84,7 @@ function fake_log({ messages = {}, params = [] } = {}) {
 
 // Сообщения batch-логирования: экземпляр 0 типа type (1 — гироскоп, 0 — акселерометр), N пакетов по samples
 // отсчётов на rate Гц, синусоида freq Гц амплитудой amp рад/с по X, тишина по Y, Z; масштаб mul = 1000.
-// Лог кончается ровно на границе пакета, и upstream-загрузчик теряет последний пакет
-// (см. пометку upstream у "Sequence incomplete" в core/gyro.js): загружается N−1 пакетов, пока это не исправит задача 8.
+// Лог кончается ровно на границе пакета: последний пакет полный и загружается (upstream его терял — дефект 5).
 // Необязательно: tones = [[частота, амплитуда], ...] — сумма синусоид вместо одной; y_ratio — доля той же суммы по Y;
 // noise — СКО детерминированного белого шума по всем трём осям. Без них фикстура прежняя
 function batch_messages({ batches = 4, samples = 1024, rate = 1000, freq = 100, amp = 2, type = 1, tones = [[freq, amp]], y_ratio = 0, noise = 0 } = {}) {
@@ -117,10 +116,10 @@ function batch_messages({ batches = 4, samples = 1024, rate = 1000, freq = 100, 
     return { ISBH, ISBD }
 }
 
-// Сообщения raw-логирования: GYR экземпляра 0 — samples отсчётов на rate Гц с начала start_s секунд и разрывом
-// gap_s секунд посередине (загрузчик режет ряд на два пакета), синусоида freq Гц амплитудой amp по X,
-// тишина по Y, Z; IMU.GHz — заявленная частота rate
-function raw_messages({ samples = 3000, rate = 1000, freq = 100, amp = 2, start_s = 20, gap_s = 1 } = {}) {
+// Сообщения raw-логирования: GYR экземпляров 0..instances−1 (одинаковые ряды) — samples отсчётов на rate Гц
+// с начала start_s секунд и разрывом gap_s секунд посередине (загрузчик режет ряд на два пакета),
+// синусоида freq Гц амплитудой amp по X, тишина по Y, Z; IMU.GHz — заявленная частота rate
+function raw_messages({ samples = 3000, rate = 1000, freq = 100, amp = 2, start_s = 20, gap_s = 1, instances = 1 } = {}) {
     const SampleUS = [], GyrX = [], GyrY = [], GyrZ = []
     const half = Math.floor(samples / 2)
     for (let n = 0; n < samples; n++) {
@@ -129,16 +128,22 @@ function raw_messages({ samples = 3000, rate = 1000, freq = 100, amp = 2, start_
         GyrY.push(0)
         GyrZ.push(0)
     }
-    return {
-        GYR: { instances: { 0: { TimeUS: SampleUS, SampleUS, GyrX, GyrY, GyrZ } } },
-        IMU: { instances: { 0: { GHz: [rate, rate, rate] } } }
+    const GYR = { instances: {} }
+    const IMU = { instances: {} }
+    for (let i = 0; i < instances; i++) {
+        GYR.instances[i] = { TimeUS: SampleUS, SampleUS, GyrX, GyrY, GyrZ }
+        IMU.instances[i] = { GHz: [rate, rate, rate] }
     }
+    return { GYR, IMU }
 }
 
-// Параметры: один гироскоп, EKF3 с первичным primary, опции логирования; extra = [[имя, значение, TimeUS], ...]
-// дописываются в конец — так имитируется смена параметра в полёте
-function gyro_params({ bat_opt = 0, raw_opt = null, primary = 0, extra = [] } = {}) {
+// Параметры: gyros гироскопов (INS_GYR_ID, INS_GYR2_ID, …), EKF3 с первичным primary, опции логирования;
+// extra = [[имя, значение, TimeUS], ...] дописываются в конец — так имитируется смена параметра в полёте
+function gyro_params({ bat_opt = 0, raw_opt = null, primary = 0, extra = [], gyros = 1 } = {}) {
     const params = [['INS_GYR_ID', 1, 0], ['INS_LOG_BAT_OPT', bat_opt, 0], ['AHRS_EKF_TYPE', 3, 0], ['EK3_PRIMARY', primary, 0]]
+    for (let i = 2; i <= gyros; i++) {
+        params.push(['INS_GYR' + i + '_ID', 1, 0])
+    }
     if (raw_opt != null) {
         params.push(['INS_RAW_LOG_OPT', raw_opt, 0])
     }
@@ -150,9 +155,9 @@ function synthetic_batch_log({ post = false, primary = 0, extra = [], ...message
     return fake_log({ messages: batch_messages(messages), params: gyro_params({ bat_opt: post ? 2 : 0, primary, extra }) })
 }
 
-// Синтетический raw-лог: INS_RAW_LOG_OPT = raw_opt (0 — только до фильтров)
-function synthetic_raw_log({ raw_opt = 0, extra = [], ...messages } = {}) {
-    return fake_log({ messages: raw_messages(messages), params: gyro_params({ raw_opt, extra }) })
+// Синтетический raw-лог: INS_RAW_LOG_OPT = raw_opt (0 — только до фильтров), gyros одинаковых экземпляров GYR
+function synthetic_raw_log({ raw_opt = 0, extra = [], gyros = 1, ...messages } = {}) {
+    return fake_log({ messages: raw_messages({ ...messages, instances: gyros }), params: gyro_params({ raw_opt, extra, gyros }) })
 }
 
 const env0 = { params: null, build_type: 2, filter_version: 2 }
@@ -167,7 +172,7 @@ test('load_gyro: batch-лог даёт один экземпляр pre-filter с
     assert.equal(gyro.length, 1)
     assert.equal(gyro[0].sensor_num, 0)
     assert.equal(gyro[0].post_filter, false)
-    assert.equal(gyro[0].length, 3, 'из 4 пакетов upstream теряет последний (задача 8 вернёт 4)')
+    assert.equal(gyro[0].length, 4, 'все 4 пакета, включая последний у конца лога (дефект 5 исправлен)')
     assert.equal(gyro[0][0].x.length, 1024)
     // Период 100 Гц при 1000 Гц — 10 отсчётов, на целый отсчёт максимум не попадает;
     // проверяем снятие масштаба 1/mul на втором отсчёте: round(1000·2·sin(0.4π))/1000
@@ -208,7 +213,7 @@ test('load_gyro: post-only batch (INS_LOG_BAT_OPT = 2) — только post, б
     assert.equal(gyro.primary, 0)
     gyro_fft(gyro, { window_size: 1024, window_per_batch: 1 })
     const FFT = gyro[0].FFT
-    assert.equal(FFT.x.length, 3)
+    assert.equal(FFT.x.length, 4)
     // Z1/Z2 считаются только для pre-filter (к post фильтр не применяют); бодэ строится при
     // !post_filter || !have_post — для единственного post-экземпляра оба ложны, бодэ нет (FR 865)
     assert.ok(FFT.Z1 == null && FFT.Z2 == null, 'без Z для post-filter')
@@ -281,7 +286,7 @@ test('gyro_fft: пик синусоиды в нужном бине с верно
     const FFT = gyro[0].FFT
     assert.equal(FFT.window_size, 1024)
     assert.ok(Math.abs(FFT.average_sample_rate - 1000) < 1e-6)
-    assert.equal(FFT.x.length, 3, 'по одному окну на каждый из 3 загруженных пакетов (задача 8 вернёт 4)')
+    assert.equal(FFT.x.length, 4, 'по одному окну на каждый из 4 пакетов')
     const peak_index = FFT.x[0].indexOf(Math.max(...FFT.x[0]))
     assert.ok(Math.abs(FFT.bins[peak_index] - 100) < 1.0, 'пик около 100 Гц, получили ' + FFT.bins[peak_index])
     // Амплитуда с поправкой окна Ханна (linear) ≈ 2; утечка на нецелом бине допускает запас
@@ -317,6 +322,181 @@ test('fft_info: частота дискретизации и разрешени�
     assert.ok(Math.abs(info[0].sample_rate - 1000) < 1e-6)
     assert.ok(Math.abs(info[0].resolution - 1000 / 1024) < 1e-6)
     assert.equal(info[0].window_size, 1024)
+})
+
+// ---------- Исправления дефектов, унаследованных из FilterReview (задача 8) ----------
+
+// Пакет для run_batch_fft: n отсчётов синусоиды 100 Гц по X на частоте rate, начало start секунд
+function fft_batch(n, rate, start) {
+    const x = Array.from({ length: n }, (_, k) => Math.sin(2 * Math.PI * 100 * k / rate))
+    return { sample_time: start, sample_rate: rate, x, y: new Array(n).fill(0), z: new Array(n).fill(0) }
+}
+
+test('дефект 1: пакет короче окна пропускается и не входит в среднюю частоту (FR 284)', () => {
+    // Короткий пакет с «чужой» частотой 4000 Гц: upstream не пропускал его при усреднении (window_size ещё
+    // undefined) и брал частоту первого пакета; верно — среднее только по двум длинным пакетам, (1000 + 1300) / 2
+    const data_set = [fft_batch(1024, 1000, 0), fft_batch(512, 4000, 2), fft_batch(1024, 1300, 4)]
+    const FFT = run_batch_fft(data_set, { type: 'raw', window_size: 1024, window_per_batch: 1 })
+    assert.equal(FFT.x.length, 2, 'окна только у двух длинных пакетов')
+    assert.equal(FFT.time.length, 2)
+    assert.ok(Math.abs(FFT.average_sample_rate - 1150) < 1e-9, 'средняя частота ' + FFT.average_sample_rate)
+})
+
+test('дефект 1: средняя частота — по всем пакетам, а не по первому (FR 289)', () => {
+    const data_set = [fft_batch(1024, 1000, 0), fft_batch(1024, 1020, 2)]
+    const FFT = run_batch_fft(data_set, { type: 'batch', window_size: 1024, window_per_batch: 1 })
+    assert.equal(FFT.window_size, 1024)
+    assert.ok(Math.abs(FFT.average_sample_rate - 1010) < 1e-9, 'средняя частота ' + FFT.average_sample_rate)
+    assert.ok(Math.abs(FFT.bins[1] - 1010 / 1024) < 1e-12, 'бины по средней частоте')
+})
+
+test('дефект 1: все пакеты короче окна — окон нет, частота по всем пакетам, предупреждение, без исключения', () => {
+    // После исправления пакеты короче окна в среднее не входят; если короче все, средняя берётся по всем пакетам,
+    // чтобы бины и сетка бодэ остались числами (иначе 0/0 и RangeError в array_from_range)
+    const log = synthetic_raw_log()
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    const result = gyro_fft(gyro, { window_size: 4096, window_per_batch: 1 })
+    const FFT = gyro[0].FFT
+    assert.equal(FFT.x.length, 0)
+    assert.ok(Number.isFinite(FFT.average_sample_rate) && Math.abs(FFT.average_sample_rate - 1000) < 1, 'частота ' + FFT.average_sample_rate)
+    assert.ok(result.warnings.some((w) => /Недостаточно/.test(w)), result.warnings.join('; '))
+})
+
+test('дефект 2: raw-лог с двумя экземплярами GYR — пакеты экземпляра 1 той же длины, что у экземпляра 0 (FR 2295–2297)', () => {
+    const log = synthetic_raw_log({ gyros: 2 })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro.error, null)
+    assert.equal(gyro.num_gyro, 2)
+    assert.deepEqual(gyro[0].map((b) => b.x.length), [1500, 1499])
+    assert.deepEqual(gyro[1].map((b) => b.x.length), [1500, 1499], 'срез до j, а не до j − номер экземпляра')
+    assert.equal(gyro[1].sensor_num, 1)
+    assert.equal(gyro.end_time, gyro[0][1].sample_time + 1499 / gyro[0][1].sample_rate)
+})
+
+// Убрать из batch-лога сообщение ISBD пакета batch с номером seqno
+function drop_isbd(log_messages, batch, seqno) {
+    const { ISBD } = log_messages
+    const k = ISBD.N.findIndex((n, i) => (n == batch) && (ISBD.seqno[i] == seqno))
+    for (const field of Object.keys(ISBD)) {
+        ISBD[field].splice(k, 1)
+    }
+    return log_messages
+}
+
+test('дефект 3: нет сообщения ISBD в последнем пакете — прежние пакеты сохранены, предупреждение (FR 2109)', () => {
+    const log = fake_log({ messages: drop_isbd(batch_messages(), 3, 10), params: gyro_params() })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro.error, null, 'загрузка не обрывается')
+    assert.equal(gyro[0].length, 3, 'пакеты 0–2 сохранены, повреждённый 3 пропущен')
+    assert.equal(gyro.have_pre, true)
+    assert.ok(gyro.warnings.some((w) => /ISBD/.test(w) && /1/.test(w)), gyro.warnings.join('; '))
+})
+
+test('дефект 3: нет сообщения ISBD посреди лога — пропускается только этот пакет, следующие читаются', () => {
+    const log = fake_log({ messages: drop_isbd(batch_messages(), 1, 5), params: gyro_params() })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro.error, null)
+    assert.deepEqual(gyro[0].map((b) => b.sample_time), [10, 10 + 2 * 1.024, 10 + 3 * 1.024], 'пакеты 0, 2, 3')
+    assert.equal(gyro.warnings.length, 1, gyro.warnings.join('; '))
+})
+
+test('дефект 3: число отсчётов пакета не совпадает с заголовком — пакет пропущен, предупреждение (FR 2130)', () => {
+    const messages = batch_messages()
+    // 1000 не делится на 32: читаются 32 сообщения, 1024 отсчёта вместо 1000
+    messages.ISBH.smp_cnt[1] = 1000
+    const log = fake_log({ messages, params: gyro_params() })
+    const gyro = load_gyro(log, env_for(log), { log_type: null })
+    assert.equal(gyro.error, null)
+    assert.equal(gyro[0].length, 3, 'пакеты 0, 2, 3')
+    assert.ok(gyro.warnings.some((w) => /ISBD/.test(w)), gyro.warnings.join('; '))
+})
+
+test('дефект 5: последний пакет, кончающийся на последнем сообщении ISBD, загружается; неполный — нет (FR 2118–2122)', () => {
+    const full = synthetic_batch_log()
+    const gyro = load_gyro(full, env_for(full), { log_type: null })
+    assert.equal(gyro[0].length, 4)
+    assert.equal(gyro.end_time, 10 + 3 * 1.024, 'конец — начало последнего пакета')
+    assert.deepEqual(gyro.warnings, [])
+    // Лог оборвался посреди последнего пакета (нет сообщений 20–31): такой пакет отбрасывается без предупреждения,
+    // как и в upstream — для конца лога это ожидаемо
+    const messages = batch_messages()
+    for (let seqno = 31; seqno >= 20; seqno--) {
+        drop_isbd(messages, 3, seqno)
+    }
+    const cut = fake_log({ messages, params: gyro_params() })
+    const gyro_cut = load_gyro(cut, env_for(cut), { log_type: null })
+    assert.equal(gyro_cut[0].length, 3)
+    assert.deepEqual(gyro_cut.warnings, [])
+})
+
+// Квадрокоптер с выходами моторов, барометром и параметрами моторов, без RATE и CTUN: газ по моторам считается
+// (MOT_BAT_VOLT_MAX = 0 — без компенсации батареи), а средний газ (RATE.AOut, CTUN.ThO) недоступен
+function motors_without_rate_log() {
+    const params = [['FRAME_CLASS', 1, 0], ['MOT_THST_EXPO', 0.65, 0], ['MOT_SPIN_MAX', 0.95, 0], ['MOT_SPIN_MIN', 0.15, 0], ['MOT_PWM_MIN', 1000, 0],
+                    ['MOT_PWM_MAX', 2000, 0], ['MOT_BAT_VOLT_MIN', 0, 0], ['MOT_BAT_VOLT_MAX', 0, 0], ['MOT_BAT_IDX', 0, 0], ['BARO_PRIMARY', 0, 0]]
+    const RCOU = { TimeUS: [0, 1e6] }
+    for (let i = 1; i <= 4; i++) {
+        params.push(['SERVO' + i + '_FUNCTION', 32 + i, 0])
+        RCOU['C' + i] = [1500, 1500]
+    }
+    return fake_log({ messages: { RCOU, BARO: { instances: { 0: { TimeUS: [0, 1e6], Alt: [0, 0] } } } }, params })
+}
+
+test('дефект 4: без RATE и CTUN источник газа остаётся режимом 1 — «нет данных газа», а не «неподдерживаемый режим»', () => {
+    const log = fake_log({ messages: { ATT: { TimeUS: [0, 1e6] } } })
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, { start_time: 0, end_time: 1 })
+    assert.equal(tracking[1].mode_value, 1)
+    assert.equal(tracking[1].have_data({ options: 0 }), false)
+    const filters = load_filters({ INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 80, INS_HNTCH_BW: 40, INS_HNTCH_ATT: 40, INS_HNTCH_REF: 0.3, INS_HNTCH_HMNCS: 1, INS_HNTC2_ENABLE: 0 }, env, tracking)
+    assert.equal(filters.notch[0].enabled(), false)
+    assert.ok(filters.warnings.some((w) => /газ/.test(w)), filters.warnings.join('; '))
+    assert.ok(!filters.warnings.some((w) => /Неподдерживаемый/.test(w)), filters.warnings.join('; '))
+})
+
+test('дефект 4: газ по моторам без RATE и CTUN — notch по моторам выключен с «нет данных газа», а не включён без частот', () => {
+    // Теперь источник с режимом 1 находится и без среднего газа. Ряды моторов (OPTS бит 2) при этом посчитаны, но
+    // have_data upstream требует и средний газ (value) — notch выключен с понятным предупреждением, и состояния
+    // «включён, но интерполяция пропущена и частот нет» не возникает
+    const log = motors_without_rate_log()
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, { start_time: 0, end_time: 1 })
+    assert.equal(tracking[1].data.length, 4, 'газ четырёх моторов посчитан')
+    const config = { enable: 1, mode: 1, freq: 80, bandwidth: 40, attenuation: 40, ref: 0.3, min_ratio: 1, harmonics: 1, options: 2, esc_mask: 0 }
+    const f = new HarmonicNotchFilter(config, env, tracking)
+    assert.equal(f.enabled(), false)
+    assert.deepEqual(f.warnings, ['Нет данных газа для notch по газу: в логе нет RATE.AOut (и CTUN.ThO на Copter)'])
+    tracking[1].interpolate(0, [0.5])
+    assert.equal(tracking[1].get_interpolated_target_freq(0, 0, config), null, 'без среднего газа интерполяции нет')
+})
+
+test('дефект 6: FFTTarget с экземплярами FTN2 только {1: …} — интерполяция и цели без исключения', () => {
+    const log = fake_log({ messages: {
+        FTN1: { TimeUS: [0, 1e6], PkAvg: [90, 110] },
+        FTN2: { instances: { 1: { TimeUS: [0, 1e6], EnX: [1, 1], EnY: [3, 3], PkX: [80, 80], PkY: [120, 120] } } }
+    } })
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const fft = new FFTTarget(log, env)
+    const config = { ref: 1, freq: 50, options: 2 }
+    fft.interpolate(0, [0.5])
+    // Экземпляр 1: взвешенно по энергии (80·1 + 120·3) / 4 = 110 Гц
+    assert.deepEqual(fft.get_interpolated_target_freq(0, 0, config), [110])
+    assert.deepEqual(fft.get_interpolated_target_freq(0, 0, { ...config, options: 0 }), [100], 'центральный пик FTN1')
+    const target = fft.get_target_freq(config)
+    assert.deepEqual(target.freq, [[110, 110]])
+    assert.deepEqual(target.time, [[0, 1]])
+})
+
+test('дефект 7: выключенный notch не даёт предупреждений; включённый с неподдерживаемым режимом — даёт (FR 174–186)', () => {
+    const log = fake_log({ messages: { ATT: { TimeUS: [0, 1e6] } } })
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, { start_time: 0, end_time: 1 })
+    // Сценарий из плана: INS_HNTC2 выключен, режим 1 (газ), в логе нет ни RATE, ни CTUN
+    assert.deepEqual(load_filters({ INS_HNTCH_ENABLE: 0, INS_HNTC2_ENABLE: 0, INS_HNTC2_MODE: 1 }, env, tracking).warnings, [])
+    // Выключенный notch с режимом, которого нет в списке источников
+    assert.deepEqual(load_filters({ INS_HNTCH_ENABLE: 0, INS_HNTCH_MODE: 9, INS_HNTC2_ENABLE: 0 }, env, tracking).warnings, [])
+    const enabled = load_filters({ INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 9, INS_HNTC2_ENABLE: 0 }, env, tracking)
+    assert.ok(enabled.warnings.some((w) => /Неподдерживаемый режим notch 9/.test(w)), enabled.warnings.join('; '))
 })
 
 // Передаточная функция одного notch на сетке частот: |H| в центре ≈ -ATT дБ, вдали ≈ 0 дБ

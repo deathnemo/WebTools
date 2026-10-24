@@ -282,8 +282,8 @@ test('motor_fundamental: ESC есть, но обороты нулевые — б
 // fixed = [[Гц, амплитуда], ...] по X, вполовину по Y, плюс детерминированный белый шум СКО noise по трём осям
 // (без шума ошибка квантования mul = 1000 даёт ложные линии — см. autofit_setup в tunewizard-core.test.cjs).
 // ESC — четыре мотора, отсчёты каждые 0.05 с с частотой окна, в которое попадает отсчёт: в центре окна
-// интерполяция даёт ровно частоту окна. Загрузчик upstream теряет последний пакет (дефект 5), поэтому в лог
-// пишется ещё один пакет с последней частотой — окон FFT ровно esc_hz.length
+// интерполяция даёт ровно частоту окна. Последний пакет у конца лога загружается (дефект upstream 5 исправлен
+// в задаче 8) — окон FFT ровно esc_hz.length
 function esc_batch_log({ esc_hz, motor = [[1, 2], [2, 1]], fixed = [[155, 1.5]], noise = 0.3, rate = 1000, samples = 1024 }) {
     const ISBH = { N: [], type: [], instance: [], smp_cnt: [], mul: [], SampleUS: [], smp_rate: [] }
     const ISBD = { N: [], seqno: [], x: [], y: [], z: [] }
@@ -295,7 +295,7 @@ function esc_batch_log({ esc_hz, motor = [[1, 2], [2, 1]], fixed = [[155, 1.5]],
         return noise * Math.sqrt(3) * (2 * seed / 2 ** 32 - 1)
     }
     const batch_s = samples / rate
-    const per_batch = [...esc_hz, esc_hz[esc_hz.length - 1]]
+    const per_batch = esc_hz
     for (let b = 0; b < per_batch.length; b++) {
         const f = per_batch[b]
         ISBH.N.push(b); ISBH.type.push(1); ISBH.instance.push(0); ISBH.smp_cnt.push(samples)
@@ -544,9 +544,10 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     assert.ok(Math.abs(e.band_dB - 10 * Math.log10(sum / count)) < 1e-9)
     assert.ok(Math.abs(e.band_f2_dB - 10 * Math.log10(sum_f2 / count)) < 1e-9)
     assert.ok(e.lag_ms[10] > 0 && e.lag_ms[30] > 0, 'задержка на 10 и 30 Гц: ' + JSON.stringify(e.lag_ms))
-    // Предупреждения — от load_filters (здесь ложное «неподдерживаемый режим 1» у выключенного INS_HNTC2: в логе
-    // нет газа — дефект upstream 7, его исправит задача 8)
+    // Предупреждения — от load_filters. Выключенный INS_HNTC2 с режимом 1 в логе без газа больше не даёт ложного
+    // «неподдерживаемый режим 1» (дефекты upstream 4 и 7 исправлены в задаче 8)
     assert.deepEqual(e.warnings, load_filters(values, log_env, tracking).warnings)
+    assert.deepEqual(e.warnings, [])
     assert.equal(e.values, values)
     // Второй вариант на том же ctx берёт закэшированный спектр «до»
     assert.equal(evaluate_candidate(other, ctx).pre_spectrum, e.pre_spectrum)

@@ -24,6 +24,7 @@
 //                                                         (её зовёт core/candidates.js на своей сетке частот)
 //   estimate_post(…) берёт FFT.H                        → необязательный последний аргумент H, по умолчанию FFT.H
 // Исправлен досрочно дефект upstream 8 (FR 1200–1222, notch_line_stats): NaN в трекинге убирал среднюю линию notch.
+// Исправлен дефект upstream 7 (FR 174–186, задача 8): выключенный notch не даёт предупреждений.
 //
 // Нужны глобалы страницы: Libraries/Array_Math.js, core/gyro.js (find_start_index, find_end_index)
 // и классы core/tracking/*.
@@ -209,7 +210,9 @@ function HarmonicNotchFilter(params, env, tracking) {
         }
     }
 
-    if (this.tracking == null) {
+    // исправление дефекта upstream 7 (FR 174–186): выключенный notch не предупреждает. В upstream проверка режима шла
+    // до enabled(), и выключенный notch с неподдерживаемым режимом давал ложное предупреждение
+    if ((this.tracking == null) && (this.params.enable > 0)) {
         this.warnings.push("Неподдерживаемый режим notch " + this.params.mode)
     }
 
