@@ -274,11 +274,13 @@ function log_post_peaks(log, rules) {
 //                 где разница нечисловая (NaN) или где у пика нет пары в оценке лога (и наоборот);
 //   lag_over    — задержка на старшей из lag_freqs_hz (30 Гц) больше задержки лога на max_lag_increase_ms
 //                 или нечисловая;
-//   incomplete  — оценки нет (null), нет списка пиков или спектра, мощность в полосе нечисловая.
+//   incomplete  — оценки нет (null), нет списка пиков или спектра, мощность в полосе нечисловая; у всех вариантов,
+//                 кроме лога, — также если неполна оценка самого лога.
 // Проверки отказывают при сомнении: !(разница ≤ порога), поэтому NaN и undefined отмечают вариант [наше].
 // Лучший — с наименьшей мощностью в главной полосе среди неотмеченных; при равной мощности — с меньшей задержкой
 // на 30 Гц, затем раньше перечисленный. Лог служит опорой и рекомендуется, если лучше никто не подошёл; без
-// оценки лога сравнивать не с чем — все варианты incomplete, best_id null.
+// оценки лога (или при неполной) сравнивать не с чем — все варианты incomplete; best_id — "log", если такой ключ
+// есть (даже с null), и null, если варианта «как в логе» нет вовсе.
 // Возвращает { best_id, flags: { id: { worse_peaks: [freq…], lag_over, incomplete } } }
 function rank_candidates(evaluations, rules = candidate_rules) {
     const log = evaluations.log
@@ -298,13 +300,18 @@ function rank_candidates(evaluations, rules = candidate_rules) {
         }
     }
 
+    // Неполная оценка: нет оценки, списка пиков или спектра, мощность в полосе нечисловая. Если неполна оценка лога,
+    // сравнивать варианты не с чем — неполными помечаются и все остальные (выбор и так остаётся за логом, а таблица
+    // не должна показывать их «прошедшими»)
+    const evaluation_incomplete = (e) => (e == null) || !Array.isArray(e.peaks) || (e.spectrum == null) || !Number.isFinite(e.band_dB)
+    const log_incomplete = evaluation_incomplete(log) || (post_peaks == null)
+
     const same = (a, b) => (a.freq === b.freq) && (a.source === b.source)
     const flags = {}
     for (const [id, evaluation] of Object.entries(evaluations)) {
         const worse_peaks = []
         let lag_over = false
-        const incomplete = (evaluation == null) || !Array.isArray(evaluation.peaks) || (evaluation.spectrum == null) ||
-                           !Number.isFinite(evaluation.band_dB) || ((id !== "log") && (post_peaks == null))
+        const incomplete = evaluation_incomplete(evaluation) || ((id !== "log") && log_incomplete)
         if ((log != null) && (id !== "log") && !incomplete) {
             for (const peak of evaluation.peaks) {
                 const log_peak = log.peaks.find((p) => same(p, peak))
@@ -322,7 +329,8 @@ function rank_candidates(evaluations, rules = candidate_rules) {
         flags[id] = { worse_peaks: worse_peaks, lag_over: lag_over, incomplete: incomplete }
     }
 
-    let best_id = (log != null) ? "log" : null
+    // Лог — запасной выбор, даже если его оценка неполна (null): это настройки, на которых летали
+    let best_id = ("log" in evaluations) ? "log" : null
     for (const [id, evaluation] of Object.entries(evaluations)) {
         if (flags[id].incomplete || (flags[id].worse_peaks.length > 0) || flags[id].lag_over) {
             continue

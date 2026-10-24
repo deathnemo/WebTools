@@ -629,6 +629,20 @@ test('rank_candidates: при сомнении вариант отмечаетс
     assert.equal(no_log.flags.a.incomplete, true)
 })
 
+test('rank_candidates: неполная оценка лога — все варианты тоже неполные, остаётся лог', () => {
+    const good = [[78, -65], [153, -63]]
+    const log_ok = eval_7a(-40, 10, [[78, -64], [153, -62]])
+    for (const log of [eval_7a(NaN, 10, [[78, -64], [153, -62]]), { ...log_ok, peaks: undefined }, { ...log_ok, spectrum: undefined }, null]) {
+        const r = rank_candidates({ log, a: eval_7a(-45, 10, good), b: eval_7a(-42, 9, good) })
+        assert.equal(r.best_id, 'log')
+        assert.equal(r.flags.log.incomplete, true)
+        assert.deepEqual(r.flags.a, { worse_peaks: [], lag_over: false, incomplete: true })
+        assert.deepEqual(r.flags.b, { worse_peaks: [], lag_over: false, incomplete: true })
+    }
+    // Полная оценка лога — варианты сравниваются как обычно
+    assert.equal(rank_candidates({ log: log_ok, a: eval_7a(-45, 10, good) }).flags.a.incomplete, false)
+})
+
 test('rank_candidates: при равной полосе — меньшая задержка на 30 Гц, затем порядок вариантов', () => {
     const log = eval_7a(-40, 10, [[78, -64]])
     const r = rank_candidates({ log, a: eval_7a(-42, 10.3, [[78, -64]]), b: eval_7a(-42, 10.1, [[78, -64]]), c: eval_7a(-42, 10.1, [[78, -64]]) })
