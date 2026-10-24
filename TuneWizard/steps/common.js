@@ -1,10 +1,10 @@
 // Общий модуль шагов мастера: помощники, которые одинаковы у шагов 2 и 3 (и нужны шагу 4) — подписи и плитки,
 // вердикт, досчёт расчёта шага 1, запуск действий с перехватом ошибок (step_…) и куски графиков (plot_…).
-// Своего состояния у модуля нет.
+// Состояние модуля — только глубина вложенности step_run (step_run_state).
 //
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
-// core/gyro.js (find_instance), plots.js (plot, render_plot), Libraries/LoadingOverlay.js (loading_call). Все они
-// нужны только при вызове, поэтому модуль подключается перед steps/step1.js.
+// core/spectrum.js (find_instance), plots.js (plot, render_plot), Libraries/LoadingOverlay.js (loading_call). Все
+// они нужны только при вызове, поэтому модуль подключается перед steps/step1.js.
 
 // ---------- Подписи ----------
 
@@ -59,9 +59,26 @@ function step_try(fn, verdict_id, label) {
     }
 }
 
-// Выполнить fn под оверлеем загрузки (step_try: ошибка не оставляет оверлей висеть)
+// Сколько функций step_run выполняется сейчас (вложенные вызовы — внутри внешней)
+const step_run_state = { depth: 0 }
+
+// Выполнить fn под оверлеем загрузки (step_try: ошибка не оставляет оверлей висеть). Вызов изнутри функции другого
+// step_run (например, «Принять» шага 2 → set_step(3) → step3_show) выполняет fn сразу, синхронно, внутри внешней
+// функции — под её оверлеем. Через loading_call вложенный вызов показал бы оверлей, внешний тут же скрыл бы его,
+// и fn шла бы через два кадра уже без оверлея и после того, как внешнее действие закончилось
 function step_run(fn, verdict_id, label) {
-    loading_call(async () => step_try(fn, verdict_id, label))
+    if (step_run_state.depth > 0) {
+        step_try(fn, verdict_id, label)
+        return
+    }
+    loading_call(async () => {
+        step_run_state.depth++
+        try {
+            step_try(fn, verdict_id, label)
+        } finally {
+            step_run_state.depth--
+        }
+    })
 }
 
 // ---------- Графики ----------
@@ -83,8 +100,8 @@ function plot_trace_visibility(trace, shown) {
 }
 
 // Пустой график id реестра plots.js: у трасс — пустые x и y, и перерисовать. hide — ещё и скрыть трассы
-// (visible = false; видимость с данными вернёт plot_trace_visibility) и фигуры layout.shapes. Графика ещё нет
-// (не зарегистрирован) — ничего
+// (visible = false; видимость с данными вернёт plot_trace_visibility) и фигуры layout.shapes. z тепловых карт
+// не очищается — спектрограммы чистятся своим кодом. Графика ещё нет (не зарегистрирован) — ничего
 function plot_clear(id, hide = true) {
     const p = plot(id)
     if (p == null) {

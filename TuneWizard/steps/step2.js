@@ -1301,7 +1301,8 @@ function redraw_spectrum2() {
         const alias = alias_obj(gyro[post].FFT, { mode: state.spectrum.aliasing, loop_rate: loop_rate })
         fill(2, post, mean_spectrum(gyro[post].FFT, amp, range, alias), alias)
     }
-    // Трассы без данных — вне легенды; с данными — видимость, выбранная пользователем (после очистки — в легенде)
+    // Трассы без данных — вне легенды; с данными — видимость, выбранная пользователем (после очистки — только
+    // в легенде, на графике скрыта)
     for (const trace of p.data) {
         plot_trace_visibility(trace, "legendonly")
     }
