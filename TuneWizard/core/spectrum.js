@@ -49,8 +49,14 @@ function spectrum_frequency_scale(unit, log_axis) {
 // opts = { mode: "none" | "fold" | "only", loop_rate } — loop_rate это SCHED_LOOP_RATE, Гц.
 // Возвращает { len, bins, apply_amp(amp) }: bins — частоты результата в герцах, apply_amp переводит амплитуды
 // по бинам FFT к bins: "none" — как есть, "fold" — спектр до частоты Найквиста контура плюс отражённый в него
-// остаток, "only" — только отражённый остаток
+// остаток, "only" — только отражённый остаток. Объект привязан к этому FFT (в none bins — это FFT.bins, в fold/only
+// интерполяция — к его частоте и окну), поэтому mean_spectrum и spectrogram_matrix получают alias от того же FFT.
+// null, если FFT нет или окон нет
 function alias_obj(FFT, opts) {
+    // Без FFT или без окон строить нечего: redraw и redraw_Spectrogram в upstream пропускали такие экземпляры до вызова
+    if ((FFT == null) || (FFT.x.length == 0)) {
+        return null
+    }
 
     let obj = {}
     if (opts.mode == "none") {
@@ -108,6 +114,8 @@ function alias_obj(FFT, opts) {
 }
 
 // Средний спектр экземпляра по окнам FFT в диапазоне range = [t0, t1] (часть redraw в upstream).
+// alias строится alias_obj(FFT, …) от того же FFT: в режиме none bins — это FFT.bins, а в fold/only интерполяция
+// привязана к частоте и окну этого FFT.
 // Возвращает { bins: alias.bins, x, y, z } — амплитуды по осям уже с поправкой окна, после alias.apply_amp
 // и amplitude_scale.scale; null, если FFT нет или окон нет. Частоты bins в герцах
 function mean_spectrum(FFT, amplitude_scale, range, alias) {
@@ -165,10 +173,14 @@ function find_instance(gyro, sensor_num, post_filter) {
 
 // Матрица спектрограммы экземпляра batch_instance по оси axis ("x" | "y" | "z") — данные Spectrogram.data[0]
 // из redraw_Spectrogram в upstream. estimated — оценка «после» по данным «до» через FFT.H.
+// alias строится alias_obj(gyro[batch_instance].FFT, …) от того же FFT: в режиме none bins — это FFT.bins,
+// а в fold/only интерполяция привязана к частоте и окну этого FFT.
 // Возвращает { x, bins, z }: x — время окон в секундах с двумя дополнительными точками на каждый разрыв
 // (шаг больше 2.5 среднего), bins = alias.bins в герцах, z[j] — строка амплитуд окна j после поправки окна,
 // alias.apply_amp, amplitude_scale.fun и amplitude_scale.scale; строки разрывов — массивы undefined,
-// Plotly рисует их пустыми. null, если экземпляра или FFT нет либо для оценки нет FFT.H
+// Plotly рисует их пустыми. null, если экземпляра или FFT нет либо для оценки нет FFT.H.
+// Контракт графика (как в upstream, FR 689): heatmap с transpose: true, x = spec.x, y = frequency_scale.fun(spec.bins),
+// z = spec.z — строка z[j] соответствует времени x[j]
 function spectrogram_matrix(gyro, batch_instance, axis, estimated, amplitude_scale, alias) {
     if ((batch_instance == null) || (gyro[batch_instance] == null) || (gyro[batch_instance].FFT == null) || (gyro[batch_instance].FFT.x.length == 0)) {
         return null
@@ -230,9 +242,11 @@ function spectrogram_matrix(gyro, batch_instance, axis, estimated, amplitude_sca
             continue
         }
 
+        // upstream: поправка окна наложена до amplitude_scale.fun, а в mean_spectrum и estimate_post (core/filters.js) —
+        // после. Для linear и dB это одно и то же выражение (и с вычитанием шума квантования тоже), а для PSD fun
+        // возводит в квадрат, и строка спектрограммы ровно на 10·log10(window_correction) выше среднего спектра
         var amplitude = array_scale(gyro[batch_instance].FFT[axis][index], window_correction)
         if (estimated) {
-            // upstream: шум квантования вычитается без поправки окна, в отличие от estimate_post (core/filters.js)
             const attenuation = complex_abs(gyro[batch_instance].FFT.H[index])
             amplitude = array_offset(array_mul(array_offset(amplitude, -gyro.quantization_noise), attenuation), gyro.quantization_noise)
         }

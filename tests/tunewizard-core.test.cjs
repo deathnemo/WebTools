@@ -530,6 +530,8 @@ test('mean_spectrum: синусоида 100 Гц → максимум около
     const mean = mean_spectrum(FFT, scale, [gyro.start_time, gyro.end_time + 10], alias)
     const peak = mean.x.indexOf(Math.max(...mean.x))
     assert.ok(Math.abs(mean.bins[peak] - 100) < 1.0)
+    // 100 Гц лежит в 0.4 бина от центра бина 99.6 Гц, и окно Ханна оставляет там ≈ 0.90 амплитуды (≈ 5.1 дБ):
+    // допуск «≈ 6 дБ» ±1 покрывает эти ~0.9 дБ потери намеренно
     assert.ok(Math.abs(mean.x[peak] - 20 * Math.log10(2)) < 1.0, 'пик ≈ 6 дБ, получили ' + mean.x[peak].toFixed(2))
     assert.ok(mean.y.every((v) => v < -100), 'тишина по Y в дБ')
     assert.equal(mean_spectrum(null, scale, [0, 1], alias), null)
@@ -548,9 +550,17 @@ test('alias_obj: режим fold сворачивает 300 Гц в 100 Гц п�
     // оставляет лишь 0.65 амплитуды; на ближнем (0.2 бина) — 0.97. Бины свёртки шагом 200/2048 Гц попадают в 100 Гц точно
     const near = (bins, f) => bins.reduce((best, b, i) => (Math.abs(b - f) < Math.abs(bins[best] - f)) ? i : best, 0)
     assert.ok(none.x[near(none.bins, 300)] > 1.5, 'без сворачивания пик на 300 Гц')
+    assert.ok(none.x[near(none.bins, 100)] < 0.1, 'без сворачивания на 100 Гц пусто')
     assert.ok(fold.bins[fold.bins.length - 1] <= 200 + 1e-9, 'после сворачивания ось до частоты Найквиста контура')
     assert.ok(fold.x[near(fold.bins, 100)] > 1.0, 'пик свёрнут в 100 Гц')
     assert.ok(only.x[near(only.bins, 100)] > 1.0, 'режим only тоже показывает свёрнутый пик')
+})
+
+test('alias_obj: без окон FFT → null в любом режиме', () => {
+    const empty = { x: [], bins: [] }
+    assert.equal(alias_obj(empty, { mode: 'none', loop_rate: 400 }), null)
+    assert.equal(alias_obj(empty, { mode: 'fold', loop_rate: 400 }), null)
+    assert.equal(alias_obj(null, { mode: 'none', loop_rate: 400 }), null)
 })
 
 test('spectrogram_matrix: по строке на окно, разрыв по времени даёт пустые строки', () => {
@@ -568,6 +578,12 @@ test('spectrogram_matrix: по строке на окно, разрыв по в�
     assert.equal(spec.bins.length, FFT.bins.length)
     const gap_rows = spec.z.filter((row) => row[0] === undefined).length
     assert.equal(gap_rows, 2)
+    // Разрыв между третьим с конца и вторым с конца окном, поэтому маркеры стоят в spec.x на местах n−2 и n−1;
+    // оба лежат строго внутри разрыва и идут по порядку
+    const n = FFT.time.length
+    const m1 = spec.x[n - 2], m2 = spec.x[n - 1]
+    assert.ok(m1 > FFT.time[n - 3] && m1 < m2 && m2 < FFT.time[n - 2],
+        'маркеры ' + m1.toFixed(2) + ', ' + m2.toFixed(2) + ' внутри (' + FFT.time[n - 3].toFixed(2) + ', ' + FFT.time[n - 2].toFixed(2) + ')')
     const peak = FFT.bins.findIndex((b) => b >= 100)
     assert.ok(spec.z[0][peak] > 0, 'пик в первой строке положителен в дБ')
     assert.equal(spectrogram_matrix(gyro, null, 'x', false, scale, alias), null)
@@ -591,4 +607,34 @@ test('tracking_lines: статический notch с гармониками 1 �
     assert.deepEqual(lines[0].harmonics[0].time, [0, 1])
     assert.deepEqual(lines[0].logged, [])
     assert.equal(lines[1].enabled, false)
+})
+
+test('tracking_lines: ESC по моторам — линии склеены через NaN с клампом к минимуму, логированный notch без клампа', () => {
+    const log = fake_log({ messages: {
+        ESC: { instances: {
+            0: { TimeUS: [0, 1e6, 2e6], RPM: [6000, 6000, 6000] },
+            1: { TimeUS: [0, 1e6, 5e6], RPM: [3000, 3000, 3000] }
+        } },
+        FTNS: { instances: { 0: { TimeUS: [0, 1e6], NF: [10, 20] } } }
+    } })
+    const gyro = { start_time: 0, end_time: 6 }
+    const env = { filter_version: 2, params: log_params(log), build_type: 2 }
+    const tracking = create_tracking(log, env, gyro)
+    const logged = create_logged(log)
+    // OPTS 2 — notch по каждому мотору; FREQ 60 с FM_RAT 1 даёт минимум 60 Гц, и мотор на 50 Гц поднимается до него
+    const values = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_OPTS: 2, INS_HNTCH_REF: 1, INS_HNTCH_FREQ: 60, INS_HNTCH_BW: 25, INS_HNTCH_ATT: 40, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 3, INS_HNTCH_ESCMSK: 0 }
+    const filters = load_filters(values, env, tracking)
+    assert.deepEqual(filters.warnings, [])
+    // Как в upstream (FR 2586): маска гармоник логированного notch берётся из параметров
+    logged[0].harmonics = filters.notch[0].harmonics()
+    const lines = tracking_lines(filters, logged, [gyro.start_time, gyro.end_time])
+    assert.equal(lines[0].enabled, true)
+    assert.equal(lines[0].name, filters.notch[0].name())
+    assert.deepEqual(lines[0].harmonics.map((h) => h.harmonic), [1, 2])
+    assert.deepEqual(lines[0].harmonics[0].time, [0, 1, 2, NaN, 0, 1, 5, NaN])
+    assert.deepEqual(lines[0].harmonics[0].freq, [100, 100, 100, NaN, 60, 60, 60, NaN], '50 Гц второго мотора поднято до минимума 60 Гц')
+    assert.deepEqual(lines[0].harmonics[1].time, [0, 1, 2, NaN, 0, 1, 5, NaN])
+    assert.deepEqual(lines[0].harmonics[1].freq, [200, 200, 200, NaN, 100, 100, 100, NaN], 'вторая гармоника: 2·50 = 100 ≥ 60, клампа нет')
+    assert.deepEqual(lines[0].logged, [{ harmonic: 1, time: [0, 1], freq: [10, 20] }, { harmonic: 2, time: [0, 1], freq: [20, 40] }], 'логированные линии без клампа')
+    assert.deepEqual(lines[1], { enabled: false, name: null, harmonics: [], logged: [] })
 })
