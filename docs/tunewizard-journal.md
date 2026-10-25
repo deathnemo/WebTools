@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 25.10.2026 — этап 4 слит в `main` ([PR #4](https://github.com/deathnemo/WebTools/pull/4)); этап 5 (ветка `tune-wizard-stage5`): дизайн утверждён (`docs/plans/2026-10-25-tune-wizard-stage5-design.md`), дальше план.
+**Обновлено:** 25.10.2026 — этап 4 слит в `main` ([PR #4](https://github.com/deathnemo/WebTools/pull/4)); этап 5 (ветка `tune-wizard-stage5`): дизайн и план (`docs/plans/2026-10-25-tune-wizard-stage5-design.md`, `…-stage5.md`, 8 задач) готовы, идёт реализация.
 
 ---
 
@@ -116,7 +116,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-stage5` (от `main` = `77d67e0`). Этап 5 (сводка, `.param`, память прохода, печать): дизайн утверждён — `docs/plans/2026-10-25-tune-wizard-stage5-design.md`; дальше план.
+- **Ветка:** `tune-wizard-stage5` (от `main` = `77d67e0`). Этап 5 (сводка, `.param`, память прохода, печать): дизайн — `docs/plans/2026-10-25-tune-wizard-stage5-design.md`, план — `docs/plans/2026-10-25-tune-wizard-stage5.md` (8 задач: ядро сводки, «что перелететь», ядро памяти, отпечаток входов, страница шага 5, прошлый проход на шаге 0, строки сравнения на шагах 2–4, Readme и финальный прогон).
 - **`main`** = `origin/main` = `77d67e0`: этапы 1–4. Локальный `main` отслеживает `upstream/main` — обновлять из форка командой `git pull origin main`, простой `git pull` потянет ArduPilot.
 - **Этап 4** (план `docs/plans/2026-10-25-tune-wizard-stage4.md`, дизайн `…-stage4-design.md`):
 
@@ -204,7 +204,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
   - задачи 7–8: страница шага 4, графики, браузерный тест шагов 0–4; по ревью — без автоперехода вкладки, поля и окно FFT без потери щелчка, лучший неотмеченный вариант по перерегулированию, вынос общего в `common.js`;
   - задача 9: Readme, описание тестов, финальный прогон (`1f766ab`); финальное ревью ветки — готово к слиянию, мелочи закрыты (`b34b482`).
 - **Этап 4 слит:** [PR #4](https://github.com/deathnemo/WebTools/pull/4) — пользователь нажал «Merge pull request» на GitHub (09:19 UTC, `77d67e0`), локальный `main` обновлён `git pull origin main`; создана ветка этапа 5 `tune-wizard-stage5`.
-- **Этап 5** (ветка `tune-wizard-stage5`): брейнсторминг — решения в разделе 3; дизайн `docs/plans/2026-10-25-tune-wizard-stage5-design.md`.
+- **Этап 5** (ветка `tune-wizard-stage5`): брейнсторминг — решения в разделе 3; дизайн `docs/plans/2026-10-25-tune-wizard-stage5-design.md` (`3ae7f83`); при плане уточнено: пункт о перезагрузке — по признаку RebootRequired метаданных (не только SCHED_LOOP_RATE), ключ FFT в отпечатке — только у шагов 2–3; план `…-stage5.md`.
 
 ---
 

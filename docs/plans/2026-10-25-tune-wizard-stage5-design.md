@@ -48,7 +48,7 @@
 
 ### 2.4. Отпечаток входов и «устарело»
 
-`summary_inputs_key(n, ctx)` — JSON из интервала анализа (`state.settings.start/end`), ключа FFT шага 1 (`step1.fft_key`) и `state.steps[k].accepted` для принятых шагов `2 ≤ k < n`. Шаги 2–4 при «Принять» кладут его в `state.steps[n].inputs`. Сводка считает ключ заново; не совпал — шаг «устарело».
+`summary_inputs_key(n, ctx)` — JSON из интервала анализа (`state.settings.start/end`), ключа FFT шага 1 (`step1.fft_key`; только у шагов 2–3 — шаг 4 можно принять, не открывая шаг 1) и `state.steps[k].accepted` для принятых шагов `2 ≤ k < n`. Шаги 2–4 при «Принять» кладут его в `state.steps[n].inputs`. Сводка считает ключ заново; не совпал — шаг «устарело».
 
 Внутренний ключ расчёта шага 4 (`step4.key`) для этого не годится: в нём окно FFT и выбор набора, и их смена давала бы ложное «устарело». Ключи `calc_key` шагов 3–4 остаются для их собственного пересчёта.
 
@@ -58,7 +58,7 @@
 
 1. проверок шага 0 со статусом `warn` или `fail` и текстом «что сделать» (`state.checks`: `pid_log`, `pre_post`, `vibe`, `clipping`, `hover_throttle`, `flight`, `tracking` и др.);
 2. включаемого второго notch: «на аппарате сначала запишите `INS_HNTC2_ENABLE = 1` и обновите список параметров, затем загрузите файл ещё раз» (текст — как `step2_second_notch_hint`);
-3. смены `SCHED_LOOP_RATE`: нужна перезагрузка полётного контроллера;
+3. изменённых параметров с признаком `RebootRequired` в метаданных (`FilterReview/params.json`: `SCHED_LOOP_RATE`, `INS_HNTC*_HMNCS`, `INS_HNTC*_OPTS`, `INS_HNTC*_REF`): после записи перезагрузить полётный контроллер — с перечнем имён;
 4. ненадёжных осей шага 4: тестовый полёт Acro с `ACRO_OPTIONS = 2` («Rate Loop Only»), 2–3 минуты резких отклонений стиков по каждой оси, в `LOG_BITMASK` — ATTITUDE_FAST и PID;
 5. всегда последним: слетать тем же профилем и загрузить лог — мастер покажет, что применено и сбылся ли прогноз.
 
@@ -125,7 +125,7 @@
 - `wizard.js`: блок «Прошлый проход» на шаге 0 после загрузки; `info.frame` в `log_info` (`core/log.js`).
 - `steps/step2.js`, `step3.js`, `step4.js`: при «Принять» — `inputs: summary_inputs_key(n, …)`; строка сравнения с прошлым проходом (общий помощник в `steps/common.js`).
 - `index.html`: секция шага 5, скрипты `core/summary.js`, `core/passmem.js`, `steps/step5.js`, правила печати.
-- `eslint.config.mjs`: `core/summary.js` и `core/passmem.js` — в `DUAL_SCRIPTS`.
+- `eslint.config.mjs` не меняется: как `core/lowpass.js` и `core/pidtune.js`, новые файлы ядра тесты грузят через `vm.runInThisContext`, без `module.exports` (в `DUAL_SCRIPTS` только `core/log.js` и `core/checks.js`).
 
 ## 6. Файлы
 
