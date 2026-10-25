@@ -202,6 +202,9 @@ function step4_summary(page) {
             windows: res?.seg?.windows ?? 0,
             windows_text: step4_windows_text(res?.seg?.windows ?? 0),
             data_s: res?.seg?.data_s ?? 0,
+            batches: (res?.set_index != null) ? (res.source.sets[res.set_index]?.length ?? 0) : 0,
+            plateau: res?.metrics?.plateau ?? null,
+            max_points: tarac4_max_points,
         }
     })
 }
@@ -223,6 +226,7 @@ function step4_plots(page) {
             traces: traces,
             with_data: with_data.length,
             shapes: (gd.layout.shapes ?? []).filter((s) => s.visible).map((s) => s.name),
+            shape_y: Object.fromEntries((gd.layout.shapes ?? []).filter((s) => s.visible).map((s) => [s.name, s.y0])),
             bg: gd.layout.paper_bgcolor,
             xtype: gd.layout.xaxis.type,
             min_x: min_x,
@@ -842,16 +846,24 @@ async function main() {
             assert.equal(s.recommended_marks, 0, axis + ': рекомендации нет')
             assert.equal(s.predict_ok, false, axis + ': прогноза нет')
             const g = await step4_plots(page)
-            const [windows, mean, measured, pred] = g.StepResp4.traces
+            const [windows, mean, measured, pred_log, pred] = g.StepResp4.traces
             assert.ok(measured.finite > 0 && measured.visible === true, axis + ': измеренный отклик на графике')
-            assert.match(measured.name, /^измеренный \(КИХ МНК\) — измерение ненадёжно$/, axis + ': пометка в легенде')
+            assert.equal(measured.name, 'измеренный (КИХ МНК) — ' + s.tabs.find((tab) => tab.selected === 'true').state, axis + ': пометка в легенде — состояние оси')
+            assert.match(measured.name, /— ненадёжно .*\(б\)$/, axis + ': пометка в легенде: ' + measured.name)
+            assert.equal(pred_log.n, 0, axis + ': прогноза «как в логе» нет')
             assert.match(g.StepResp4.note, /^Измеренный отклик — с пометкой: измерение ненадёжно \(.*\(б\).*\); по нему не судят/, axis + ': пометка в подписи: ' + g.StepResp4.note)
             assert.equal(pred.n, 0, axis + ': прогноза на графике нет')
             assert.ok((windows.finite > 0) && (mean.finite > 0) && (windows.visible === 'legendonly') && (mean.visible === 'legendonly'), axis + ': отклик PIDReview — только в легенде')
             assert.match(mean.name, /занижено методом/, axis + ': подпись, что отклик PIDReview занижен методом')
+            assert.match(windows.name, /^PIDReview: окна \(200 из \d+\)$/, axis + ': окон PIDReview на графике — 200, равномерной выборкой: ' + windows.name)
             assert.deepEqual(g.StepResp4.shapes, ['one', 'band_lo', 'band_hi'], axis + ': горизонтали 1 и ±5 % от плато')
+            assert.ok((Math.abs(g.StepResp4.shape_y.band_lo - s.plateau * 0.95) < 1e-9) && (Math.abs(g.StepResp4.shape_y.band_hi - s.plateau * 1.05) < 1e-9) &&
+                      (g.StepResp4.shape_y.one === 1), axis + ': горизонтали — 1 и плато ' + s.plateau + ' ×0.95 / ×1.05: ' + JSON.stringify(g.StepResp4.shape_y))
             assert.equal(g.TarAct4.with_data, 2, axis + ': цель и факт с данными')
-            assert.ok(g.TarAct4.traces.every((t) => t.n <= 6100), axis + ': цель и факт прорежены для отрисовки: ' + g.TarAct4.traces.map((t) => t.n).join(', '))
+            // Прореживание: не больше tarac4_max_points точек, и на пакет — разрыв и лишний неполный отрезок
+            assert.ok(g.TarAct4.traces.every((t) => t.n <= s.max_points + 3 * s.batches), axis + ': цель и факт прорежены для отрисовки: ' +
+                      g.TarAct4.traces.map((t) => t.n).join(', ') + ' (предел ' + s.max_points + ' + 3 × ' + s.batches + ' пакетов)')
+            assert.deepEqual(g.TarAct4.traces.map((t) => t.name), ['факт', 'цель'], axis + ': цель рисуется поверх факта')
             assert.equal(g.DSpec4.with_data, 2, axis + ': спектры D и выхода с данными')
             assert.deepEqual(g.DSpec4.shapes, ['d_noise'], axis + ': вертикаль шума D')
             assert.equal(g.LBode4.with_data, 0, axis + ': бодэ L пуст')
@@ -878,14 +890,12 @@ async function main() {
 
         // ПОДМЕНА, а не данные лога: у тангажа — режим тестового полёта Acro «Rate Loop Only» (pidtune_log_mode) и
         // пройденные проверки (а), (б) (pidtune_quality при rate_only), чтобы проверить варианты и прогноз — на логе
-        // пользователя надёжной оси нет. Notch шага 2 на время подмены — из лога (state.steps[2] убран): принятый выше
-        // вариант без третьей гармоники (HMNCS 5 → 1) даёт поправку фильтров гироскопа |G_new/G_log| ≈ 6 у частоты
-        // Найквиста, и прогноз всех вариантов выходит непричинным — «прогноз неустойчив» (вопрос ядра, не графиков).
-        // INS_GYRO_FILTER и FLTD шага 3 остаются — поправка фильтров в прогнозе есть. После проверок подмена снимается
-        // и шаг пересчитывается
+        // пользователя надёжной оси нет. Фильтры шагов 2–3 — принятые выше: notch без третьей гармоники (HMNCS 5 → 1),
+        // INS_GYRO_FILTER 38, FLTD 21 — прогноз идёт с поправкой фильтров гироскопа, и она не даёт ложного «прогноз
+        // неустойчив» (ядро сглаживает поправку выше 5× частоты среза). После проверок подмена снимается и шаг
+        // пересчитывается
         await page.evaluate(() => {
-            window.__step4_orig = { mode: pidtune_log_mode, quality: pidtune_quality, steps2: state.steps[2] }
-            state.steps[2] = undefined
+            window.__step4_orig = { mode: pidtune_log_mode, quality: pidtune_quality }
             pidtune_log_mode = (...args) => {
                 const mode = window.__step4_orig.mode(...args)
                 return (args[4] === 'pitch') ? { ...mode, rate_only: true, mixed_modes: [] } : mode
@@ -912,6 +922,10 @@ async function main() {
         assert.equal(sub4.recommended.length, 1, 'подмена: одна строка рекомендуется: ' + sub4.recommended.join('; '))
         assert.equal(sub4.recommended_marks, 1, 'подмена: одна пометка «рекомендуется»')
         assert.equal(sub4.quality[2], 'не применяется (Rate Loop Only)', 'подмена: (в) в Rate Loop Only не применяется')
+        const unstable4 = await page.evaluate(() => step4_rows('pitch').filter((r) => ['log', 'p_minus', 'p_plus', 'd_minus', 'd_plus'].includes(r.id))
+            .map((r) => [r.id, r.flags.unstable, r.pred.noncausal]))
+        assert.equal(unstable4.length, 5, 'подмена: «Как в логе», P ±10 % и D ±10 %: ' + JSON.stringify(unstable4))
+        assert.ok(unstable4.every(([, unstable]) => unstable === false), 'подмена: с фильтрами шагов 2–3 нет ложного «прогноз неустойчив»: ' + JSON.stringify(unstable4))
         const sub_title = (id) => page.evaluate((id) => step4_rows('pitch').find((r) => r.id === id).title, id)
         const gs1 = await step4_plots(page)
         assert.equal(gs1.LBode4.with_data, 4, 'подмена: бодэ L — амплитуда и фаза лога и выбранного')
@@ -921,17 +935,21 @@ async function main() {
         assert.match(gs1.LBode4.traces[0].name, /^лог · срез [\d.]+ Гц · запас [\d.]+°$/, 'частота среза и запас лога в легенде: ' + gs1.LBode4.traces[0].name)
         assert.equal(gs1.LBode4.note, null, 'подмена: подписи-причины у бодэ нет')
         const sel_title = await sub_title(sub4.selected)
-        assert.equal(gs1.StepResp4.traces[3].name, 'прогноз «' + sel_title + '»', 'подмена: на графике отклика — прогноз выбранного варианта')
-        assert.ok(gs1.StepResp4.traces[3].finite > 0, 'подмена: прогноз выбранного варианта с данными')
+        assert.equal(gs1.StepResp4.traces[4].name, 'прогноз «' + sel_title + '»', 'подмена: на графике отклика — прогноз выбранного варианта')
+        assert.ok(gs1.StepResp4.traces[4].finite > 0, 'подмена: прогноз выбранного варианта с данными')
         assert.match(gs1.StepResp4.traces[2].name, /^измеренный \(КИХ МНК\)$/, 'подмена: без пометки «ненадёжно»')
+        // Фильтры шагов 2–3 отличаются от лога — прогноз «как в логе» с ними, только в легенде
+        assert.equal(gs1.StepResp4.traces[3].name, 'прогноз «как в логе» (фильтры шагов 2–3)')
+        assert.ok((gs1.StepResp4.traces[3].finite > 0) && (gs1.StepResp4.traces[3].visible === 'legendonly'), 'подмена: прогноз «как в логе» с фильтрами — в легенде с данными')
         // Выбор другой строки щелчком — прогноз на графиках меняется
         const other4 = await page.evaluate(() => step4_rows('pitch').find((r) => (r.id !== step4.selected.pitch) && (r.pred?.step != null))?.id ?? null)
         assert.ok(other4 != null, 'подмена: есть другой устойчивый вариант')
         await page.check('#cand4_' + other4)
         const gs2 = await step4_plots(page)
         const other_title = await sub_title(other4)
-        assert.equal(gs2.StepResp4.traces[3].name, 'прогноз «' + other_title + '»', 'выбор строки — прогноз этой строки на графике отклика')
-        assert.notEqual(gs2.StepResp4.traces[3].sum, gs1.StepResp4.traces[3].sum, 'выбор строки — данные прогноза на графике отклика сменились')
+        assert.equal(gs2.StepResp4.traces[4].name, 'прогноз «' + other_title + '»', 'выбор строки — прогноз этой строки на графике отклика')
+        assert.notEqual(gs2.StepResp4.traces[4].sum, gs1.StepResp4.traces[4].sum, 'выбор строки — данные прогноза на графике отклика сменились')
+        assert.equal(gs2.StepResp4.traces[3].sum, gs1.StepResp4.traces[3].sum, 'выбор строки — прогноз «как в логе» прежний')
         assert.ok(gs2.LBode4.traces[1].name.startsWith('«' + other_title + '» · срез'), 'выбор строки — название на бодэ: ' + gs2.LBode4.traces[1].name)
         assert.notEqual(gs2.LBode4.traces[1].sum, gs1.LBode4.traces[1].sum, 'выбор строки — данные выбранного на бодэ сменились')
         assert.equal(gs2.LBode4.traces[0].sum, gs1.LBode4.traces[0].sum, 'выбор строки — бодэ лога прежнее')
@@ -949,11 +967,40 @@ async function main() {
         await page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed && (step4.selected.pitch === 'custom') &&
             (step4_rows('pitch').find((r) => r.id === 'custom')?.values.I === Math.fround(0.5)), null, { timeout: 30000 })
         const gu = await step4_plots(page)
-        assert.equal(gu.StepResp4.traces[3].n, 0, 'неустойчивый «Свой» — линии прогноза нет')
+        assert.equal(gu.StepResp4.traces[4].n, 0, 'неустойчивый «Свой» — линии прогноза нет')
         assert.match(gu.StepResp4.note, /Прогноз «Свой»: контур неустойчив \(запас фазы -[\d.]+°\) — линии отклика нет\./, 'причина в подписи: ' + gu.StepResp4.note)
         assert.ok(gu.LBode4.traces[1].finite > 0, 'неустойчивый «Свой» — L на бодэ есть')
         assert.match(gu.LBode4.traces[1].name, /^«Свой» · срез [\d.]+ Гц · запас -[\d.]+°$/, 'запас фазы неустойчивого — не больше 0: ' + gu.LBode4.traces[1].name)
         assert.match(gu.LBode4.note, /^«Свой»: контур неустойчив/, 'причина под бодэ: ' + gu.LBode4.note)
+        // «Свой» тангажа D ×4 (P и I — лога): неустойчив по причинности отклика при запасе первого пересечения больше 0 —
+        // запас недостоверен: в таблице «—», на бодэ без чисел и без отметок выбранного, как в таблице
+        await page.evaluate(() => {
+            const gains = step4.calc.pitch.gains
+            step4_set_form_values({ ATC_RAT_PIT_P: gains.P, ATC_RAT_PIT_I: gains.I, ATC_RAT_PIT_D: gains.D * 4 })
+            step4_flush_edits(true)
+        })
+        const d4 = await page.evaluate(() => {
+            const row = step4_rows('pitch').find((r) => r.id === 'custom')
+            const tr = [...document.querySelectorAll('#candidates4 tbody tr')].find((tr) => tr.querySelector('input').value === 'custom')
+            return { selected: step4.selected.pitch, unstable: row.pred.unstable, pm: row.pred.pm_deg, cells: [...tr.querySelectorAll('td.num')].slice(3, 5).map((td) => td.firstChild.textContent) }
+        })
+        assert.equal(d4.selected, 'custom', 'D ×4: выбрана строка «Свой»')
+        assert.ok(d4.unstable && (d4.pm > 0), 'D ×4: неустойчив по причинности при запасе больше 0: ' + JSON.stringify(d4))
+        assert.deepEqual(d4.cells, ['—', '—'], 'D ×4: в таблице запас и срез — «—»')
+        const gd4 = await step4_plots(page)
+        assert.equal(gd4.LBode4.traces[1].name, '«Свой» · запас недостоверен', 'D ×4: на бодэ — «запас недостоверен» без чисел')
+        assert.ok(gd4.LBode4.traces[1].finite > 0, 'D ×4: L варианта на бодэ есть')
+        assert.deepEqual(gd4.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm'], 'D ×4: отметок выбранного нет, у лога — есть')
+        assert.match(gd4.LBode4.note, /^«Свой»: прогноз неустойчив .* — частота среза и запас фазы недостоверны\.$/, 'D ×4: причина под бодэ: ' + gd4.LBode4.note)
+        // Пустое поле D тангажа: прогноз неполный — линий выбранного нет, причина в подписях отклика и бодэ
+        await page.evaluate(() => {
+            document.getElementById('pidf_ATC_RAT_PIT_D').value = ''
+            step4_flush_edits(true)
+        })
+        const ge = await step4_plots(page)
+        assert.equal(ge.LBode4.traces[1].n, 0, 'пустое поле: линии выбранного на бодэ нет')
+        assert.match(ge.LBode4.note, /^«Свой»: прогноз неполный: .* — линии нет\.$/, 'пустое поле: причина под бодэ: ' + ge.LBode4.note)
+        assert.match(ge.StepResp4.note, /Прогноз «Свой»: прогноз неполный: .* — линии отклика нет\./, 'пустое поле: причина под откликом: ' + ge.StepResp4.note)
         await page.evaluate(() => {
             step4_set_form_values(step4_log_values_of('pitch'))
             step4_flush_edits(true)
@@ -964,7 +1011,6 @@ async function main() {
         await page.evaluate(() => {
             pidtune_log_mode = window.__step4_orig.mode
             pidtune_quality = window.__step4_orig.quality
-            state.steps[2] = window.__step4_orig.steps2
             step4.key = null
             step4_show()
         })
@@ -1137,7 +1183,7 @@ async function main() {
         const axis_names4 = { roll: 'крен', pitch: 'тангаж', yaw: 'рыскание' }
         console.log('  шаг 4: ' + Object.entries(axes4).map(([axis, a]) => axis_names4[axis] + ' — ' + a.windows_text + ', ' + a.data_s.toFixed(1) + ' с данных, ' +
             ((a.failed.length == 1) ? 'не пройдена ' : 'не пройдены ') + a.failed.join(', ')).join('; ') + '; итог — измерение ненадёжно на всех осях, прогноз ' +
-            'недостоверен (правил и прогноза нет); под подменой у тангажа — варианты ' + sub_lines.titles.join('; ') + ', рекомендуется «' +
+            'недостоверен (правил и прогноза нет); под подменой у тангажа (фильтры шагов 2–3, без ложного «неустойчив») — варианты ' + sub_lines.titles.join('; ') + ', рекомендуется «' +
             sub_lines.recommended.join('; ') + '», бодэ ' + sub_lines.log)
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется

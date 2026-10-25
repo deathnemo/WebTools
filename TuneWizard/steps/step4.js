@@ -3,8 +3,8 @@
 // с проверкой достоверности; форма коэффициентов с описаниями из ../FilterReview/params.json и «Принять».
 // Дизайн — docs/plans/2026-10-25-tune-wizard-stage4-design.md, разделы 3–5 и 7; план — …-stage4.md, задача 7.
 //
-// Данные PID — load_pid (core/pid.js) один раз на лог; FFT компонент (спектр D для шума D, а в задаче 8 — отклик
-// PIDReview на графике) — pid_run_batch_fft с окном шага. Измеренный отклик, проверки качества и прогноз от окна
+// Данные PID — load_pid (core/pid.js) один раз на лог; FFT компонент (шум D, спектр D и выхода и отклик PIDReview на
+// графиках) — pid_run_batch_fft с окном шага. Измеренный отклик, проверки качества и прогноз от окна
 // FFT не зависят: отбор отрезков КИХ — окнами pidtune_rules.window (512) с шагом 32, на них откалиброваны пороги
 // проверок (раздел 3 дизайна).
 // Регулятор лога и сверка модели регулятора — с коэффициентами и фильтрами FLTE/FLTD набора лога; регуляторы
@@ -143,6 +143,7 @@ function step4_init() {
         overshoot: rules.overshoot_pred_max_pct + " %",
         d_noise_hz: rules.d_noise_hz + " Гц",
         crossover_min: rules.crossover_min_hz + " Гц",
+        pidreview_windows: String(stepresp4_max_windows),
     }
     for (const span of document.querySelectorAll("[data-rule4]")) {
         span.textContent = rule_texts[span.dataset.rule4]
@@ -526,6 +527,12 @@ function step4_gyro_changed() {
     return candidate_key(step4_gyro_old()) !== candidate_key(step4_gyro_new())
 }
 
+// Фильтры прогноза оси res (step4_compute_axis) совпадают с логом: фильтры гироскопа шагов 2–3 не менялись, FLTE и FLTD
+// вариантов — как у набора лога. Тогда прогноз «Как в логе» — сам измеренный отклик
+function step4_filters_same(res) {
+    return !step4_gyro_changed() && (res.filters_new != null) && (candidate_key(res.filters_new) === candidate_key(res.filters_log))
+}
+
 // Расчёт сделан для другого интервала, окна, набора или фильтров (или ещё не сделан)
 function step4_stale() {
     return (step4.calc == null) || (step4.key !== step4_calc_key()) || (step4_gyro_changed() && (step4.gyro_ref !== state.gyro))
@@ -580,8 +587,8 @@ function step4_batch_rate(source, set_index) {
 // Расчёт оси axis на интервале range (ctx — step4_compute; range хранится в результате — по нему графики берут данные
 // интервала расчёта): данные (PIDx или RATE), набор, отрезки КИХ, режим лога,
 // отклик и его метрики, качество измерения, шум D, правило; при надёжном измерении — сверка регулятора, прогноз лога,
-// когерентность на частоте среза, достоверность прогноза и варианты. Прогнозы вариантов считает step4_compute (после
-// поправки фильтров гироскопа).
+// когерентность на частоте среза, достоверность прогноза и варианты; отклик PIDReview для графика. Прогнозы вариантов
+// считает step4_compute (после поправки фильтров гироскопа).
 // status — почему нет правил, по порядку отказов (раздел 3 дизайна, pidtune_rule): "low_rate" (лог PID реже 99 Гц —
 // и когда отрезков нет вовсе), "nodata" (нет данных оси или набора), "missing" (P или I нет в логе), "little" (мало
 // манёвров), "noresp" (нет отклика), "unreliable" (проверки качества не пройдены), "ok" — правила есть.
@@ -594,6 +601,7 @@ function step4_compute_axis(axis, range, ctx) {
         fltt: null, slew: null, seg: null, rate_hz: null, mode: null, fir: null, quality: null, metrics: null, d_noise: null, rule: null,
         status: "nodata", cc: null, grid: null, c_log: null, pred_log: null, coherence: null, validity: null, predict_ok: false,
         loop_rate: ctx.loop_rate, ratio: null, ratio_note: null, candidates: null, predictions: null, flags: null, custom: null,
+        pidreview: null,
     }
     const source = res.source
     if (source != null) {
@@ -622,6 +630,8 @@ function step4_compute_axis(axis, range, ctx) {
     res.quality = pidtune_quality(res.seg?.segments ?? [], res.rate_hz, res.fir, { rate_only: res.mode.rate_only })
     res.metrics = (res.fir != null) ? pidtune_step_metrics(res.fir.time, res.fir.step) : null
     res.d_noise = pidtune_d_noise(source, res.set_index, range)
+    // Отклик PIDReview для графика — здесь, под оверлеем расчёта, а не при первом показе оси (≈ 0.2 с на ось)
+    res.pidreview = stepresp4_pidreview(res)
     res.rule = pidtune_rule(log_values, axis, res.metrics, res.seg?.data_s ?? 0, res.quality)
 
     if (res.mode.low_rate) {
@@ -686,7 +696,7 @@ function step4_compute() {
         return
     }
 
-    // FFT компонент осей шага (спектр D для шума D) — один раз на окно
+    // FFT компонент осей шага — один раз на окно: по нему шум D, спектр D и выхода (DSpec4) и отклик PIDReview (StepResp4)
     if (step4.fft_window !== step4.window) {
         step4.fft_window = null
         for (const axis of step4_axis_list) {
@@ -820,8 +830,8 @@ function step4_form_row(axis) {
     return step4_rows(axis).find((r) => step4_gain_key(r.values) === key) ?? null
 }
 
-// Выбранная строка таблицы оси — единственный источник выбора для «Применить вариант», вердикта и (в задаче 8)
-// графиков: step4.selected[axis], а если такой строки нет — рекомендованная или «Как в логе»; null — строк нет
+// Выбранная строка таблицы оси — единственный источник выбора для «Применить вариант», вердикта и графиков:
+// step4.selected[axis], а если такой строки нет — рекомендованная или «Как в логе»; null — строк нет
 function step4_selected_row(axis) {
     const rows = step4_rows(axis)
     return rows.find((r) => r.id === step4.selected[axis]) ?? rows.find((r) => r.id === (step4_recommended_id(axis) ?? "log")) ?? null
@@ -1205,6 +1215,14 @@ function step4_unstable_text(row) {
     return row.flags?.unstable ? row.flags.reasons[0] : "прогноз неустойчив"
 }
 
+// Частоту среза и запас фазы прогноза pred можно показывать числами (таблица вариантов, бодэ L): у устойчивого — да,
+// у неустойчивого — только если запас первого пересечения не больше 0 (контур неустойчив). Неустойчивый по
+// причинности отклика при запасе больше 0 — нет: запас первого пересечения тогда не полный критерий Найквиста
+// (раздел 4 дизайна), и число было бы недостоверным
+function step4_margins_shown(pred) {
+    return !pred.unstable || (Number.isFinite(pred.pm_deg) && (pred.pm_deg <= 0))
+}
+
 // Прогноз строки (pred, flags) словами против прогноза лога: запас фазы, частота среза, перерегулирование, нарастание
 function step4_prediction_text(row, pred_log) {
     const pred = row.pred
@@ -1413,8 +1431,7 @@ function step4_render_warnings() {
     box.hidden = lines.length == 0
 }
 
-// Пометка у измеренного отклика оси без правил (плитки метрик, легенда графика отклика): по нему не судят; null —
-// измерение надёжно
+// Пометка у метрик измеренного отклика оси без правил (плитки): по ним не судят; null — измерение надёжно
 function step4_unreliable_mark(res) {
     return (res.status === "ok") ? null : ((res.status === "little") ? "мало данных" : "измерение ненадёжно")
 }
@@ -1448,8 +1465,10 @@ function step4_render_metrics() {
     tiles.push(step_tile("Колебания на плато", (m == null) ? "—" : ((m.osc != null) ? m.osc.freq_hz.toFixed(1) + " Гц" : "нет"),
                          (unreliable != null) ? unreliable + ", " + osc_sub : osc_sub, null))
     const dn = res.d_noise
-    if (res.gains?.D === 0 || dn?.off) {
+    if (res.gains?.D === 0) {
         tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "D выключен", null, null))
+    } else if (dn?.off) {
+        tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "D нулевой", "D-составляющая в окнах интервала — 0", null))
     } else if (dn == null) {
         tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "—", res.is_rate ? "в RATE нет D-составляющей" : "нет спектра D", null))
     } else {
@@ -1515,7 +1534,7 @@ function step4_row_note(row) {
 
 // Ячейки прогноза строки: запас фазы, частота среза, перерегулирование и нарастание с разницей к логу (у «Как в логе»
 // при фильтрах лога разницы нет — его прогноз и есть лог); у неустойчивого — «—» вместо метрик (запас фазы и срез —
-// только если запас не больше 0, иначе их число недостоверно)
+// только если их можно показывать, step4_margins_shown)
 function step4_pred_cells(row, res, same_as_log) {
     const pred = row.pred
     const log = res.pred_log
@@ -1526,8 +1545,8 @@ function step4_pred_cells(row, res, same_as_log) {
     }
     const pm_cls = (flags?.low_pm || flags?.pm_drop || flags?.unstable) ? "worse" : ""
     if (pred.unstable) {
-        const contour = Number.isFinite(pred.pm_deg) && (pred.pm_deg <= 0)
-        return step_cell(contour ? pred.pm_deg.toFixed(1) : "—", null, "worse", null) + step_cell(contour ? step4_fixed(pred.crossover_hz, 2) : "—", null, "", null) +
+        const shown = step4_margins_shown(pred)
+        return step_cell(shown ? pred.pm_deg.toFixed(1) : "—", null, "worse", null) + step_cell(shown ? step4_fixed(pred.crossover_hz, 2) : "—", null, "", null) +
             step_cell("—", null, "worse", step4_unstable_text(row) + " — отклика нет") + step_cell("—", null, "", step4_unstable_text(row) + " — отклика нет")
     }
     const m = pred.metrics
@@ -1546,7 +1565,7 @@ function step4_render_candidates() {
     const note = document.getElementById("candidates4_note")
     const prefix = pidtune_axes[axis].rate
     const recommended_id = step4_recommended_id(axis)
-    const filters_same = !step4_gyro_changed() && (res.filters_new != null) && (candidate_key(res.filters_new) === candidate_key(res.filters_log))
+    const filters_same = step4_filters_same(res)
 
     box.querySelector("thead").innerHTML = '<tr><th aria-label="Выбор"></th><th>Вариант</th><th>' + html_escape(prefix) + 'P</th><th>I</th><th>D</th>' +
         '<th>Запас фазы<small>°, к логу</small></th><th>Частота среза<small>Гц, к логу</small></th><th>Перерегулирование<small>%, к логу</small></th>' +
@@ -1647,10 +1666,14 @@ function step4_render_candidates() {
 const step4_plot_ids = ["StepResp4", "TarAct4", "DSpec4", "LBode4"]
 const step4_note_ids = ["stepresp4_note", "tarac4_note", "dspec4_note", "lbode4_note"]
 
-// Трассы отклика на ступеньку: окна и среднее PIDReview (только в легенде), измеренный КИХ, прогноз выбранного варианта
-const stepresp4_trace = { windows: 0, mean: 1, measured: 2, pred: 3 }
-// Трассы цели и факта — ключи пакетов load_pid
-const tarac4_keys = ["Tar", "Act"]
+// Трассы отклика на ступеньку: окна и среднее PIDReview (только в легенде), измеренный КИХ, прогноз «как в логе»
+// с фильтрами шагов 2–3 (только в легенде и только если фильтры отличаются от лога), прогноз выбранного варианта
+const stepresp4_trace = { windows: 0, mean: 1, measured: 2, pred_log: 3, pred: 4 }
+// Окон PIDReview на графике не больше — равномерная выборка (среднее — по всем окнам) [наше: сотни бледных линий
+// сливаются, а окна — сотни тысяч точек]
+const stepresp4_max_windows = 200
+// Трассы цели и факта — ключи пакетов load_pid: факт первым, цель рисуется поверх него
+const tarac4_keys = ["Act", "Tar"]
 // Больше точек в трассе цели или факта — прореживание для отрисовки (tarac4_decimate) [наше: ширина графика ≈ 1300 px,
 // а в интервале лога 400 Гц — до 200 000 отсчётов]
 const tarac4_max_points = 6000
@@ -1667,9 +1690,10 @@ const lbode4_dash = { log: "dash", sel: "solid" }
 // интеграторов, а оценка T шумит; 0 Гц (L бесконечна) логарифмическая ось и не покажет
 const lbode4_min_hz = pidtune_rules.crossover_min_hz
 
-// Кэши: дорогие данные графиков (отклик PIDReview, прореженные цель и факт, средние спектры) — по объекту расчёта оси
-// (step4_compute_axis: новый при каждом пересчёте, поэтому кэш не устаревает), бодэ — по объекту прогноза
-// (pidtune_predict). У трасс остаются те же массивы, и Plotly.react не пересчитывает неизменённые трассы
+// Кэши: данные графиков (прореженные цель и факт, средние спектры) — по объекту расчёта оси (step4_compute_axis: новый
+// при каждом пересчёте, поэтому кэш не устаревает), бодэ — по объекту прогноза (pidtune_predict). У трасс остаются те
+// же массивы, и Plotly.react не пересчитывает неизменённые трассы. Отклик PIDReview (дорогой, ≈ 0.2 с на ось) считает
+// сам расчёт оси — под оверлеем (res.pidreview)
 const step4_plot_cache = new WeakMap()
 const lbode4_cache = new WeakMap()
 
@@ -1706,22 +1730,24 @@ function lbode4_trace_index(s, t) {
 }
 
 // Цвета отклика: окна PIDReview — цвет текста (бледно — прозрачностью трассы), среднее PIDReview — предупреждение,
-// измеренный — первый цвет, прогноз выбранного — второй; горизонтали — цвет текста
+// измеренный и прогноз «как в логе» — первый цвет (прогноз — пунктиром), прогноз выбранного — второй; горизонтали —
+// цвет текста
 function stepresp4_theme(palette, data, layout) {
     const t = stepresp4_trace
     data[t.windows].line.color = palette.ink
     data[t.mean].line.color = palette.warn
     data[t.measured].line.color = palette.series[0]
+    data[t.pred_log].line.color = palette.series[0]
     data[t.pred].line.color = palette.series[1]
     for (const shape of layout.shapes) {
         shape.line.color = palette.ink
     }
 }
 
-// Цвета цели и факта: цель — первый цвет, факт — второй
+// Цвета цели и факта (порядок трасс — tarac4_keys): цель — первый цвет, факт — второй
 function tarac4_theme(palette, data) {
-    data[0].line.color = palette.series[0]
-    data[1].line.color = palette.series[1]
+    data[tarac4_keys.indexOf("Tar")].line.color = palette.series[0]
+    data[tarac4_keys.indexOf("Act")].line.color = palette.series[1]
 }
 
 // Цвета спектра: D — первый цвет, выход — третий; вертикаль шума D — цвет текста
@@ -1760,6 +1786,7 @@ function step4_setup_plots() {
     step_data[t.windows] = line_trace("PIDReview: окна", 0.6, "solid", { legendgroup: "pidreview", opacity: 0.3, hoverinfo: "skip" })
     step_data[t.mean] = line_trace("PIDReview: среднее — занижено методом", 1.5, "dot", { legendgroup: "pidreview", hovertemplate: step_hover })
     step_data[t.measured] = line_trace("измеренный (КИХ МНК)", 2.2, "solid", { hovertemplate: step_hover })
+    step_data[t.pred_log] = line_trace("прогноз «как в логе» (фильтры шагов 2–3)", 1.4, "dash", { hovertemplate: step_hover })
     step_data[t.pred] = line_trace("прогноз", 1.6, "solid", { hovertemplate: step_hover })
     register_plot("StepResp4", step_data, {
         xaxis: plot_axis("Время, с"),
@@ -1772,10 +1799,13 @@ function step4_setup_plots() {
 
     // Цель и факт во времени
     const rate_hover = "<extra></extra>%{meta}<br>%{x:.2f} с<br>%{y:.1f} °/с"
-    register_plot("TarAct4", [line_trace("цель", 1, "solid", { hovertemplate: rate_hover }), line_trace("факт", 1, "solid", { hovertemplate: rate_hover })], {
+    // Факт — первым и тоньше, цель — поверх него (иначе шумный факт её закрывает); в легенде — цель первой
+    register_plot("TarAct4", [line_trace("факт", 0.8, "solid", { hovertemplate: rate_hover, opacity: 0.85 }),
+                              line_trace("цель", 1.2, "solid", { hovertemplate: rate_hover })], {
         xaxis: plot_axis("Время, с"),
         yaxis: plot_axis("Скорость, °/с"),
         showlegend: true,
+        legend: { traceorder: "reversed" },
         margin: margin,
     }, { on_theme: tarac4_theme })
 
@@ -1815,7 +1845,7 @@ function step4_setup_plots() {
         xaxis: plot_axis(null, "log"),
         xaxis2: { ...plot_axis("Частота, Гц", "log"), matches: "x" },
         yaxis: { ...plot_axis("|L|, дБ"), domain: [0.52, 1] },
-        // Фаза — главное значение (lbode4_compute); начальный вид — весь его диапазон, полный — двойным щелчком
+        // Фаза — главное значение (lbode4_compute): диапазон −360…0° задан явно, без полей автомасштаба
         yaxis2: { ...plot_axis("Фаза L, °"), domain: [0, 0.48], range: [-360, 0], dtick: 45 },
         showlegend: true,
         grid: { rows: 2, columns: 1, pattern: "independent" },
@@ -1855,19 +1885,26 @@ function step4_redraw_plots() {
     lbode4_redraw(res, row)
 }
 
-// Отклик PIDReview набора анализа оси res за интервал расчёта (pid_step_response; FFT — окном шага, step4_compute).
-// Окна — одна трасса с разрывами (null) между окнами. → { time, mean, windows_x, windows_y, count, warning }: без
-// отклика массивы пустые, warning — причина
+// Отклик PIDReview набора анализа оси res за интервал расчёта (pid_step_response; FFT — окном шага, step4_compute);
+// считается в расчёте оси (step4_compute_axis). Окна — одна трасса с разрывами (null) между окнами, не больше
+// stepresp4_max_windows — равномерной выборкой; среднее — по всем окнам, как в PIDReview. → { time, mean, windows_x,
+// windows_y, count — окон всего, shown — окон на графике, warning }: без отклика массивы пустые, warning — причина
 function stepresp4_pidreview(res) {
     const warnings = []
     const response = pid_step_response(res.source, res.set_index, res.range, warnings)
     if (response == null) {
-        return { time: [], mean: [], windows_x: [], windows_y: [], count: 0,
-                 warning: warnings[0] ?? "нет окон с целью не меньше " + pidtune_rules.target_min_dps + " °/с" }
+        // Нет окон FFT — пакеты набора короче окна; иначе — нет окон с целью не меньше порога метода (или редкий лог)
+        const no_fft = res.source.sets[res.set_index]?.FFT == null
+        const warning = warnings[0] ?? (no_fft ? "нет окон FFT — пакеты лога в наборе короче окна " + step4.window + " отсчётов"
+            : "нет окон с целью не меньше " + pidtune_rules.target_min_dps + " °/с")
+        return { time: [], mean: [], windows_x: [], windows_y: [], count: 0, shown: 0, warning: warning }
     }
+    const count = response.windows.length
+    const shown = Math.min(count, stepresp4_max_windows)
     const x = []
     const y = []
-    for (const window of response.windows) {
+    for (let i = 0; i < shown; i++) {
+        const window = response.windows[(shown > 1) ? Math.round(i * (count - 1) / (shown - 1)) : 0]
         if (x.length > 0) {
             x.push(null)
             y.push(null)
@@ -1875,51 +1912,72 @@ function stepresp4_pidreview(res) {
         x.push(...response.time)
         y.push(...window)
     }
-    return { time: response.time, mean: response.mean, windows_x: x, windows_y: y, count: response.windows.length, warning: null }
+    return { time: response.time, mean: response.mean, windows_x: x, windows_y: y, count: count, shown: shown, warning: null }
 }
 
-// Отклик на ступеньку оси res: измеренный КИХ МНК (на оси без надёжного измерения — с пометкой в легенде и подписи),
-// прогноз выбранной строки row (только при достоверном прогнозе; у неустойчивого прогноза step — null, линии нет,
-// причина — в подписи), отклик PIDReview (окна и среднее — только в легенде, для сравнения с PIDReview). Горизонтали —
-// 1 и ±settle_band от плато измеренного
+// Линия отклика прогноза pred для графика: { time, y } или null — прогноза нет, он неустойчив (step — null) или
+// неполный (нечисловые коэффициенты: в отклике нет ни одного числа)
+function stepresp4_step(pred) {
+    const step = pred?.step ?? null
+    return ((step != null) && step.y.some(Number.isFinite)) ? step : null
+}
+
+// Отклик на ступеньку оси res: измеренный КИХ МНК (на оси без надёжного измерения — с пометкой в легенде, короткое
+// состояние оси, и в подписи), прогноз выбранной строки row (только при достоверном прогнозе; у неустойчивого прогноза
+// step — null, линии нет, причина — в подписи), прогноз «как в логе» с фильтрами шагов 2–3 (только в легенде и только
+// если фильтры отличаются от лога: видно отдельное влияние фильтров), отклик PIDReview (окна и среднее — только
+// в легенде, для сравнения с PIDReview). Горизонтали — 1 и ±settle_band от плато измеренного
 function stepresp4_redraw(res, row) {
     const p = plot("StepResp4")
     const t = stepresp4_trace
     const lines = []
-    const reason = step4_axis_state(res.axis).reason
+    const axis_state = step4_axis_state(res.axis)
 
     const measured = p.data[t.measured]
-    const mark = step4_unreliable_mark(res)
+    const mark = (res.status === "ok") ? null : axis_state.text
     measured.x = res.fir?.time ?? []
     measured.y = res.fir?.step ?? []
     measured.name = "измеренный (КИХ МНК)" + ((mark != null) ? " — " + mark : "")
     measured.meta = measured.name
     plot_trace_visibility(measured, true)
     if (res.fir == null) {
-        lines.push("Измеренного отклика нет: " + (reason ?? "КИХ не решился") + ".")
+        lines.push("Измеренного отклика нет: " + (axis_state.reason ?? "КИХ не решился") + ".")
     } else if (mark != null) {
-        lines.push("Измеренный отклик — с пометкой: " + reason + "; по нему не судят, правил и прогноза нет.")
+        lines.push("Измеренный отклик — с пометкой: " + axis_state.reason + "; по нему не судят, правил и прогноза нет.")
     }
 
     const pred_trace = p.data[t.pred]
     const pred = (res.predict_ok && (row != null)) ? row.pred : null
-    const step = pred?.step ?? null
+    const step = stepresp4_step(pred)
     pred_trace.x = step?.time ?? []
     pred_trace.y = step?.y ?? []
     pred_trace.name = "прогноз" + ((row != null) ? " «" + row.title + "»" : "")
     pred_trace.meta = pred_trace.name
     plot_trace_visibility(pred_trace, true)
     if (!res.predict_ok) {
-        lines.push("Прогноза нет: " + ((res.status === "ok") ? "прогноз недостоверен — " + res.validity.reasons.join("; ") : reason) + ".")
-    } else if ((row != null) && ((step == null) || !step.y.some(Number.isFinite))) {
+        lines.push("Прогноза нет: " + ((res.status === "ok") ? "прогноз недостоверен — " + res.validity.reasons.join("; ") : axis_state.reason) + ".")
+    } else if ((row != null) && (step == null)) {
         const why = (pred == null) ? "прогноза нет" : (pred.unstable ? step4_unstable_text(row) : ((row.flags?.reasons ?? []).join(", ") || "прогноза нет"))
         lines.push("Прогноз «" + row.title + "»: " + why + " — линии отклика нет.")
     }
 
-    const pidreview = (res.set_index != null) ? step4_plot_data(res, "pidreview", () => stepresp4_pidreview(res)) : null
+    // Прогноз «как в логе» с фильтрами шагов 2–3 — коэффициенты лога, фильтры гироскопа и FLTE/FLTD шагов 2–3
+    const log_trace = p.data[t.pred_log]
+    const filters_changed = res.predict_ok && !step4_filters_same(res)
+    const log_pred = filters_changed ? (res.predictions?.log ?? null) : null
+    const log_step = stepresp4_step(log_pred)
+    log_trace.x = log_step?.time ?? []
+    log_trace.y = log_step?.y ?? []
+    plot_trace_visibility(log_trace, "legendonly")
+    if ((log_pred != null) && (log_step == null)) {
+        lines.push("Прогноз «как в логе» с фильтрами шагов 2–3: " + (log_pred.unstable ? "неустойчив" : "неполный") + " — линии нет.")
+    }
+
+    const pidreview = res.pidreview
     p.data[t.windows].x = pidreview?.windows_x ?? []
     p.data[t.windows].y = pidreview?.windows_y ?? []
-    p.data[t.windows].name = "PIDReview: окна" + ((pidreview?.count > 0) ? " (" + pidreview.count + ")" : "")
+    p.data[t.windows].name = "PIDReview: окна" + ((pidreview?.count > 0)
+        ? " (" + ((pidreview.shown < pidreview.count) ? pidreview.shown + " из " + pidreview.count : pidreview.count) + ")" : "")
     p.data[t.mean].x = pidreview?.time ?? []
     p.data[t.mean].y = pidreview?.mean ?? []
     for (const i of [t.windows, t.mean]) {
@@ -2064,11 +2122,12 @@ function dspec4_mean(res, key) {
 }
 
 // Спектр D-составляющей и выхода регулятора оси res (запись лога, окно FFT шага) с вертикалью на d_noise_hz; D выключен
-// или ось RATE (D-составляющей нет) — только выход, причина в подписи
+// (D = 0), D-составляющая в окнах нулевая или ось RATE (D-составляющей нет) — только выход, причина в подписи
 function dspec4_redraw(res) {
     const p = plot("DSpec4")
     const prefix = pidtune_axes[res.axis].rate
-    const d_off = (res.gains?.D === 0) || (res.d_noise?.off === true)
+    const d_zero = res.gains?.D === 0
+    const d_off = d_zero || (res.d_noise?.off === true)
     const spectra = (res.set_index != null) ? step4_plot_data(res, "dspec", () => Object.fromEntries(dspec4_keys.map((key) => [key, dspec4_mean(res, key)]))) : null
     for (let i = 0; i < dspec4_keys.length; i++) {
         const key = dspec4_keys[i]
@@ -2079,12 +2138,16 @@ function dspec4_redraw(res) {
         plot_trace_visibility(trace, true)
     }
     const lines = []
-    if (spectra?.Out == null) {
-        lines.push("Спектра нет: " + ((res.status !== "ok") ? step4_axis_state(res.axis).reason : "нет окон FFT набора в интервале") + ".")
+    if (spectra == null) {
+        lines.push("Спектра нет: " + step4_axis_state(res.axis).reason + ".")
+    } else if (spectra.Out == null) {
+        lines.push("Спектра нет: нет окон FFT набора в интервале — пакеты лога короче окна " + step4.window + " отсчётов или вне интервала.")
     } else if (res.is_rate) {
         lines.push("Источник — RATE: D-составляющей в нём нет, выход ROut — вместе с FF.")
-    } else if (d_off) {
+    } else if (d_zero) {
         lines.push("D выключен (" + prefix + "D = 0): спектра D-составляющей нет — только выход.")
+    } else if (d_off) {
+        lines.push("D-составляющая в окнах интервала нулевая (" + prefix + "D = " + step_value_text(res.gains.D) + " в логе): спектра D нет — только выход.")
     }
     const drawn = p.data.some((trace) => trace.x.length > 0)
     for (const shape of p.layout.shapes) {
@@ -2131,17 +2194,25 @@ function lbode4_bode(pred) {
     return bode
 }
 
-// Частота среза и запас фазы прогноза для легенды: « · срез 3.86 Гц · запас 60.7°»; без них — пусто
+// Частота среза и запас фазы прогноза для легенды: « · срез 3.86 Гц · запас 60.7°»; неустойчивый по причинности при
+// запасе больше 0 (step4_margins_shown — как в таблице) — « · запас недостоверен» без чисел; без них — пусто
 function lbode4_margins_text(pred) {
-    if ((pred == null) || !Number.isFinite(pred.crossover_hz) || !Number.isFinite(pred.pm_deg)) {
+    if (pred == null) {
+        return ""
+    }
+    if (!step4_margins_shown(pred)) {
+        return " · запас недостоверен"
+    }
+    if (!Number.isFinite(pred.crossover_hz) || !Number.isFinite(pred.pm_deg)) {
         return ""
     }
     return " · срез " + pred.crossover_hz.toFixed(2) + " Гц · запас " + pred.pm_deg.toFixed(1) + "°"
 }
 
 // Бодэ разомкнутого контура L оси res: лог (прогноз лога — измеренная L) и выбранная строка row, отметки частоты среза
-// и запаса фазы у каждого. Только при достоверном прогнозе, иначе пусто с причиной в подписи; у неустойчивого
-// варианта L рисуется (по ней видно, почему), причина — в подписи
+// и запаса фазы у каждого — только если их можно показывать (step4_margins_shown, как в таблице). Только при
+// достоверном прогнозе, иначе пусто с причиной в подписи; у неустойчивого варианта L рисуется (по ней видно, почему),
+// у неполного (пустое поле — нечисловые коэффициенты) линии нет; причина — в подписи
 function lbode4_redraw(res, row) {
     const p = plot("LBode4")
     const lines = []
@@ -2150,7 +2221,10 @@ function lbode4_redraw(res, row) {
         const why = (res.status === "ok") ? "прогноз недостоверен — " + (res.validity?.reasons ?? []).join("; ") : step4_axis_state(res.axis).reason
         lines.push("Бодэ L — только при достоверном прогнозе: " + why + ".")
     }
-    const preds = { log: valid ? res.pred_log : null, sel: (valid && (row != null)) ? row.pred : null }
+    // Прогнозы с бодэ: неполный (в L ни одного числа) — как без прогноза
+    const with_bode = (pred) => ((pred != null) && lbode4_bode(pred).amp_dB.some(Number.isFinite)) ? pred : null
+    const sel_pred = (valid && (row != null)) ? row.pred : null
+    const preds = { log: valid ? with_bode(res.pred_log) : null, sel: with_bode(sel_pred) }
     const names = { log: "лог", sel: (row != null) ? "«" + row.title + "»" : "выбранный" }
     for (let s = 0; s < lbode4_parts.length; s++) {
         for (let k = 0; k < lbode4_types.length; k++) {
@@ -2165,8 +2239,10 @@ function lbode4_redraw(res, row) {
             plot_trace_visibility(trace, true)
         }
     }
-    if (valid && (row?.pred?.unstable === true)) {
-        lines.push("«" + row.title + "»: " + step4_unstable_text(row) + ".")
+    if (sel_pred?.unstable === true) {
+        lines.push("«" + row.title + "»: " + step4_unstable_text(row) + (step4_margins_shown(sel_pred) ? "" : " — частота среза и запас фазы недостоверны") + ".")
+    } else if ((sel_pred != null) && (preds.sel == null)) {
+        lines.push("«" + row.title + "»: " + ((row.flags?.reasons ?? []).join(", ") || "прогноза нет") + " — линии нет.")
     }
     const drawn = p.data.some((trace) => trace.x.length > 0)
     for (const shape of p.layout.shapes) {
@@ -2175,9 +2251,10 @@ function lbode4_redraw(res, row) {
             shape.visible = drawn
             continue
         }
-        const fc = preds[type]?.crossover_hz
-        const pm = preds[type]?.pm_deg
-        shape.visible = Number.isFinite(fc) && ((mark !== "pm") || Number.isFinite(pm))
+        const pred = preds[type]
+        const fc = pred?.crossover_hz
+        const pm = pred?.pm_deg
+        shape.visible = (pred != null) && step4_margins_shown(pred) && Number.isFinite(fc) && ((mark !== "pm") || Number.isFinite(pm))
         shape.x0 = shape.visible ? fc : 1
         shape.x1 = shape.x0
         if (mark === "pm") {
