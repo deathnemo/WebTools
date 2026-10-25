@@ -728,7 +728,21 @@ function load_pid(log, env) {
     }
 
     if (!PID_log_messages.have_data) {
-        warnings.push("В логе не найдено сообщений PID или RATE")
+        // Причина точнее, чем у upstream («No PID or RATE log messages found», PIDReview 1635) [наше]: сообщений нет;
+        // сообщения есть, но у их осей нет параметров ATC_RAT_* в PARM (ось без параметров не грузится); или сообщения
+        // и параметры есть, а пакетов (не меньше 64 отсчётов без разрыва) не набралось
+        const logged = PID_log_messages.filter((axis) => axis.id[0] in log.messageTypes)
+        if (logged.length == 0) {
+            warnings.push("В логе не найдено сообщений PID или RATE")
+        } else if (logged.every((axis) => axis.params.prefix == null)) {
+            const ids = [...new Set(logged.map((axis) => axis.id[0]))]
+            const prefixes = [...new Set(logged.flatMap((axis) => axis.prefixes))]
+            warnings.push("Сообщения " + ids.join(", ") + " в логе есть, но параметров " + prefixes.map((prefix) => prefix + "*").join(", ") +
+                          " в нём нет — без параметров регулятора данные PID не разбираются")
+        } else {
+            warnings.push("Сообщения PID или RATE и параметры ATC_RAT_* в логе есть, но нет ни одного пакета данных — нужно не меньше 64 " +
+                          "отсчётов подряд без разрыва")
+        }
         return { axes: PID_log_messages, start_time: PID_log_messages.start_time, end_time: PID_log_messages.end_time, have_data: false, warnings: warnings }
     }
 

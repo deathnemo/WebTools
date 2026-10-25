@@ -265,6 +265,31 @@ test('load_pid: нет PID и RATE, не Copter — have_data ложно и пр
     assert.equal(plane.warnings.length, 1)
 })
 
+test('load_pid: сообщения PID/RATE есть, но нет параметров ATC_RAT_* или пакетов — причина названа точно, а не «не найдено сообщений»', () => {
+    const zero = () => 0
+    const pidr = pid_msg(time_us([[0, 5]]), { Tar: zero, Act: zero, Err: zero, P: zero, I: zero, D: zero, FF: zero })
+    // PARM есть, но ни одного ATC_RAT_*: оси не грузятся
+    const no_rat = load_pid(fake_log({ messages: { PIDR: pidr }, params: [["LOG_BITMASK", 176126, 0.5]] }), env)
+    assert.equal(no_rat.have_data, false)
+    assert.deepEqual(no_rat.warnings, ["Сообщения PIDR в логе есть, но параметров ATC_RAT_RLL_* в нём нет — без параметров регулятора данные PID не разбираются"])
+    // Только RATE, параметров нет: все три префикса
+    const rate = pid_msg(time_us([[0, 5]]), { RDes: zero, R: zero, ROut: zero, PDes: zero, P: zero, POut: zero, YDes: zero, Y: zero, YOut: zero })
+    const rate_no_rat = load_pid(fake_log({ messages: { RATE: rate }, params: [["LOG_BITMASK", 176126, 0.5]] }), env)
+    assert.deepEqual(rate_no_rat.warnings, ["Сообщения RATE в логе есть, но параметров ATC_RAT_RLL_*, ATC_RAT_PIT_*, ATC_RAT_YAW_* в нём нет — " +
+                                            "без параметров регулятора данные PID не разбираются"])
+    // Сообщения крена, а параметры только тангажа — у оси с сообщениями параметров нет
+    const pitch_only = base_params().filter((p) => p[0].startsWith("ATC_RAT_PIT_"))
+    const mismatch = load_pid(fake_log({ messages: { PIDR: pidr }, params: pitch_only }), env)
+    assert.equal(mismatch.have_data, false)
+    assert.match(mismatch.warnings[0], /^Сообщения PIDR в логе есть, но параметров ATC_RAT_RLL_\* в нём нет/)
+    // Сообщения и параметры есть, но данных меньше 64 отсчётов — пакетов нет
+    const short = pid_msg(time_us([[0, 0.1]]), { Tar: zero, Act: zero, Err: zero, P: zero, I: zero, D: zero, FF: zero })
+    const few = load_pid(fake_log({ messages: { PIDR: short }, params: base_params() }), env)
+    assert.equal(few.have_data, false)
+    assert.equal(few.warnings.length, 1)
+    assert.match(few.warnings[0], /^Сообщения PID или RATE и параметры ATC_RAT_\* в логе есть, но нет ни одного пакета данных/)
+})
+
 test('load_pid: лог без PARM — сообщение в warnings вместо TypeError (дефект upstream 6)', () => {
     // В upstream log.get('PARM') без сообщений PARM не определён, и разбор падал на PARM.Name
     const zero = () => 0

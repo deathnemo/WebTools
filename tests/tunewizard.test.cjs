@@ -301,7 +301,10 @@ test('run_checks: не Copter — fail, итог fail', () => {
 
 test('run_checks: PID — ok / warn (только RATE) / fail', () => {
     const only_rate = good_info({ messages: { ...good_info().messages, pid: false, rate: true } })
-    assert.equal(by_id(checks.run_checks(only_rate, good_params, good_vibe), 'pid_log').status, 'warn')
+    const rate_check = by_id(checks.run_checks(only_rate, good_params, good_vibe), 'pid_log')
+    assert.equal(rate_check.status, 'warn')
+    // Что по RATE остаётся на шаге 4: только отклик и правила
+    assert.equal(rate_check.text, 'Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила')
     const none = good_info({ messages: { ...good_info().messages, pid: false, rate: false } })
     assert.equal(by_id(checks.run_checks(none, good_params, good_vibe), 'pid_log').status, 'fail')
 })
@@ -321,7 +324,7 @@ test('run_checks: PID с частотой ниже 100 Гц — warn с сове
     // Только RATE с частотой 10 Гц: warn, в тексте — и нехватка компонент, и частота; совет — оба бита
     const rate_only = pid_check(pid_rate_log(10, ['RATE']))
     assert.equal(rate_only.status, 'warn')
-    assert.match(rate_only.text, /только RATE/)
+    assert.match(rate_only.text, /только RATE: по нему на шаге 4 нет компонент P\/I\/D, шума D и прогноза — только отклик и правила/)
     assert.match(rate_only.text, /RATE .*10 Гц/)
     assert.match(rate_only.fix, /PID \(12\)/)
     assert.match(rate_only.fix, /ATTITUDE_FAST \(0\)/)

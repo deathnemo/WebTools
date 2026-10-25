@@ -69,6 +69,8 @@
 - `npm run test:tunewizard-compare` — тот же лог в FilterReview и в мастере, поэлементное сравнение спектров, спектрограммы, бодэ и оценки «после».
 - `npm run test:tunewizard-pid-compare` — тот же лог в PIDReview и в мастере, поэлементное сравнение отклика на ступеньку (окна, среднее, ось времени) и отчёт, чем от мастера отличается исходный PIDReview.
 
+Браузерный тест (`test:tunewizard`) и оба теста сравнения (`test:tunewizard-compare`, `test:tunewizard-pid-compare`) запускают браузер через Playwright: нужен либо `CHROME_PATH` — путь к chrome.exe (например, `CHROME_PATH="C:/Users/<пользователь>/AppData/Local/Google/Chrome/Application/chrome.exe" npm run test:tunewizard`), либо установленный Chromium Playwright (`npx playwright install chromium`). Ещё им нужны лог (`TUNEWIZARD_LOG` или первый `.bin` в `TuneWizard/logs/`; без лога тест пропускается) и python для локального сервера страниц.
+
 ### Готовность
 
 - Этап 1: каркас, тема, шаг 0 (лог и проверки) — готово.

@@ -21,8 +21,9 @@
 //
 // Нужны глобалы страницы: core/pid.js (load_pid, pid_run_batch_fft, pid_step_response, PID_STEP_MIN_RATE),
 // core/pidtune.js (pidtune_*), core/lowpass.js (lowpass_log_values — фильтры лога для ключа расчёта),
-// core/candidates.js (candidate_key), core/spectrum.js (find_instance), core/gyro.js (find_start_index,
-// find_end_index), Libraries/Array_Math.js (complex_abs, array_add), Libraries/Param_Helpers.js (param_to_string),
+// core/candidates.js (candidate_key), core/filters.js (notch_param_names), core/spectrum.js (find_instance),
+// core/gyro.js (find_start_index, find_end_index), Libraries/Array_Math.js (complex_abs, array_add),
+// Libraries/Param_Helpers.js (param_to_string),
 // plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape),
 // steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
@@ -203,14 +204,16 @@ function step4_init() {
 }
 
 // Новый лог или ошибка загрузки: забыть данные PID, расчёт, выбор и форму, графики — пустые. Окно FFT шага остаётся
-// (как окно шага 0)
+// (как окно шага 0); недосчитанная правка его поля забывается — поле снова показывает действующее окно
 function step4_reset() {
     Object.assign(step4, {
         pid: null, fft_window: null, axis: "roll", set_choice: { roll: null, pitch: null, yaw: null }, calc: null, key: null, gyro_ref: null,
         error: null, selected: { roll: null, pitch: null, yaw: null }, form_built: false, filled: false, edit_form: null, edit_postponed: false,
+        window_pending: false,
     })
     clearTimeout(step4.edit_timer)
     step4.edit_timer = null
+    document.getElementById("step4_window").value = step4.window
     document.getElementById("pidf_form").innerHTML = ""
     for (const id of ["verdict4", "step4_tabs", "step4_panel"]) {
         document.getElementById(id).hidden = true
@@ -553,6 +556,22 @@ function step4_source(axis) {
     return axes[i + 3]?.have_data ? axes[i + 3] : null
 }
 
+// Почему у оси нет данных PID (step4_source — null), как причина load_pid: нет сообщений PIDx и RATE; сообщения есть,
+// но нет параметров ATC_RAT_* оси (ось без параметров не грузится); или нет пакетов данных
+function step4_no_source_text(axis) {
+    const i = step4_pid_index[axis]
+    const types = state.log?.messageTypes ?? {}
+    const logged = [step4.pid?.axes?.[i], step4.pid?.axes?.[i + 3]].filter((a) => (a != null) && (a.id[0] in types))
+    if (logged.length == 0) {
+        return "Нет данных PID оси (сообщений " + ["PIDR", "PIDP", "PIDY"][i] + " и RATE)"
+    }
+    const ids = logged.map((a) => a.id[0]).join(", ")
+    if (logged.every((a) => a.params.prefix == null)) {
+        return "Нет данных PID оси: сообщения " + ids + " есть, но параметров " + logged[0].prefixes[0] + "* в логе нет"
+    }
+    return "Нет данных PID оси: сообщения " + ids + " есть, но ни одного пакета не короче 64 отсчётов без разрыва"
+}
+
 // Наборы параметров оси source в интервале range, у которых есть данные: [{ index, start, end }] по времени
 function step4_sets_in(source, range) {
     const list = []
@@ -692,7 +711,8 @@ function step4_compute() {
     step4.error = null
     const pid = step4.pid
     if (!pid.have_data) {
-        step4.error = "Нет данных PID: " + ((pid.warnings.length > 0) ? pid.warnings.join("; ") : "в логе нет сообщений PIDR/PIDP/PIDY и RATE")
+        // Причину называет load_pid: нет сообщений PID/RATE, нет параметров ATC_RAT_* или PARM, нет пакетов данных
+        step4.error = "Нет данных PID: " + ((pid.warnings.length > 0) ? pid.warnings.join("; ") : "сообщения PID и RATE не разобраны")
         return
     }
 
@@ -1277,7 +1297,7 @@ function step4_render_axis_verdict() {
     switch (res.status) {
         case "nodata":
             status = "fail"
-            parts.push((res.source == null) ? "Нет данных PID оси (сообщений " + ["PIDR", "PIDP", "PIDY"][step4_pid_index[axis]] + " и RATE) — предложений нет."
+            parts.push((res.source == null) ? step4_no_source_text(axis) + " — предложений нет."
                 : "В интервале нет данных оси: ни одного пакета лога PID не короче " + rules.window + " отсчётов в наборе — предложений нет.")
             break
         case "low_rate":
@@ -1627,22 +1647,26 @@ function step4_render_candidates() {
                    ((axis === "yaw") ? "I = " + pidtune_rules.yaw_i_ratio + "·P" : "I = P") + ") и D ±" + Math.round(pidtune_rules.gain_step * 100) +
                    " % (при D > 0); «Свой» — после правки формы. Изменённые значения — " + pidtune_rules.round_digits + " значащие цифры.")
         if (res.predict_ok) {
-            const changes = []
+            // Фильтры гироскопа — только то, что входит в поправку (load_filters): INS_GYRO_FILTER и параметры notch.
+            // SCHED_LOOP_RATE из values_from_log фильтры не меняет; принятый на шаге 2 — заметка step4_render_warnings
+            const gyro_changes = []
             const gyro_old = step4_gyro_old()
             const gyro_new = step4_gyro_new()
             if (gyro_old.INS_GYRO_FILTER !== gyro_new.INS_GYRO_FILTER) {
-                changes.push("INS_GYRO_FILTER " + step_value_text(gyro_old.INS_GYRO_FILTER) + " → " + step_value_text(gyro_new.INS_GYRO_FILTER) + " Гц")
+                gyro_changes.push("INS_GYRO_FILTER " + step_value_text(gyro_old.INS_GYRO_FILTER) + " → " + step_value_text(gyro_new.INS_GYRO_FILTER) + " Гц")
             }
-            if (Object.keys(gyro_old).some((name) => (name !== "INS_GYRO_FILTER") && (gyro_old[name] !== gyro_new[name]))) {
-                changes.push("notch шага 2")
+            const notch_names = notch_param_names().flatMap((names) => Object.values(names))
+            if (notch_names.some((name) => gyro_old[name] !== gyro_new[name])) {
+                gyro_changes.push("notch шага 2")
             }
+            const changes = [...gyro_changes]
             for (const [key, title] of [["flte", "FLTE"], ["fltd", "FLTD"]]) {
                 if (Math.fround(res.filters_new[key]) !== Math.fround(res.filters_log[key])) {
                     changes.push(prefix + title + " " + step_value_text(res.filters_log[key]) + " → " + step_value_text(res.filters_new[key]) + " Гц")
                 }
             }
             lines.push("Прогноз — из измеренной характеристики «цель → факт» (КИХ) и модели регулятора AC_PID; разница — к измеренному логу. " +
-                       ((changes.length > 0) ? "В прогнозе учтены фильтры шагов 2–3: " + changes.join(", ") + ((res.ratio == null && step4_gyro_changed()) ? " (кроме фильтров гироскопа — поправки нет)" : "") +
+                       ((changes.length > 0) ? "В прогнозе учтены фильтры шагов 2–3: " + changes.join(", ") + ((res.ratio == null && (gyro_changes.length > 0)) ? " (кроме фильтров гироскопа — поправки нет)" : "") +
                         " — поэтому прогноз «Как в логе» может отличаться от лога. " : "Фильтры шагов 2–3 совпадают с логом. ") +
                        "Отметки: запас фазы ниже " + pidtune_rules.pm_min_deg + "° или хуже лога больше чем на " + pidtune_rules.pm_max_drop_deg + "°, перерегулирование " +
                        "выше " + pidtune_rules.overshoot_pred_max_pct + " %, неустойчивый или неполный прогноз; у неустойчивого «—» вместо метрик. Отметки выбор не блокируют.")

@@ -52,7 +52,7 @@ function run_checks(info, params, vibe) {
     } else if (m.pid) {
         add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
     } else if (m.rate) {
-        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: на шаге 4 не будет компонент P/I/D" + (slow ? "; " + slow_text : ""),
+        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила" + (slow ? "; " + slow_text : ""),
             slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
     } else {
         add("pid_log", "fail", "Сообщения PID", "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
