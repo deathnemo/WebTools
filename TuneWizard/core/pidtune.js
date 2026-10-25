@@ -11,6 +11,12 @@
 // наименьших квадратов во времени, отклик на ступеньку — её накопленная сумма. На синтетике в условиях как у лога:
 // перерегулирование ±1.6 пункта, нарастание ±5 мс, не зависит от окна FFT; при редких манёврах и сильной турбулентности
 // без углового контура — до −2.8 пункта и +5.6 мс, при частых резких манёврах (тестовый полёт) — доли пункта и мс.
+// Пройденные проверки качества ±5 мс не гарантируют: угловой контур + турбулентность + активный пилот дают (а) 0.029,
+// (б) 0.033, (в) 1.48 — все проходят, а ошибка нарастания −6.8 мс (ревью задачи 5).
+//
+// Производительность: решение Холецким — O(M³) по числу отводов M = fir_length_s·частота, суммы — O(отсчёты·M), на ось
+// четыре решения (отклик, (а), две половины (б)). При 400 Гц ≈ 80 мс на ось, при 800 Гц ≈ 0.4 с, при 1 кГц ≈ 0.7 с
+// (110 с отобранных данных). Если понадобится быстрее — Левинсон — Дурбин для тёплицевой системы, O(M²).
 //
 // Измерение ненадёжно, если не пройдена любая из трёх проверок (pidtune_quality). Главная беда обычного полёта: в Acro
 // при ATC_RATE_FF_ENAB = 0 цель скорости выше 4–5 Гц формирует угловой контур из самого факта, и «цель → факт» там
@@ -29,7 +35,9 @@ const pidtune_rules = {
     fir_ridge_check: 1e-2,        // второй λ для проверки (а) [наше]
     step_length_s: 0.5,           // длина отклика, с [PIDReview]
     plateau_s: [0.3, 0.5],        // плато — среднее на этом отрезке, с [наше]
-    min_windows: 10,              // меньше окон с целью больше 20 °/с — «мало манёвров» [наше]
+    // Меньше секунд отобранных данных (время, покрытое отобранными окнами, без повторов) — «мало манёвров» [наше].
+    // Порог в окнах не годился: 10 окон по 512 с шагом 32 — около 2 с данных при КИХ на 1 с (399 отводов)
+    min_data_s: 10,
     // Ниже — отклик не считается (без ATTITUDE_FAST в LOG_BITMASK PID пишутся с 10 Гц): тот же порог, что у отклика
     // PIDReview и проверки шага 0, — 100 Гц с запасом 1 % (99 Гц) [наше, дефект upstream 5, core/pid.js]
     min_log_rate_hz: PID_STEP_MIN_RATE * PID_STEP_RATE_MARGIN,
@@ -59,7 +67,10 @@ const pidtune_rules = {
     d_noise_threshold: -40,
     acro_mode: 1,                 // номер режима ACRO [код, ArduCopter/mode.h, Mode::Number]
     acro_rate_only_bit: 2,        // ACRO_OPTIONS бит 1 «Rate Loop Only» [код, ArduCopter/mode.h, AcroOptions; Parameters.cpp]
-    i_scale_since: [4, 7],        // с Copter 4.7.0 в Rate Loop Only I × ATC_ANG_*_P [код, mode_acro.cpp, scale_I_to_angle_P]
+    // С Copter 4.7.0 в Rate Loop Only I × ATC_ANG_*_P [код, mode_acro.cpp, scale_I_to_angle_P; коммит 497039d36e
+    // 01.10.2025, первый тег Copter-4.7.0, в 4.6.x нет]. По версии 4.7 масштаб получат и беты 4.7, собранные до
+    // 01.10.2025, где его ещё не было
+    i_scale_since: [4, 7],
 }
 
 // Оси шага: префикс параметров регулятора скорости и P углового контура (масштаб I в Rate Loop Only)
@@ -81,10 +92,11 @@ const pidtune_mode_names = {
 // (элемент load_pid().axes), где max |цель·Ханн| ≥ target_min_dps (как TarMax в PIDReview) и центр окна (время
 // отсчёта начало + window/2) в range = [t0, t1]; перекрывающиеся окна сливаются в непрерывный отрезок, пакеты —
 // не сливаются (между ними разрыв лога).
-// → { segments: [{ start_time, tar, act (Float64Array, °/с), starts: [начала окон внутри отрезка] }], rate_hz, windows }
-// rate_hz — средняя частота пакетов набора не короче окна (как average_sample_rate у pid_run_batch_fft, но по набору),
-// windows — число отобранных окон. null — нет данных: ось без данных, нет набора или ни одного пакета не короче окна.
-// Окон нет — segments пуст, windows 0
+// → { segments: [{ start_time, tar, act (Float64Array, °/с), starts: [начала окон внутри отрезка] }], rate_hz, windows,
+// data_s } — rate_hz — средняя частота пакетов набора не короче окна (как average_sample_rate у pid_run_batch_fft, но по
+// набору), windows — число отобранных окон, data_s — секунды отобранных данных (отсчёты отрезков / rate_hz: время,
+// покрытое окнами, без повторов). null — нет данных: ось без данных, нет набора или ни одного пакета не короче окна.
+// Окон нет — segments пуст, windows и data_s 0
 function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
     if ((axis == null) || !axis.have_data || (axis.sets == null) || (axis.sets[set_index] == null)) {
         return null
@@ -96,6 +108,7 @@ function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
     let rate_sum = 0
     let rate_count = 0
     let windows = 0
+    let samples = 0
     for (const batch of axis.sets[set_index]) {
         const n = batch.Tar.length
         if (n < N) {
@@ -107,7 +120,7 @@ function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
         // Окна, прошедшие отбор
         const starts = []
         for (let s = 0; s + N <= n; s += hop) {
-            const center = batch.time[s + N / 2]
+            const center = batch.time[s + (N >> 1)]
             if ((center < range[0]) || (center > range[1])) {
                 continue
             }
@@ -138,13 +151,15 @@ function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
             segments.push({ start_time: batch.time[begin], tar: Float64Array.from(batch.Tar.slice(begin, end)),
                             act: Float64Array.from(batch.Act.slice(begin, end)), starts: own })
             windows += own.length
+            samples += end - begin
             i = j
         }
     }
     if (rate_count == 0) {
         return null
     }
-    return { segments: segments, rate_hz: rate_sum / rate_count, windows: windows }
+    const rate_hz = rate_sum / rate_count
+    return { segments: segments, rate_hz: rate_hz, windows: windows, data_s: samples / rate_hz }
 }
 
 // Суммы по отрезкам для нормальных уравнений КИХ из taps отводов (метод автокорреляции: за краями отрезка — нули,
@@ -222,14 +237,14 @@ function pidtune_toeplitz_solve(col, rhs, diag_add) {
 // КИХ по готовым суммам corr (pidtune_correlations) с гребнем ridge·c_rr(0) и h[0] = 0: прямой связи «цель → факт»
 // в контуре нет (без запрета на смешанных режимах y(0) = 0.09–0.21 [наше, исследование]). Решаются уравнения для
 // h[1…taps − 1]: та же тёплицева матрица без первой строки и столбца.
-// → { h, time, step, windows, samples, ridge, corr } | null (нет энергии цели)
+// → { h, time, step, windows, samples, ridge, corr } | null (нет энергии цели или в данных нечисловое — NaN, Infinity)
 function pidtune_fir_from(corr, rate_hz, ridge, rules = pidtune_rules) {
     const taps = corr.crr.length
-    if ((taps < 2) || !(corr.crr[0] > 0)) {
+    if ((taps < 2) || !(corr.crr[0] > 0) || !Number.isFinite(corr.crr[0])) {
         return null
     }
     const x = pidtune_toeplitz_solve(corr.crr.subarray(0, taps - 1), corr.cry.subarray(1), ridge * corr.crr[0])
-    if (x == null) {
+    if ((x == null) || !x.every(Number.isFinite)) {
         return null
     }
     const h = new Float64Array(taps)
@@ -252,7 +267,8 @@ function pidtune_fir_from(corr, rate_hz, ridge, rules = pidtune_rules) {
 // корреляции «факт ← цель», суммированным по отрезкам (Тёплиц, разложение Холецкого), гребень ridge·c_rr(0), h[0] = 0;
 // длина fir_length_s·rate_hz отводов.
 // → { h, time (с), step (накопленная сумма h на 0…step_length_s), windows, samples, ridge, corr (суммы — для
-// pidtune_quality) } | null — нет отрезков, частота ниже min_log_rate_hz (отклик не считается) или нет энергии цели
+// pidtune_quality) } | null — нет отрезков, частота ниже min_log_rate_hz (отклик не считается), нет энергии цели или
+// в цели или факте нечисловое (NaN, Infinity)
 function pidtune_fir(segments, rate_hz, ridge = pidtune_rules.fir_ridge, rules = pidtune_rules) {
     if ((segments == null) || (segments.length == 0) || !(rate_hz >= rules.min_log_rate_hz)) {
         return null
@@ -364,11 +380,17 @@ function pidtune_outer_peak(segments, rate_hz, rules = pidtune_rules) {
 //       выше порога — режим или объект менялись в интервале, или данных мало;
 //   (в) outer — наибольшее |T_H1| («цель → факт» по усреднённым спектрам отобранных окон) на outer_band_hz; выше
 //       порога — цель формирует угловой контур из факта (Acro без Rate Loop Only при ATC_RATE_FF_ENAB = 0).
-// fir — pidtune_fir(segments, rate_hz) (его суммы используются для (а)).
-// → { ok, checks: { ridge: { value, ok }, halves: { value, ok }, outer: { value, freq_hz, ok } }, reasons: [текст] };
-// значение, которое не посчитать (нет отклика или окон), — null и проверка не пройдена
-function pidtune_quality(segments, rate_hz, fir, rules = pidtune_rules) {
+//       В Acro «Rate Loop Only» (options.rate_only, pidtune_log_mode) не применяется: угловой контур там выключен
+//       устройством режима, а резонансный пик плохо задемпфированного контура скорости (ζ меньше ≈ 0.36 — пик |T|
+//       выше 1.5 на 4–12 Гц) проверка приняла бы за угловой контур [наше, ревью задачи 5: rate-only, перерегулирование
+//       правды 35.6 %, КИХ 35.5 %, (а) и (б) 0.003 и 0.002, а (в) 1.57]. Значение считается и показывается, в итог
+//       не входит: ok null, applied false, note — почему.
+// fir — pidtune_fir(segments, rate_hz) (его суммы используются для (а)); options = { rate_only }.
+// → { ok, checks: { ridge: { value, ok }, halves: { value, ok }, outer: { value, freq_hz, ok, applied, note } },
+// reasons: [текст] }; значение, которое не посчитать (нет отклика или окон), — null и проверка не пройдена
+function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_rules) {
     const q = rules.quality
+    const outer_applied = !options.rate_only
     let ridge = null
     let halves = null
     let outer = null
@@ -388,7 +410,9 @@ function pidtune_quality(segments, rate_hz, fir, rules = pidtune_rules) {
     const checks = {
         ridge: { value: ridge, ok: (ridge != null) && (ridge <= q.ridge_rms_max) },
         halves: { value: halves, ok: (halves != null) && (halves <= q.halves_rms_max) },
-        outer: { value: outer?.value ?? null, freq_hz: outer?.freq_hz ?? null, ok: (outer != null) && (outer.value <= q.outer_t_max) },
+        outer: { value: outer?.value ?? null, freq_hz: outer?.freq_hz ?? null,
+                 ok: outer_applied ? ((outer != null) && (outer.value <= q.outer_t_max)) : null, applied: outer_applied,
+                 note: outer_applied ? null : "не применяется (Rate Loop Only): угловой контур выключен устройством режима" },
     }
     const reasons = []
     if (fir == null) {
@@ -404,14 +428,14 @@ function pidtune_quality(segments, rate_hz, fir, rules = pidtune_rules) {
                 : "половины данных дают разный отклик: RMS " + halves.toFixed(3) + " (порог " + q.halves_rms_max + ") — режим " +
                   "или объект менялись в интервале, или данных мало")
         }
-        if (!checks.outer.ok) {
+        if (outer_applied && !checks.outer.ok) {
             reasons.push((outer == null) ? "подпись углового контура не посчиталась"
                 : "подпись углового контура: |цель → факт| до " + outer.value.toFixed(2) + " на " + outer.freq_hz.toFixed(1) + " Гц (порог " +
                   q.outer_t_max + " на " + q.outer_band_hz[0] + "–" + q.outer_band_hz[1] + " Гц) — цель скорости формирует угловой " +
                   "контур (Acro без «Rate Loop Only»)")
         }
     }
-    return { ok: checks.ridge.ok && checks.halves.ok && checks.outer.ok, checks: checks, reasons: reasons }
+    return { ok: checks.ridge.ok && checks.halves.ok && (!outer_applied || checks.outer.ok), checks: checks, reasons: reasons }
 }
 
 // Время первого достижения уровня level снизу (линейная интерполяция) на отсчётах 0…n − 1; null — не достиг
@@ -506,11 +530,20 @@ function pidtune_oscillation(time, y, i0, n, min_pp) {
 //         включал бы её половину. На 0.2 с плато три пересечения дают колебания от ≈ 7.5 Гц; более медленные —
 //         основной переходный процесс, его ловит перерегулирование.
 // «±5 % от плато», а не от 1 [наше]: при P = I интегратор дотягивает медленно (y(0.5) = 0.95…1.04), и «от 1»
-// переключалось бы случайно. → { rise_s, overshoot_pct, peak, plateau, settle_s, osc, bandwidth_hz }
+// переключалось бы случайно. → { rise_s, overshoot_pct, peak, plateau, settle_s, osc, bandwidth_hz } | null — в отклике
+// нечисловое (NaN, Infinity) или отсчётов нет
 function pidtune_step_metrics(time, step, rules = pidtune_rules) {
     let n = 0
     while ((n < time.length) && (time[n] <= rules.step_length_s + 1e-9)) {
         n++
+    }
+    for (let i = 0; i < n; i++) {
+        if (!Number.isFinite(step[i])) {
+            return null
+        }
+    }
+    if (n == 0) {
+        return null
     }
     const t10 = pidtune_crossing(time, step, n, 0.1)
     const t90 = pidtune_crossing(time, step, n, 0.9)
@@ -564,10 +597,12 @@ function pidtune_step_metrics(time, step, rules = pidtune_rules) {
 
 // Шум D-составляющей выше d_noise_hz по спектру D набора set_index оси axis за интервал range. Нужен
 // pid_run_batch_fft(axis.sets, window): окна набора (set.FFT.D, время set.FFT.time) от последнего до t0 до первого
-// после t1, как у спектра PIDReview. Мощность окна — Σ |X|²/2 по бинам выше d_noise_hz (на частоте Найквиста — |X|²;
-// амплитуды run_fft — одна сторона, 2/N), с поправкой окна на энергию; среднее по окнам.
-// → { dB: 10·log10(мощность) — дБ от СКО (1 — полный диапазон выхода), rms, over: dB > d_noise_threshold, windows }
-// | null — нет FFT или D (ось RATE). D = 0 (выключен) — rms 0, dB −Infinity
+// после t1, как у спектра PIDReview (find_start_index, find_end_index); поэтому интервал целиком вне данных даёт одно
+// окно — ближайшее к нему. Мощность окна — Σ |X|²/2 по бинам выше d_noise_hz (на частоте Найквиста — |X|²; амплитуды
+// run_fft — одна сторона, 2/N), с поправкой окна на энергию; среднее по окнам.
+// → { dB: 10·log10(мощность) — дБ от СКО (1 — полный диапазон выхода), rms, off, over: dB > d_noise_threshold, windows }
+// | null — нет FFT или D (ось RATE). Вся D-составляющая в окнах нулевая (D выключен) — dB null, rms 0, off true,
+// over false
 function pidtune_d_noise(axis, set_index, range, rules = pidtune_rules) {
     if ((axis == null) || !axis.have_data || (axis.sets == null) || (axis.sets.FFT == null)) {
         return null
@@ -583,10 +618,14 @@ function pidtune_d_noise(axis, set_index, range, rules = pidtune_rules) {
     const end = find_end_index(set.FFT.time, range) + 1
     let sum = 0
     let count = 0
+    let any = false
     for (let k = start; k < end; k++) {
         const X = set.FFT.D[k]
         let power = 0
         for (let j = 0; j <= last_bin; j++) {
+            if ((X[0][j] != 0) || (X[1][j] != 0)) {
+                any = true
+            }
             if (bins[j] <= rules.d_noise_hz) {
                 continue
             }
@@ -599,9 +638,14 @@ function pidtune_d_noise(axis, set_index, range, rules = pidtune_rules) {
     if (count == 0) {
         return null
     }
+    if (!any) {
+        return { dB: null, rms: 0, off: true, over: false, windows: count }
+    }
+    // Мощности выше d_noise_hz ровно нет (D есть, но только на низких частотах) — dB null, порог не превышен
     const power = sum / count * energy ** 2
-    const dB = 10 * Math.log10(power)
-    return { dB: dB, rms: Math.sqrt(power), over: (rules.d_noise_threshold != null) && (dB > rules.d_noise_threshold), windows: count }
+    const dB = (power > 0) ? 10 * Math.log10(power) : null
+    return { dB: dB, rms: Math.sqrt(power), off: false, over: (dB != null) && (rules.d_noise_threshold != null) && (dB > rules.d_noise_threshold),
+             windows: count }
 }
 
 // Значения параметра name, действующие в интервале range (params — log_params из core/log.js): значение на начало
@@ -719,39 +763,51 @@ function pidtune_log_mode(log, params, version, range, axis_name, rate_hz, rules
 }
 
 // Изменение P на sign·gain_step с пределами AutoTune; I по правилу: крен и тангаж — I = P [wiki, Manual tuning:
-// «Each time the P term is changed set the I term equal to the P term»], рыскание — I = yaw_i_ratio·P [код]
+// «Each time the P term is changed set the I term equal to the P term»], рыскание — I = yaw_i_ratio·P [код].
+// Предел, не давший сдвинуть P в нужную сторону (P уже на пределе) или развернувший изменение (P 2.5 и «P +10 %» →
+// 2.0, P 0.005 и «P −10 %» → 0.01), — без изменений, limited true
 function pidtune_change_p(gains, axis, sign, reason, rules) {
     const target = gains.P * (1 + sign * rules.gain_step)
     const P = Math.min(rules.p_max, Math.max(rules.p_min, target))
     const limited = (P != target)
     const limit_text = "предел AutoTune P " + rules.p_min + "…" + rules.p_max
-    if (P == gains.P) {
-        return { change: null, reason: reason + "; P уже на пределе (" + limit_text + ")", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true }
+    if ((P - gains.P) * sign <= 0) {
+        const why = (P == gains.P) ? "P уже на пределе"
+            : "P = " + gains.P + " вне пределов: ограничение " + ((sign > 0) ? "уменьшило бы P вместо увеличения" : "увеличило бы P вместо уменьшения")
+        return { change: null, reason: reason + "; " + why + " (" + limit_text + ") — без изменений", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true }
     }
     const I = (axis == "yaw") ? rules.yaw_i_ratio * P : P
     return { change: (sign > 0) ? "P+" : "P-", reason: reason + (limited ? " (ограничено: " + limit_text + ")" : ""),
              values: { P: P, I: I, D: gains.D }, limited: limited }
 }
 
-// Предложение по правилам (раздел 3 дизайна) — только при надёжном измерении (quality.ok) и не меньше min_windows окон;
-// одно изменение на коэффициент за проход, правила по порядку:
+// Предложение по правилам (раздел 3 дизайна). Без изменений (change null, причина), по порядку: P или I нет в логе
+// (не число); отобранных данных меньше min_data_s — «мало манёвров» (раньше качества: на коротком полёте причина —
+// данные, а не проверки); измерение ненадёжно (quality.ok ложно); нет метрик. Иначе одно изменение на коэффициент за
+// проход, правила по порядку:
 //   1. остаточные колебания (metrics.osc): частота выше osc_band_ratio полос отклика (bandwidth_hz) — «высокие» → D −10 %,
 //      не выше — «низкие» → P −10 %. При D = 0 (или D нет) правило для D не применяется — дальше по правилам;
 //   2. перерегулирование больше overshoot_high_pct → P −10 %;
 //   3. перерегулирование меньше overshoot_low_pct и колебаний нет — отклик вялый → P +10 % [wiki: P поднимают
 //      до раскачки, затем отступают; пороги — наше];
 //   4. иначе — менять нечего.
-// gains = { P, I, D } лога, axis — "roll", "pitch", "yaw", metrics — pidtune_step_metrics, windows — число окон,
-// quality — pidtune_quality. Пределы AutoTune: P в p_min…p_max, D ≤ d_max.
+// gains = { P, I, D } лога, axis — "roll", "pitch", "yaw", metrics — pidtune_step_metrics, data_s — секунды отобранных
+// данных (pidtune_segments), quality — pidtune_quality. Пределы AutoTune: P в p_min…p_max, D ≤ d_max
+// (pidtune_change_p).
 // → { change: "P-" | "P+" | "D-" | null, reason, values: { P, I, D }, limited } (change null — values как в логе)
-function pidtune_rule(gains, axis, metrics, windows, quality, rules = pidtune_rules) {
+function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rules) {
     const keep = (reason, limited = false) => ({ change: null, reason: reason, values: { P: gains.P, I: gains.I, D: gains.D }, limited: limited })
+    const missing = ["P", "I"].filter((k) => !Number.isFinite(gains[k])).map((k) => pidtune_axes[axis].rate + k)
+    if (missing.length > 0) {
+        return keep("нет коэффициента в логе: " + missing.join(", "))
+    }
+    if (!(data_s >= rules.min_data_s)) {
+        return keep("мало манёвров: отобранных данных (окна с целью больше " + rules.target_min_dps + " °/с) " + (data_s ?? 0).toFixed(1) +
+                    " с, нужно не меньше " + rules.min_data_s + " с")
+    }
     if ((quality == null) || !quality.ok) {
         const why = ((quality != null) && (quality.reasons.length > 0)) ? ": " + quality.reasons.join("; ") : ""
         return keep("измерение ненадёжно" + why + " — правил нет")
-    }
-    if (!(windows >= rules.min_windows)) {
-        return keep("мало манёвров: окон с целью больше " + rules.target_min_dps + " °/с — " + (windows ?? 0) + ", нужно не меньше " + rules.min_windows)
     }
     if (metrics == null) {
         return keep("нет отклика")

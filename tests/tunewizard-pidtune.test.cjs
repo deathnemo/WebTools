@@ -385,16 +385,39 @@ test('pidtune_step_metrics: колебания на плато — размах 
     close_to(m.osc.amplitude_pp, 0.16, 0.01, 'размах')
 })
 
+test('pidtune_step_metrics: не дошёл до 0.9 — нарастания и полосы нет; не установился — установления нет; нечисловое — null', () => {
+    const slow = sampled((t) => 0.8 * (1 - Math.exp(-t / 0.03)))
+    const m = pidtune_step_metrics(slow.time, slow.y)
+    assert.equal(m.rise_s, null)
+    assert.equal(m.bandwidth_hz, null)
+    assert.equal(m.overshoot_pct, 0)
+    close_to(m.plateau, 0.8, 1e-4, 'плато')
+    // Линейный рост до 1 к 0.5 с: плато 0.8, в конце 1.0 — вне ±5 % от плато
+    const ramp = sampled((t) => 2 * t)
+    const r = pidtune_step_metrics(ramp.time, ramp.y)
+    close_to(r.plateau, 0.8, 1e-9, 'плато')
+    assert.equal(r.settle_s, null)
+    assert.equal(r.osc, null, 'дрейф — не колебания')
+    // NaN и Infinity в отклике — метрик нет, правило — «нет отклика»
+    for (const bad of [NaN, Infinity]) {
+        const y = slow.y.slice()
+        y[50] = bad
+        assert.equal(pidtune_step_metrics(slow.time, y), null, String(bad))
+    }
+    assert.equal(pidtune_step_metrics([], []), null)
+    assert.equal(pidtune_rule({ P: 0.1, I: 0.1, D: 0.003 }, 'roll', null, 100, { ok: true, checks: {}, reasons: [] }).reason, 'нет отклика')
+})
+
 // ---------------------------------------------------------------- КИХ МНК и проверки качества
 
-test('pidtune_fir: rate-only контур (угловой контур выключен) — отклик КИХ совпадает с правдой, h[0] = 0, проверки (а)–(в) проходят', () => {
+test('pidtune_fir: rate-only контур (угловой контур выключен) — отклик КИХ совпадает с правдой, проверки (а)–(в) проходят', () => {
     for (const plant of [PLANT_NORMAL, PLANT_FAST, PLANT_SLOW]) {
         const sim = simulate(G0, { dur_s: 150, seed: 3, plant })
         const { seg, fir, quality, metrics } = measure(sim, G0)
         const truth = pidtune_step_metrics(...Object.values(truth_step(G0, plant)))
         const what = 'K ' + plant.K
-        assert.ok(seg.windows >= pidtune_rules.min_windows, what + ': окон ' + seg.windows)
-        assert.equal(fir.h[0], 0, what + ': прямой связи «цель → факт» нет')
+        assert.ok(seg.data_s >= pidtune_rules.min_data_s, what + ': данных ' + seg.data_s + ' с')
+        assert.ok(seg.windows > 0)
         assert.equal(fir.h.length, RATE_HZ * pidtune_rules.fir_length_s, what + ': длина КИХ 1 с')
         assert.equal(fir.step.length, RATE_HZ * pidtune_rules.step_length_s + 1, what + ': отклик 0…0.5 с')
         close_to(metrics.overshoot_pct, truth.overshoot_pct, 2, what + ': перерегулирование, %')
@@ -422,6 +445,115 @@ test('pidtune_quality: объект сменился в середине дан�
     assert.ok(quality.reasons.some((r) => r.includes('половины данных')), quality.reasons.join('; '))
 })
 
+// Отрезок из белого шума цели (°/с) длиной n и факт act(tar, k)
+function noise_segment(n, seed, act) {
+    const g = gauss(lcg(seed))
+    const tar = Float64Array.from({ length: n }, () => 50 * g())
+    return { start_time: 0, tar, act: Float64Array.from({ length: n }, (_, k) => act(tar, k)), starts: [0] }
+}
+
+test('pidtune_fir: h[0] = 0 — факт = цель со сдвигом на отсчёт даёт h[1] ≈ 1, как и решение без ограничения; без сдвига h[0] остаётся 0', () => {
+    const segs = [noise_segment(3000, 11, (tar, k) => (k > 0) ? tar[k - 1] : 0), noise_segment(3000, 12, (tar, k) => (k > 0) ? tar[k - 1] : 0)]
+    const fir = pidtune_fir(segs, RATE_HZ)
+    assert.equal(fir.h[0], 0)
+    close_to(fir.h[1], 1, 0.005, 'h[1]')
+    let rest = 0
+    for (let i = 2; i < fir.h.length; i++) rest = Math.max(rest, Math.abs(fir.h[i]))
+    assert.ok(rest < 0.01, 'остальные отводы ' + rest)
+    // Решение той же системы без ограничения (все отводы свободны) — то же: ограничение ничего не искажает, если прямой
+    // связи в данных нет
+    const corr = fir.corr
+    const free = pidtune_toeplitz_solve(corr.crr, corr.cry, pidtune_rules.fir_ridge * corr.crr[0])
+    assert.ok(Math.abs(free[0]) < 0.01, 'h[0] без ограничения ' + free[0])
+    for (let i = 1; i < fir.h.length; i++) {
+        assert.ok(Math.abs(free[i] - fir.h[i]) < 0.01, 'отвод ' + i + ': ' + free[i] + ' против ' + fir.h[i])
+    }
+    // Факт = цель без сдвига: без ограничения h[0] ≈ 1, с ограничением h[0] = 0
+    const same = pidtune_fir([noise_segment(3000, 13, (tar, k) => tar[k])], RATE_HZ)
+    assert.equal(same.h[0], 0)
+    const same_free = pidtune_toeplitz_solve(same.corr.crr, same.corr.cry, pidtune_rules.fir_ridge * same.corr.crr[0])
+    close_to(same_free[0], 1, 0.005, 'h[0] без ограничения')
+})
+
+test('pidtune_quality: Rate Loop Only — подпись углового контура не применяется: перерегулирование 40 % — качество есть, P −10 %', () => {
+    const plant = { K: 380, tau: 0.05, delay_s: 0.012 }
+    const truth = pidtune_step_metrics(...Object.values(truth_step(G0, plant)))
+    assert.ok((truth.overshoot_pct > 35) && (truth.overshoot_pct < 45), 'правда ' + truth.overshoot_pct)
+    const { seg, fir, metrics } = measure(simulate(G0, { dur_s: 150, seed: 3, plant }), G0)
+    close_to(metrics.overshoot_pct, truth.overshoot_pct, 2, 'перерегулирование КИХ')
+    // Резонансный пик |T| плохо задемпфированного контура выше 1.5 — без режима проверка (в) приняла бы его за угловой контур
+    const plain = pidtune_quality(seg.segments, seg.rate_hz, fir)
+    assert.equal(plain.checks.outer.ok, false)
+    assert.ok(plain.checks.outer.value > pidtune_rules.quality.outer_t_max)
+    assert.equal(plain.checks.ridge.ok && plain.checks.halves.ok, true)
+    // В Rate Loop Only — не применяется, в итог не входит
+    const quality = pidtune_quality(seg.segments, seg.rate_hz, fir, { rate_only: true })
+    assert.equal(quality.ok, true, quality.reasons.join('; '))
+    assert.deepEqual(quality.reasons, [])
+    assert.equal(quality.checks.outer.applied, false)
+    assert.equal(quality.checks.outer.ok, null)
+    assert.ok(quality.checks.outer.note.includes('Rate Loop Only'))
+    close_to(quality.checks.outer.value, plain.checks.outer.value, 1e-12, 'значение (в) всё равно считается')
+    const rule = pidtune_rule({ P: G0.kp, I: G0.ki, D: G0.kd }, 'roll', metrics, seg.data_s, quality)
+    assert.equal(rule.change, 'P-', rule.reason)
+    // Тот же объект в Acro без Rate Loop Only (угловой контур формирует цель) — по-прежнему ненадёжно
+    const outer = measure(simulate(G0, { dur_s: 150, seed: 5, plant, outer: true, pause: 0.9, turb_dps2: 2000 }), G0)
+    assert.equal(outer.quality.ok, false)
+    assert.equal(outer.quality.checks.outer.applied, true)
+    assert.equal(outer.quality.checks.outer.ok, false)
+})
+
+test('pidtune_quality: не пройдена только (а) — измерение ненадёжно, причина одна', () => {
+    const { seg, fir } = measure(simulate(G0, { dur_s: 150, seed: 3, plant: PLANT_NORMAL }), G0)
+    const strict = { ...pidtune_rules, quality: { ...pidtune_rules.quality, ridge_rms_max: 1e-5 } }
+    const quality = pidtune_quality(seg.segments, seg.rate_hz, fir, {}, strict)
+    assert.deepEqual([quality.checks.ridge.ok, quality.checks.halves.ok, quality.checks.outer.ok], [false, true, true])
+    assert.equal(quality.ok, false)
+    assert.equal(quality.reasons.length, 1)
+    assert.ok(quality.reasons[0].includes('регуляризации'), quality.reasons[0])
+    assert.ok(pidtune_rule({ P: G0.kp, I: G0.ki, D: G0.kd }, 'roll', null, seg.data_s, quality).reason.startsWith('измерение ненадёжно'))
+})
+
+test('pidtune_rule: короткий полёт (6 с) — «мало манёвров», а не причина качества', () => {
+    const { seg, quality, metrics } = measure(simulate(G0, { dur_s: 6, seed: 3, plant: PLANT_NORMAL }), G0)
+    assert.ok(seg.windows > 10, 'окон ' + seg.windows + ' — по старому порогу в окнах данных хватило бы')
+    assert.ok(seg.data_s < pidtune_rules.min_data_s, 'данных ' + seg.data_s + ' с')
+    const rule = pidtune_rule({ P: G0.kp, I: G0.ki, D: G0.kd }, 'roll', metrics, seg.data_s, quality)
+    assert.equal(rule.change, null)
+    assert.ok(rule.reason.startsWith('мало манёвров'), rule.reason)
+})
+
+test('pidtune_halves: пополам по отсчётам — отрезок на середине режется, окна — только целиком в своей части', () => {
+    const seg = (n, starts) => ({ start_time: 0, tar: Float64Array.from({ length: n }, (_, k) => k), act: new Float64Array(n), starts })
+    // 1000 + 600 + 400: середина ровно на границе
+    const [a1, a2] = pidtune_halves([seg(1000, [0, 500]), seg(600, [0]), seg(400, [0])], 100)
+    assert.deepEqual(a1.map((s) => s.tar.length), [1000])
+    assert.deepEqual(a2.map((s) => s.tar.length), [600, 400])
+    // 700 + 700 + 600: второй отрезок режется на 300 + 400
+    const [b1, b2] = pidtune_halves([seg(700, [0]), seg(700, [0, 150, 250, 300, 500]), seg(600, [0])], 100)
+    assert.deepEqual(b1.map((s) => s.tar.length), [700, 300])
+    assert.deepEqual(b2.map((s) => s.tar.length), [400, 600])
+    assert.deepEqual(b1[1].starts, [0, 150], 'окна [s, s + 100) до разреза')
+    assert.deepEqual(b2[0].starts, [0, 200], 'окна после разреза, сдвинутые к началу части')
+    assert.equal(b2[0].tar[0], 300, 'вторая часть начинается с отсчёта разреза')
+    // Пусто — две пустые половины
+    assert.deepEqual(pidtune_halves([], 100), [[], []])
+})
+
+test('pidtune_outer_peak: факт = g·цель — наибольшее |T| = g в полосе 4–12 Гц; без окон и с пустой полосой — null', () => {
+    for (const g of [2, 1.2]) {
+        const seg = noise_segment(4000, 21, (tar, k) => g * tar[k])
+        seg.starts = [0, 512, 1024, 2000, 3000]
+        const peak = pidtune_outer_peak([seg], RATE_HZ)
+        close_to(peak.value, g, 1e-9, '|T|')
+        assert.ok((peak.freq_hz >= 4) && (peak.freq_hz <= 12), 'частота ' + peak.freq_hz)
+    }
+    const seg = noise_segment(1000, 22, (tar, k) => tar[k])
+    assert.equal(pidtune_outer_peak([{ ...seg, starts: [] }], RATE_HZ), null, 'нет окон')
+    const empty = { ...pidtune_rules, quality: { ...pidtune_rules.quality, outer_band_hz: [300, 400] } }
+    assert.equal(pidtune_outer_peak([seg], RATE_HZ, empty), null, 'полоса выше Найквиста')
+})
+
 test('pidtune_fir: нет отрезков, частота лога ниже 99 Гц или цель нулевая — null', () => {
     const seg = { tar: Float64Array.from({ length: 1000 }, (_, k) => 50 * Math.sin(k / 30)), act: new Float64Array(1000), starts: [0] }
     assert.equal(pidtune_fir([], RATE_HZ), null)
@@ -429,6 +561,12 @@ test('pidtune_fir: нет отрезков, частота лога ниже 99 
     assert.equal(pidtune_fir([seg], 98.9), null, 'ниже PID_STEP_MIN_RATE·PID_STEP_RATE_MARGIN отклик не считается')
     assert.ok(pidtune_fir([seg], 99) != null, 'ровно на пороге — считается')
     assert.equal(pidtune_fir([{ ...seg, tar: new Float64Array(1000) }], RATE_HZ), null, 'нет энергии цели')
+    // Нечисловое в факте или цели — null, а не NaN в отклике
+    for (const [key, bad] of [['act', NaN], ['act', Infinity], ['tar', NaN], ['tar', -Infinity]]) {
+        const broken = { ...seg, [key]: Float64Array.from(seg[key]) }
+        broken[key][500] = bad
+        assert.equal(pidtune_fir([seg, broken], RATE_HZ), null, key + ' = ' + bad)
+    }
     // Без отклика проверки не проходят, причина названа
     const quality = pidtune_quality([], RATE_HZ, null)
     assert.equal(quality.ok, false)
@@ -472,8 +610,11 @@ test('pidtune_segments: окна 512 с шагом 32, |цель·Ханн| ≥ 
     const part = pidtune_segments(axis, 0, [7, 100])
     assert.equal(part.windows, count([7, 100]))
     assert.ok(part.windows < all.windows)
+    // Секунды отобранных данных — время отрезка без повторов перекрытий
+    close_to(all.data_s, seg.tar.length / RATE_HZ, 1e-9, 'секунды данных')
     const outside = pidtune_segments(axis, 0, [20, 30])
     assert.equal(outside.windows, 0, 'вне данных — окон нет, но данные и частота есть')
+    assert.equal(outside.data_s, 0)
     assert.deepEqual(outside.segments, [])
     // Нет данных — null
     assert.equal(pidtune_segments(axis, 5, [0, 100]), null)
@@ -514,10 +655,17 @@ test('pidtune_d_noise: СКО D выше 50 Гц по спектру D — си�
         assert.equal(noise.over, over, 'выше порога ' + pidtune_rules.d_noise_threshold + ' дБ: ' + noise.dB)
         assert.ok(noise.windows > 0)
     }
-    // D выключен — нулевой шум, порог не превышен
+    // D выключен (вся D-составляющая нулевая) — off, дБ нет, порог не превышен
     const off = pidtune_d_noise(d_axis(() => 0), 0, [12, 28])
-    assert.equal(off.rms, 0)
-    assert.equal(off.over, false)
+    assert.deepEqual({ dB: off.dB, rms: off.rms, off: off.off, over: off.over }, { dB: null, rms: 0, off: true, over: false })
+    // D только на низких частотах — не выключен, но мощности выше 50 Гц нет: дБ нет, порог не превышен
+    const low = pidtune_d_noise(d_axis(() => 0.01), 0, [12, 28])
+    assert.equal(low.off, false)
+    assert.equal(low.over, false)
+    assert.ok((low.dB == null) || (low.dB < -120), 'постоянная D (выше 50 Гц — только погрешность округления): ' + low.dB)
+    // Интервал целиком вне данных — одно окно, ближайшее (как спектр PIDReview)
+    const outside = pidtune_d_noise(d_axis((k) => 0.01 * Math.sin(2 * Math.PI * 80 * k * DT)), 0, [100, 120])
+    assert.equal(outside.windows, 1)
 })
 
 test('pidtune_d_noise: нет FFT, набора или D (ось RATE) — null', () => {
@@ -590,6 +738,13 @@ test('pidtune_log_mode: масштаб I в Rate Loop Only — ATC_ANG_*_P ос�
     assert.equal(unknown.i_scale, 1)
     assert.equal(unknown.firmware, null)
     assert.equal(unknown.warnings.length, 1)
+    // 4.7, Rate Loop Only, но ATC_ANG_*_P нет в логе — масштаб 1 и предупреждение с именем параметра
+    const no_ang = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ['ATC_ANG_RLL_P', 4.5, 1]])
+    const pitch = pidtune_log_mode(no_ang, log_params(no_ang), V47, [20, 80], 'pitch', RATE_HZ)
+    assert.equal(pitch.i_scale, 1)
+    assert.equal(pitch.warnings.length, 1)
+    assert.ok(pitch.warnings[0].includes('ATC_ANG_PIT_P'), pitch.warnings[0])
+    assert.deepEqual(pidtune_log_mode(no_ang, log_params(no_ang), V47, [20, 80], 'roll', RATE_HZ).warnings, [])
 })
 
 test('pidtune_log_mode: смешение режимов в интервале; режим на начало интервала — последний до него', () => {
@@ -697,6 +852,28 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.equal(d.change, 'D-')
     assert.equal(d.values.D, 0.2)
     assert.equal(d.limited, true)
+    // P вне пределов, и предел развернул бы изменение: P 2.5 и «P +10 %» → 2.0, P 0.005 и «P −10 %» → 0.01 — без изменений
+    for (const [P, os, word] of [[2.5, 2, 'уменьшило'], [0.005, 30, 'увеличило']]) {
+        const r = pidtune_rule({ P, I: P, D: 0.001 }, 'roll', metrics_of(os), 10, QUALITY_OK)
+        assert.equal(r.change, null, 'P ' + P)
+        assert.equal(r.limited, true)
+        assert.deepEqual(r.values, { P, I: P, D: 0.001 })
+        assert.ok(r.reason.includes('вне пределов') && r.reason.includes(word), r.reason)
+    }
+    // P вне пределов, но в ту же сторону — изменение с пределом: P 2.5 и «P −10 %» → 2.0
+    const back = pidtune_rule({ P: 2.5, I: 2.5, D: 0.001 }, 'roll', metrics_of(30), 10, QUALITY_OK)
+    assert.equal(back.change, 'P-')
+    assert.equal(back.values.P, 2.0)
+    assert.equal(back.limited, true)
+})
+
+test('pidtune_rule: коэффициента нет в логе (не число) — без изменений', () => {
+    for (const [gains, axis, name] of [[{ P: null, I: 0.1, D: 0.003 }, 'roll', 'ATC_RAT_RLL_P'], [{ P: 0.2, I: NaN, D: 0 }, 'yaw', 'ATC_RAT_YAW_I'],
+                                       [{ P: undefined, I: 0.1, D: 0 }, 'pitch', 'ATC_RAT_PIT_P']]) {
+        const r = pidtune_rule(gains, axis, metrics_of(30), 100, QUALITY_OK)
+        assert.equal(r.change, null)
+        assert.ok(r.reason.startsWith('нет коэффициента в логе') && r.reason.includes(name), r.reason)
+    }
 })
 
 test('pidtune_rule: D = 0 — правило для D не применяется: дальше по правилам или без изменений', () => {
@@ -711,7 +888,7 @@ test('pidtune_rule: D = 0 — правило для D не применяетс�
     assert.equal(pidtune_rule({ P: 0.1, I: 0.1, D: null }, 'roll', metrics_of(10, high), 10, QUALITY_OK).change, null)
 })
 
-test('pidtune_rule: ненадёжное измерение и мало окон — change null с причиной', () => {
+test('pidtune_rule: ненадёжное измерение и мало данных — change null с причиной; сначала данные, потом качество', () => {
     const bad = { ok: false, checks: {}, reasons: ['подпись углового контура: …'] }
     const r = pidtune_rule(ROLL, 'roll', metrics_of(30), 100, bad)
     assert.equal(r.change, null)
@@ -719,9 +896,11 @@ test('pidtune_rule: ненадёжное измерение и мало окон
     assert.ok(r.reason.includes('подпись углового контура'), r.reason)
     assert.deepEqual(r.values, ROLL)
     assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(30), 100, null).change, null)
-    const few = pidtune_rule(ROLL, 'roll', metrics_of(30), 9, QUALITY_OK)
+    const few = pidtune_rule(ROLL, 'roll', metrics_of(30), 9.99, QUALITY_OK)
     assert.equal(few.change, null)
     assert.ok(few.reason.startsWith('мало манёвров'), few.reason)
-    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(30), 10, QUALITY_OK).change, 'P-', 'ровно 10 окон — достаточно')
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(30), 10, QUALITY_OK).change, 'P-', 'ровно 10 с данных — достаточно')
+    assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), 5, bad).reason.startsWith('мало манёвров'), 'мало данных важнее качества')
+    assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), null, bad).reason.startsWith('мало манёвров'))
     assert.equal(pidtune_rule(ROLL, 'roll', null, 100, QUALITY_OK).change, null)
 })
