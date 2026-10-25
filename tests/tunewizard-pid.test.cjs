@@ -582,8 +582,11 @@ test('pid_step_response: null без FFT, без данных оси и для �
 
 test('pid_step_response: частота лога ниже 100 Гц — null и причина в warnings вместо нулевого отклика (дефект upstream 5)', () => {
     // LOG_BITMASK без ATTITUDE_FAST: Copter пишет PIDx и RATE с частотой 10 Гц. В upstream шумовая оценка «до 25 Гц»
-    // при частоте не выше 50 Гц накрывала весь спектр (отклик нулевой), при 50–100 Гц выходила за массив спектра
-    for (const hz of [10, 40, 80, 125]) {
+    // при частоте не выше 50 Гц накрывала весь спектр (отклик нулевой), при 50–100 Гц выходила за массив спектра.
+    // Порог — 100 Гц с запасом 1 %: 98.97 Гц не считается (в тексте «98.9», без округления вверх), а лог около 100 Гц
+    // (99.95 и 100.05 — дрожание меток) считается всегда
+    assert.equal(PID_STEP_MIN_RATE * PID_STEP_RATE_MARGIN, 99)
+    for (const hz of [10, 40, 80, 98.97, 99.95, 100.05, 125]) {
         const n = 300 * hz
         const tar = step_target(n, 1, 50, 200)
         const act = first_order(tar, TAU, 2)
@@ -595,11 +598,11 @@ test('pid_step_response: частота лога ниже 100 Гц — null и �
         assert.ok(Math.abs(axis.sets.FFT.average_sample_rate - hz) / hz < 1e-3, 'частота ' + axis.sets.FFT.average_sample_rate)
         const warnings = []
         const res = pid_step_response(axis, 0, [0, 1e9], warnings)
-        if (hz < 100) {
+        if (hz < 99) {
             assert.equal(res, null, hz + ' Гц: отклик не считается')
             assert.equal(warnings.length, 1, hz + ' Гц: причина')
             assert.match(warnings[0], /ATTITUDE_FAST/)
-            assert.match(warnings[0], new RegExp('PIDR: частота лога ' + hz + '\\.0 Гц'))
+            assert.match(warnings[0], new RegExp('PIDR: частота лога ' + String(Math.floor(hz * 10) / 10).replace('.', '\\.') + ' Гц ниже 100 Гц'))
             // Без массива предупреждений — тот же null
             assert.equal(pid_step_response(axis, 0, [0, 1e9]), null)
         } else {
@@ -608,4 +611,11 @@ test('pid_step_response: частота лога ниже 100 Гц — null и �
             assert.deepEqual(warnings, [])
         }
     }
+})
+
+test('порог частоты отклика: core/checks.js (шаг 0) повторяет PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN из core/pid.js', () => {
+    // checks.js грузится раньше pid.js и под Node без него, поэтому числа повторены — здесь их связь
+    const { check_rules } = require('../TuneWizard/core/checks.js')
+    assert.equal(check_rules.pid_log_min_rate_hz, PID_STEP_MIN_RATE)
+    assert.equal(check_rules.pid_log_rate_margin, PID_STEP_RATE_MARGIN)
 })

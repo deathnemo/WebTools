@@ -35,7 +35,7 @@
 //                                                     окнами, mean — трасса «среднее»; null, если окон нет (нет данных оси,
 //                                                     FFT, набора или годных окон) — upstream в этих случаях не рисовал
 //                                                     новое среднее (и мог оставить прежнее, см. дефект 7) — или частота
-//                                                     лога ниже PID_STEP_MIN_RATE (дефект 5, причина — в warnings)
+//                                                     лога ниже PID_STEP_MIN_RATE·PID_STEP_RATE_MARGIN (дефект 5, причина — в warnings)
 //   PID_log_messages.have_data в redraw_step        → axis.have_data
 //   alert(msg)                                      → warnings.push(msg)
 //
@@ -81,8 +81,9 @@
 //      1e8 на всех частотах и отклик нулевой (синтетика 40 Гц — 0.000). Касается и PIDR/PIDP/PIDY, и RATE: без бита
 //      ATTITUDE_FAST в LOG_BITMASK Copter пишет их с частотой 10 Гц (ArduCopter/Copter.cpp, ten_hz_logging_loop),
 //      а заводская маска — без ATTITUDE_FAST (ArduCopter/config.h, DEFAULT_LOG_BITMASK: ATTITUDE_MED и PID). Теперь при
-//      средней частоте ниже PID_STEP_MIN_RATE (100 Гц) pid_step_response возвращает null, а причину с советом включить
-//      ATTITUDE_FAST пишет в warnings; шаг 0 предупреждает заранее (проверка pid_log, core/checks.js).
+//      средней частоте ниже PID_STEP_MIN_RATE·PID_STEP_RATE_MARGIN (100 Гц с запасом 1 %, 99 Гц) pid_step_response
+//      возвращает null, а причину с советом включить ATTITUDE_FAST пишет в warnings; шаг 0 предупреждает заранее
+//      (проверка pid_log, core/checks.js).
 //   6. Исправлен в задаче 4. load (1511, 1525): без сообщений PARM в логе log.get('PARM') не определён, и загрузка падала
 //      с TypeError. Теперь — have_data ложно и сообщение в warnings.
 //   7. Не воспроизводится, только запись — интерфейс upstream: redraw_step очищает лишь трассы «все» (1046–1049),
@@ -110,8 +111,16 @@ const PID_FFT_KEYS = ["Tar", "Act", "Err", "P", "I", "D", "FF", "DFF", "Out"]
 
 // Наименьшая средняя частота лога PID для отклика на ступеньку, Гц (исправление дефекта upstream 5): шумовая оценка
 // метода — гауссиана до 25 Гц, ей нужна четверть частоты не ниже 25 Гц. Ниже — обычно потому, что в LOG_BITMASK нет
-// ATTITUDE_FAST (бит 0): тогда Copter пишет PIDx и RATE с частотой 10 Гц (ArduCopter/Copter.cpp, ten_hz_logging_loop)
+// ATTITUDE_FAST (бит 0): тогда Copter пишет PIDx и RATE с частотой 10 Гц (ArduCopter/Copter.cpp, ten_hz_logging_loop).
+// Это же значение — check_rules.pid_log_min_rate_hz в core/checks.js (шаг 0): checks.js грузится раньше этого файла
+// и под Node без него, поэтому число повторено там, а равенство закреплено тестом (tests/tunewizard-pid.test.cjs)
 const PID_STEP_MIN_RATE = 100
+// Запас порога: отклик не считается при частоте ниже PID_STEP_MIN_RATE·PID_STEP_RATE_MARGIN (99 Гц). Ровно 100 Гц
+// иначе то принимались бы, то нет — от дрожания меток. Строгий предел метода — 100·N/(N + 4) Гц при окне N (первый бин
+// выше 25 Гц не дальше N/4 + 1: при окне 512 — 99.2 Гц, 256 — 98.5, 1024 — 99.6); в полосе до 1.6 Гц ниже него оценка
+// выходит за спектр на 1–3 бина, и отклик меняется не больше чем на 2.3e-4 (синтетика 98.4–99.5 Гц, окна 256–1024).
+// Значение повторено в core/checks.js (check_rules.pid_log_rate_margin) и закреплено тем же тестом
+const PID_STEP_RATE_MARGIN = 0.99
 
 // FFT по всем пакетам всех наборов оси. data_set — axis.sets (массив наборов параметров, у набора — массив пакетов).
 // Пишет FFT каждого набора (set.FFT = { time, Tar, Act, …: комплексные спектры окон }) и общее
@@ -216,7 +225,7 @@ function pid_run_batch_fft(data_set, window_size) {
 // винеровская оценка H = S_yx / (S_xx + шум), шум — гауссиана с частотой 25 Гц; обратное FFT и интегрирование;
 // первые 0.5 с. Окна интервала — по сквозному времени окон набора: от последнего окна до t0 до первого после t1.
 // → { time: [с], windows: [[отклик окна]], mean: [средний отклик] }; null, если окон нет или средняя частота лога ниже
-// PID_STEP_MIN_RATE — тогда причина пишется в warnings (массив; необязателен).
+// PID_STEP_MIN_RATE·PID_STEP_RATE_MARGIN — тогда причина пишется в warnings (массив; необязателен).
 function pid_step_response(PID, set_index, range, warnings = null) {
     if ((PID == null) || !PID.have_data) {
         return null
@@ -236,13 +245,14 @@ function pid_step_response(PID, set_index, range, warnings = null) {
 
     // исправление дефекта upstream 5 (PIDReview 1082–1100): при частоте ниже 100 Гц (25 Гц выше четверти частоты)
     // шумовая оценка выходит за спектр, а при частоте не выше 50 Гц накрывает его целиком — upstream молча давал
-    // искажённый или нулевой отклик. Здесь отклик не считается: null и причина
+    // искажённый или нулевой отклик. Здесь отклик не считается: null и причина. Порог — с запасом PID_STEP_RATE_MARGIN,
+    // частота в тексте — с отбрасыванием, а не округлением вверх (98.97 Гц — «98.9», а не «99.0»)
     const rate = PID.sets.FFT.average_sample_rate
-    if (rate < PID_STEP_MIN_RATE) {
+    if (rate < PID_STEP_MIN_RATE * PID_STEP_RATE_MARGIN) {
         if (warnings != null) {
-            warnings.push(PID.id.join(" ") + ": частота лога " + rate.toFixed(1) + " Гц ниже " + PID_STEP_MIN_RATE + " Гц — отклик на ступеньку " +
-                          "не считается (шумовой оценке метода нужна частота не ниже 100 Гц). Включите ATTITUDE_FAST (бит 0) в LOG_BITMASK: " +
-                          "без него Copter пишет PID и RATE с частотой 10 Гц")
+            warnings.push(PID.id.join(" ") + ": частота лога " + (Math.floor(rate * 10) / 10) + " Гц ниже " + PID_STEP_MIN_RATE + " Гц — отклик " +
+                          "на ступеньку не считается (шумовой оценке метода нужна частота не ниже " + PID_STEP_MIN_RATE + " Гц). " +
+                          "Включите ATTITUDE_FAST (бит 0) в LOG_BITMASK: без него Copter пишет PID и RATE с частотой 10 Гц")
         }
         return null
     }

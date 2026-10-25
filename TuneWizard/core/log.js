@@ -52,11 +52,13 @@ function log_messages(log) {
     }
 }
 
-// Частота сообщения name (без экземпляров), Гц — по среднему интервалу TimeUS без пропусков: интервалы длиннее 5 медиан
-// (на земле лог может не писаться; порог — как у разрыва пакетов PIDReview) не учитываются, дрожание меток усредняется.
-// null, если сообщения нет или в нём меньше двух отсчётов
+// Частота сообщения name, Гц — отсчётов в секунду без пропусков: средний интервал TimeUS, где интервалы длиннее 5 медиан
+// (на земле лог может не писаться; порог — как у разрыва пакетов PIDReview) не учитываются. Дрожание меток усредняется,
+// а частые выпадения по 2–3 интервала частоту снижают — как и частоты пакетов шага 4 (пакеты режутся по тому же порогу).
+// null, если сообщения нет, в нём меньше двух отсчётов или оно пишется по экземплярам (как VIBE: get() на нём падает,
+// а частота по экземплярам здесь не нужна — PIDR/PIDP/PIDY и RATE экземпляров не имеют)
 function log_message_rate(log, name) {
-    if (!(name in log.messageTypes)) {
+    if (!(name in log.messageTypes) || (log.messageTypes[name].instances != null)) {
         return null
     }
     const t = log.get(name, "TimeUS")
@@ -236,15 +238,9 @@ function log_info(log, version = {}) {
     const throttle = throttle_series(log)
     const window = throttle ? throttle_window(throttle.time, throttle.throttle) : null
 
-    // Частота лога PID: PIDR, без него — RATE (проверка pid_log: ниже 100 Гц отклик шага 4 не считается)
-    let pid_log_rate = null
-    for (const name of ["PIDR", "RATE"]) {
-        const hz = log_message_rate(log, name)
-        if (hz != null) {
-            pid_log_rate = { message: name, hz }
-            break
-        }
-    }
+    // Частоты сообщений PIDR и RATE, Гц или null — для проверки pid_log (ниже порога отклик шага 4 не считается);
+    // какую брать, решает проверка по той же ветке, что и наличие сообщений (messages.pid или messages.rate)
+    const pid_log_rates = { PIDR: log_message_rate(log, "PIDR"), RATE: log_message_rate(log, "RATE") }
 
     return {
         vehicle: BUILD_NAMES[version.build_type] ?? null,
@@ -256,7 +252,7 @@ function log_info(log, version = {}) {
         time_end,
         duration_s,
         messages,
-        pid_log_rate,
+        pid_log_rates,
         throttle_source: throttle?.source ?? null,
         flight: window ? {
             start: window.start,

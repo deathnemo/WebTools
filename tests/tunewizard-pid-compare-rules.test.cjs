@@ -113,6 +113,25 @@ test('upstream_plan PIDReview: только дефект 2 — пакеты на
     assert.equal(run(odd).plan.checks[0].ok, false)
 })
 
+test('upstream_plan PIDReview: последний пакет лога ровно 64 отсчёта — у upstream его нет, это тоже дефект 2', () => {
+    // Участки 0–30 с и 64 отсчёта с 31 с до конца лога: upstream режет последний пакет при count = 63 < 64 и отбрасывает
+    const time = sample_times([[0, 30], [31, 31 + 64 / 400]], 400)
+    const ctx = context({ time })
+    assert.deepEqual(ctx.up.info.PIDR.batches[0].map((b) => b.length), [11999])
+    assert.deepEqual(ctx.fix.info.PIDR.batches[0].map((b) => b.length), [12000, 64])
+    const { plan, failed } = run(ctx)
+    assert.deepEqual(failed, [])
+    assert.match(plan.checks[0].line, /11999 → 12000 отсчётов, плюс пакет 64 отсчётов в конце лога/)
+    // 65 отсчётов — пакет есть у обоих: у upstream 63, у мастера 65 (+2, до конца лога)
+    const ctx65 = context({ time: sample_times([[0, 30], [31, 31 + 65 / 400]], 400) })
+    assert.deepEqual(ctx65.up.info.PIDR.batches[0].map((b) => b.length), [11999, 63])
+    assert.deepEqual(run(ctx65).failed, [])
+    // «Лишний» пакет другой длины механизмом дефекта 2 не объясняется
+    const odd = context({ time })
+    odd.fix.info.PIDR.batches[0][1].length = 70
+    assert.equal(run(odd).plan.checks[0].ok, false)
+})
+
 test('upstream_plan PIDReview: дефект 2 сменил длину отклика и бин шумовой оценки — только отчёт с причиной', () => {
     // Как у RATE лога пользователя: исправленная частота 399.99999999999994 Гц — бин 33 вместо 32, длина 200 вместо 201
     const ctx = context({ time: sample_times([[0, 30]], 400), len: 200, up_len: 201, lpf: 33, up_lpf: 32 })

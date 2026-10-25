@@ -14,7 +14,10 @@ const check_rules = {
     log_bitmask_attitude_fast: 0,   // номер бита ATTITUDE_FAST [код, MASK_LOG_ATTITUDE_FAST]; без него Copter пишет PIDx
                                     // и RATE с 10 Гц [код, ArduCopter/Copter.cpp ten_hz_logging_loop, rate_thread.cpp medium_logging_rate]
     pid_log_min_rate_hz: 100,       // Гц: ниже отклик на ступеньку шага 4 не считается [наше; шумовая оценка метода PIDReview —
-                                    // до 25 Гц, дефект upstream 5, PID_STEP_MIN_RATE в core/pid.js]
+                                    // до 25 Гц, дефект upstream 5]. То же, что PID_STEP_MIN_RATE в core/pid.js: этот файл
+                                    // грузится раньше и под Node без него, равенство закреплено в tests/tunewizard-pid.test.cjs
+    pid_log_rate_margin: 0.99,      // запас порога: warn ниже 100 · 0.99 = 99 Гц, чтобы лог ровно на 100 Гц не переключался
+                                    // от дрожания меток [наше; то же, что PID_STEP_RATE_MARGIN в core/pid.js, там и обоснование]
 }
 
 // info — из log_info, params — из log_params, vibe — из vibe_summary (может быть null).
@@ -32,21 +35,22 @@ function run_checks(info, params, vibe) {
         add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает только Copter", "Загрузите лог ArduCopter")
     }
 
-    // Сообщения PID и их частота (info.pid_log_rate — PIDR, без него RATE): ниже pid_log_min_rate_hz отклик на ступеньку
-    // шага 4 не считается
+    // Сообщения PID и их частота: ниже pid_log_min_rate_hz (с запасом pid_log_rate_margin) отклик на ступеньку шага 4
+    // не считается. Частота — того сообщения, по которому выбрана ветка: PIDR при messages.pid, иначе RATE
+    // (info.pid_log_rates; нет частоты — объявлено без отсчётов или старые сведения — проверки частоты нет)
     const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
-    const rate = info.pid_log_rate ?? null
-    const slow = (rate != null) && (rate.hz < r.pid_log_min_rate_hz)
-    // Частота словами: целые герцы, а ниже порога, но с округлением до него — с десятыми, чтобы 99.6 не читалось как «100»
-    const near = slow && (Math.round(rate.hz) >= r.pid_log_min_rate_hz)
-    const hz_text = (rate == null) ? "" : (near ? rate.hz.toFixed(1) : String(Math.round(rate.hz)))
-    const slow_text = slow ? rate.message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
+    const rate_message = m.pid ? "PIDR" : (m.rate ? "RATE" : null)
+    const hz = (rate_message != null) ? (info.pid_log_rates?.[rate_message] ?? null) : null
+    const slow = (hz != null) && (hz < r.pid_log_min_rate_hz * r.pid_log_rate_margin)
+    // Частота словами — с отбрасыванием до десятых, без округления вверх: 98.97 — «98.9», а не «99»
+    const hz_text = (hz == null) ? "" : String(Math.floor(hz * 10) / 10)
+    const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
     const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
     if (m.pid && slow) {
         add("pid_log", "warn", "Сообщения PID", "PIDR/PIDP/PIDY есть, но " + slow_text,
             "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
     } else if (m.pid) {
-        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((rate != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
+        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
     } else if (m.rate) {
         add("pid_log", "warn", "Сообщения PID", "Есть только RATE: на шаге 4 не будет компонент P/I/D" + (slow ? "; " + slow_text : ""),
             slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)

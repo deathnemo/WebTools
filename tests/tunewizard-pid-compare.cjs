@@ -30,19 +30,23 @@
 // Кроме того, мастер сравнивается с PIDReview как есть (upstream): печатается, какие массивы совпадают, какие отличаются,
 // насколько и почему. Какие исправления действуют на логе, определяется по данным самих PIDReview (наборы параметров,
 // пакеты, частота). Дефект 2 действует всегда: каждый пакет теряет последний отсчёт (пакет до конца лога — два), частота
-// завышена. Если действует только он, проверяется точно: пакеты PIDReview с исправлениями на отсчёт длиннее (на два —
-// пакет до конца лога) с тем же началом, а частота пакета PIDReview как есть равна формуле upstream по отсчётам пакета
-// с исправлениями; при тех же числе окон, длине отклика и бине шумовой оценки окна и среднее совпадают, ось времени —
-// ровно ×k, средняя частота FFT — ×1/k (k — отношение средних частот как есть и с исправлениями). Длина отклика
-// (ceil(0.5·частота)) и бин шумовой оценки (первый выше 25 Гц) могут смениться, если частота у порога: при 400 Гц
-// и окне 512 бин 32 — ровно 25 Гц. Тогда, как и при действующих дефектах 1, 3 или 5, — только отчёт (точность
-// обеспечивает сравнение с эталоном). Логика правил (upstream_plan, check_upstream) без браузера проверяется
-// в tests/tunewizard-pid-compare-rules.test.cjs.
+// завышена. Если действует только он, проверяется точно. Доказательство механизма — проверки plan.checks: пакеты
+// PIDReview с исправлениями на отсчёт длиннее (на два — пакет до конца лога; последний пакет лога ровно 64 отсчёта
+// у PIDReview как есть отсутствует) с тем же началом, а частота пакета PIDReview как есть равна формуле upstream
+// count / (time[j − 1] − time[batch_start]), посчитанной по отсчётам пакета с исправлениями. Правила массивов
+// к доказательству почти ничего не добавляют: окна и среднее при тех же числе окон, длине отклика и бине шумовой оценки
+// совпадают (отсчёты окон те же), а «время ×k, средняя частота ×1/k» почти тавтологично — k берётся из средних частот
+// тех же двух PIDReview, а частота мастера равна частоте эталона по точному сравнению; эти правила лишь показывают
+// величину отличия. Длина отклика (ceil(0.5·частота)) и бин шумовой оценки (первый выше 25 Гц) могут смениться, если
+// частота у порога: при 400 Гц и окне 512 бин 32 — ровно 25 Гц. Тогда, как и при действующих дефектах 1, 3 или 5, —
+// только отчёт (точность обеспечивает сравнение с эталоном). Логика правил (upstream_plan, check_upstream) без браузера
+// проверяется в tests/tunewizard-pid-compare-rules.test.cjs.
 // Нужны те же лог, браузер и python, что для tests/tunewizard-compare.cjs: CHROME_PATH — путь к chrome.exe (без него
 // Playwright берёт свой Chromium, если он установлен); без лога тест пропускается.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const vm = require('node:vm')
 const { spawn } = require('node:child_process')
 // Допуски и отклонение по общему началу — общие со сравнением с FilterReview
 const { tolerance, time_tolerance, deviation } = require('./tunewizard-compare.cjs')
@@ -54,9 +58,18 @@ const port = 8793
 const WINDOW_SIZE = 512
 // Оси PID: id сообщения = суффикс радио type_<id> PIDReview = id[0] оси load_pid
 const AXES = ['PIDR', 'PIDP', 'PIDY']
-// Шаг окон отклика — 1/16 окна (redraw_step); ниже этой частоты отклик не считается (дефект 5, PID_STEP_MIN_RATE)
+// Шаг окон отклика — 1/16 окна (redraw_step)
 const STEP_SPACING_DIVISOR = 16
-const MIN_RATE = 100
+// Ниже этой частоты отклик не считается (дефект 5) — тот же порог, что у мастера: PID_STEP_MIN_RATE с запасом
+// PID_STEP_RATE_MARGIN из core/pid.js (константы читаются из файла, а не повторяются здесь)
+const MIN_RATE = (() => {
+    const context = vm.createContext({})
+    vm.runInContext(fs.readFileSync(path.join(repo, 'TuneWizard', 'core', 'pid.js'), 'utf8'), context)
+    return vm.runInContext('PID_STEP_MIN_RATE * PID_STEP_RATE_MARGIN', context)
+})()
+// Последний пакет лога ровно такой длины upstream отбрасывал (count = длина − 1 < 64), а мастер оставляет — следствие
+// дефекта 2 (порог «не меньше 64 отсчётов», split_into_batches 1410)
+const MIN_BATCH = 64
 
 function find_log() {
     if (process.env.TUNEWIZARD_LOG) {
@@ -92,7 +105,7 @@ function wait_overlay(page) {
 // Устройство — как patch_filterreview в tests/tunewizard-compare.cjs: каждая замена обязана найтись заданное число раз,
 // иначе upstream изменился и тест надо пересмотреть
 function patch_pidreview(page) {
-    return page.evaluate(() => {
+    return page.evaluate((min_rate) => {
         const applied = []
         // Заменить в исходном тексте глобальной функции name; edits = [[шаблон, замена, сколько раз должен найтись]]
         const patch = (name, defect, edits) => {
@@ -150,10 +163,10 @@ function patch_pidreview(page) {
                 [/find_start_index\(fft_time\)/, 'Math.max(find_start_index(window_time) - batch_offset[i], 0)', 1],
                 [/find_end_index\(fft_time\)\+1/, 'Math.min(find_end_index(window_time)+1 - batch_offset[i], FFT_res.center.length)', 1],
             ]],
-            // Дефект 5 (PIDReview 1082–1100): при частоте ниже 100 Гц отклик не считается
+            // Дефект 5 (PIDReview 1082–1100): при частоте ниже порога мастера (min_rate — MIN_RATE) отклик не считается
             ['redraw_step', 5, [
                 [/(if \(valid_sets == 0\) \{\s*Plotly\.redraw\("step_plot"\)\s*return\s*\})/,
-                 '$1\n    if (PID.sets.FFT.average_sample_rate < 100) {\n        Plotly.redraw("step_plot")\n        return\n    }', 1],
+                 '$1\n    if (PID.sets.FFT.average_sample_rate < ' + min_rate + ') {\n        Plotly.redraw("step_plot")\n        return\n    }', 1],
             ]],
             // Дефект 6 (PIDReview 1511, 1525): без PARM — сообщение вместо TypeError
             ['load', 6, [
@@ -164,7 +177,7 @@ function patch_pidreview(page) {
             patch(name, defect, edits)
         }
         return applied
-    })
+    }, MIN_RATE)
 }
 
 // Сведения PIDReview об осях AXES для отчёта о расхождениях с PIDReview как есть: наборы параметров (границы),
@@ -473,12 +486,26 @@ function upstream_plan(ctx) {
         }
         const lengths = []
         const rates = []
-        let ok = (u.batches.length == f.batches.length)
-        u.batches.forEach((set, j) => {
-            const fset = f.batches[j]
-            if ((set == null) || (fset == null) || (set.length != fset.length)) {
-                ok &&= (set == null) && (fset == null)
-                return
+        // Последний пакет лога ровно MIN_BATCH отсчётов: upstream его отбрасывал (count = длина − 1), мастер оставляет —
+        // тоже дефект 2. Такой «лишний» пакет (последний у последнего набора, до конца лога) из сверки пар убирается
+        const fix_sets = f.batches.map((set) => (set == null) ? null : set.slice())
+        const last = fix_sets.length - 1
+        let extra = null
+        if ((last >= 0) && (fix_sets[last] != null) && (fix_sets[last].length > 0)) {
+            const tail = fix_sets[last]
+            const fb = tail[tail.length - 1]
+            if ((fb.length == MIN_BATCH) && (fb.t1 === f.end_time) && (tail.length == (u.batches[last]?.length ?? 0) + 1)) {
+                extra = tail.pop()
+            }
+        }
+        const sets_count = Math.max(u.batches.length, fix_sets.length)
+        let ok = true
+        for (let j = 0; j < sets_count; j++) {
+            const set = u.batches[j] ?? []
+            const fset = fix_sets[j] ?? []
+            if (set.length != fset.length) {
+                ok = false
+                continue
             }
             set.forEach((ub, i) => {
                 const fb = fset[i]
@@ -489,7 +516,10 @@ function upstream_plan(ctx) {
                 lengths.push(ub.length + ' → ' + fb.length + ' отсчётов' + ((expected == 2) ? ' (+2, до конца лога)' : ''))
                 rates.push(ub.rate.toFixed(7) + ' → ' + fb.rate.toFixed(7) + ' Гц')
             })
-        })
+        }
+        if (extra != null) {
+            lengths.push('плюс пакет ' + MIN_BATCH + ' отсчётов в конце лога (upstream отбрасывал: count = ' + (MIN_BATCH - 1) + ')')
+        }
         checks.push({ ok, line: id + ': пакеты ' + lengths.join(', ') + ', частота пакета ' + rates.join(', ') +
             (ok ? ' — частота PIDReview как есть равна формуле upstream по отсчётам пакета с исправлениями (дефект 2)' : ' — не объясняется дефектом 2') })
         if (!ok) {
@@ -513,7 +543,8 @@ function upstream_plan(ctx) {
     }
 
     // Правило массива: дефект 2 один и у оси ничего, кроме частоты, не сменилось — окна и среднее совпадают, время ×k,
-    // средняя частота ×1/k; иначе — отчёт
+    // средняя частота ×1/k; иначе — отчёт. «×k» и «×1/k» почти тавтологичны (k — из частот тех же PIDReview, частота
+    // мастера = частоте эталона) и показывают величину отличия; механизм дефекта 2 доказывают checks выше
     const why = {
         rate: 'дефект 2 — частота пакета по числу интервалов',
         time: 'дефект 2 — шаг времени отклика 1/частота',
