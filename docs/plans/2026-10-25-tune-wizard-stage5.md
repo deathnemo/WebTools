@@ -177,7 +177,7 @@
 
 **Что сделать:**
 
-- `step_inputs_key(n)` в `common.js` → `summary_inputs_key(n, { start: state.settings.start, end: state.settings.end, fft_key: step1.fft_key, steps: state.steps })`; парный `step_accepted_stale(n)` → `summary_stale(n, …)` с тем же контекстом.
+- `step_inputs_key(n)` в `common.js` → `summary_inputs_key(n, { start: state.settings.start, end: state.settings.end, fft_key: step1.fft_key, filter_version: state.spectrum.filter_version, steps: state.steps })` (версия фильтра — по ревью задачи 1); парный `step_accepted_stale(n)` → `summary_stale(n, …)` с тем же контекстом.
 - `step2_accept`, `step3_accept`, `step4_accept`: в объект `state.steps[n]` добавить `inputs: step_inputs_key(n)`. Ключ берётся **до** записи `state.steps[n]` (у шага `n` ключ от шагов `< n`, так что порядок не важен, но так понятнее).
 - `log_info`: `frame` — текст после «Frame: » из первого сообщения MSG, которое так начинается (`log.get("MSG", "Message")`; нет MSG или строки — `null`). В тесте — поддельный лог с MSG `["ArduCopter V4.6.3 (92b0cd78)", "Frame: QUAD/X_REV"]` → `"QUAD/X_REV"`; без строки — `null`.
 - Плитки шага 0 не меняются.
