@@ -178,7 +178,10 @@ function step1_init() {
         document.getElementById(id).addEventListener("change", () => step1_run(() => redraw_spectrogram1()))
     }
 
-    document.getElementById("open_filterreview").addEventListener("click", open_in_filterreview)
+    // Тот же файл в FilterReview (step_open_in: как кнопка «Open In», Libraries/OpenIn.js)
+    document.getElementById("open_filterreview").addEventListener("click", () => step_open_in("../FilterReview/", () => {
+        spec_verdict("warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
+    }))
 }
 
 // Новый лог или ошибка загрузки: забыть расчёт шага, очистить графики и итоги
@@ -776,22 +779,4 @@ function redraw_peaks1() {
     const main = peaks[0]
     spec_verdict(status, "Главный шум: " + main.freq.toFixed(1) + " Гц (" + peak_source_text(main) + "; оси " + main.axes.join(", ") + "), " +
         main.excess_dB.toFixed(1) + " дБ над фоном. " + tail)
-}
-
-// ---------- Открыть в FilterReview ----------
-
-// Тот же файл в FilterReview: как кнопка «Open In» (Libraries/OpenIn.js, hook_load) — страница того же источника
-// после загрузки получает File сообщением и подставляет его в поле выбора лога
-function open_in_filterreview() {
-    if (state.file == null) {
-        return
-    }
-    const file = state.file
-    const w = window.open("../FilterReview/")
-    if (w == null) {
-        // Всплывающие окна запрещены
-        spec_verdict("warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
-        return
-    }
-    w.addEventListener("load", () => w.postMessage({ type: "file", data: file }, location.origin))
 }

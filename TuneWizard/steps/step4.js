@@ -18,11 +18,11 @@
 // при отличии и после отпускания мыши, кнопки досчитывают правки сами (step4_flush_edits(true)).
 //
 // Нужны глобалы страницы: core/pid.js (load_pid, pid_run_batch_fft, PID_STEP_MIN_RATE), core/pidtune.js (pidtune_*),
-// core/lowpass.js (lowpass_log_values — фильтры лога для ключа расчёта),
-// core/candidates.js (candidate_key), core/spectrum.js (find_instance), Libraries/Param_Helpers.js (param_to_string),
-// wizard.js (state, set_step, html_escape), steps/common.js (step_signed, step_tile, step_verdict, step_gyro_sensor,
-// step_ensure_step1, step_try, step_run), steps/step1.js (values_from_log) и steps/step3.js (step3_find_metadata —
-// префиксный поиск описания параметра). Принятое шагами 2–3 читается из state.steps[2] и state.steps[3].
+// core/lowpass.js (lowpass_log_values — фильтры лога для ключа расчёта), core/candidates.js (candidate_key),
+// core/spectrum.js (find_instance), Libraries/Param_Helpers.js (param_to_string), wizard.js (state, set_step,
+// html_escape), steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
+// step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
+// step_edit_controller) и steps/step1.js (values_from_log). Принятое шагами 2–3 читается из state.steps[2] и state.steps[3].
 
 // Внутреннее состояние шага
 const step4 = {
@@ -38,17 +38,18 @@ const step4 = {
     selected: { roll: null, pitch: null, yaw: null }, // выбранная строка таблицы оси (читать через step4_selected_row)
     form_built: false,        // разметка формы построена
     filled: false,            // форма заполнена значениями текущего лога
-    metadata: null,           // FilterReview/params.json; null — ещё не загружен или не загрузился
-    metadata_requested: false, // запрос метаданных отправлен (один раз за жизнь страницы)
     edit_form: null,          // ключи значений формы по осям, для которых пересчитано и отрисовано
-    edit_timer: null,         // отложенный пересчёт после набора в поле
-    edit_postponed: false,    // пересчёт (правок или окна FFT) отложен до отпускания кнопки мыши
-    pointer_down: false,      // кнопка мыши (касание) сейчас нажата
+    edit_timer: null,         // отложенный пересчёт после набора в поле (step4_edits)
+    edit_postponed: false,    // пересчёт (правок или окна FFT) отложен до отпускания кнопки мыши (step4_edits)
     window_pending: false,    // поле окна FFT изменено (change), а step4.window ещё не обновлён (step4_flush_window)
 }
 
 // Пауза в наборе, после которой поле пересчитывается, мс [наше, как на шаге 3]
 const step4_edit_delay_ms = 400
+
+// Механизм правок полей формы и поля окна FFT (каркас — step_edit_controller из steps/common.js, см. «Правки полей»):
+// отложенный пересчёт — step4_flush_pending (окно, затем форма)
+const step4_edits = step_edit_controller(step4, { delay_ms: step4_edit_delay_ms, flush: step4_flush_pending })
 
 // Оси шага по порядку вкладок; названия — именительный и родительный падежи
 const step4_axis_list = ["roll", "pitch", "yaw"]
@@ -71,11 +72,6 @@ const step4_test_flight_short = "нужен тестовый полёт: Acro с
     "отклонений стиков по каждой оси, в LOG_BITMASK — ATTITUDE_FAST и PID"
 
 // ---------- Подписи ----------
-
-// Значение параметра кратчайшей записью float32 (param_to_string); нечисловое — «—» (param_to_string(NaN) бросает)
-function step4_value_text(value) {
-    return Number.isFinite(value) ? param_to_string(value) : "—"
-}
 
 // Секунды в миллисекундах с одним знаком; нечисловое — «—»
 function step4_ms(seconds) {
@@ -150,24 +146,8 @@ function step4_init() {
     // Правки формы (поля перерисовываются с новым логом — слушаем контейнер): набор — пересчёт после паузы,
     // change — следующей задачей или после отпускания мыши (см. «Правки полей»)
     const form = document.getElementById("pidf_form")
-    form.addEventListener("input", step4_edit_input)
-    form.addEventListener("change", step4_edit_change)
-    // Нажата ли основная кнопка мыши — как на шаге 3: полоса прокрутки и контекстное меню pointerup не присылают,
-    // флаг снимают ещё contextmenu, уход из окна и движение мыши без нажатых кнопок
-    document.addEventListener("pointerdown", (e) => {
-        if (e.button === 0) {
-            step4.pointer_down = true
-        }
-    }, true)
-    for (const type of ["pointerup", "pointercancel", "contextmenu"]) {
-        document.addEventListener(type, step4_pointer_released, true)
-    }
-    document.addEventListener("pointermove", (e) => {
-        if (step4.pointer_down && (e.buttons === 0)) {
-            step4_pointer_released()
-        }
-    }, true)
-    window.addEventListener("blur", step4_pointer_released)
+    form.addEventListener("input", step4_edits.input)
+    form.addEventListener("change", step4_edits.change)
 
     // Вкладки осей: щелчок; стрелки влево/вправо, Home и End (фокус переходит на выбранную вкладку)
     for (const axis of step4_axis_list) {
@@ -204,7 +184,10 @@ function step4_init() {
     })
     document.getElementById("cand4_apply").addEventListener("click", step4_apply)
     document.getElementById("pidf_accept").addEventListener("click", step4_accept)
-    document.getElementById("step4_open_pidreview").addEventListener("click", step4_open_pidreview)
+    // «Открыть в PIDReview» — как «Открыть в FilterReview» шага 1
+    document.getElementById("step4_open_pidreview").addEventListener("click", () => step_open_in("../PIDReview/", () => {
+        step_verdict("verdict4", "warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
+    }))
 }
 
 // Новый лог или ошибка загрузки: забыть данные PID, расчёт, выбор и форму. Окно FFT шага остаётся (как окно шага 0)
@@ -228,7 +211,8 @@ function step4_reset() {
 // Как на шаге 3 (steps/step3.js, «Правки полей»): щелчок по кнопке сразу после набора не должен теряться — нажатие
 // уводит фокус из поля, поле даёт change, и перерисовка таблицы (строка «Свой») сдвинула бы кнопку до отпускания
 // мыши. Поэтому набор (input) пересчитывается после паузы step4_edit_delay_ms, change — только при отличии от
-// посчитанного и после отпускания мыши, а «Применить вариант» и «Принять» досчитывают правки сами.
+// посчитанного и после отпускания мыши, а «Применить вариант» и «Принять» досчитывают правки сами. Набор, change и флаг
+// нажатой кнопки мыши — общий каркас step_edit_controller (step4_edits).
 
 // Ключи значений формы по осям — то, что введено сейчас; null — форма не заполнена
 function step4_edit_state() {
@@ -244,31 +228,6 @@ function step4_edit_done() {
     step4.edit_form = step4_edit_state()
 }
 
-// Набор в поле: пересчёт после паузы
-function step4_edit_input() {
-    clearTimeout(step4.edit_timer)
-    step4.edit_timer = setTimeout(step4_flush_edits, step4_edit_delay_ms)
-}
-
-// change поля (уход из поля, Enter, стрелки): следующей задачей, а при нажатой кнопке мыши — после её отпускания
-function step4_edit_change() {
-    if (step4.pointer_down) {
-        step4.edit_postponed = true
-        return
-    }
-    setTimeout(step4_flush_edits, 0)
-}
-
-// Кнопка мыши отпущена (или её отпускания уже не будет): отложенный пересчёт (окно FFT, правки формы) — следующей
-// задачей, после щелчка
-function step4_pointer_released() {
-    step4.pointer_down = false
-    if (step4.edit_postponed) {
-        step4.edit_postponed = false
-        setTimeout(step4_flush_pending, 0)
-    }
-}
-
 // Отложенное: сменённое окно FFT (с пересчётом шага) и правки формы
 function step4_flush_pending() {
     step4_flush_window()
@@ -281,10 +240,7 @@ function step4_flush_pending() {
 // пометке на её вкладке (step4_render_tabs). При нажатой кнопке мыши — после её отпускания; force — без этой проверки
 // (кнопки шага). Введённое отмечается посчитанным только после успешного пересчёта
 function step4_flush_edits(force = false) {
-    clearTimeout(step4.edit_timer)
-    step4.edit_timer = null
-    if (!force && step4.pointer_down) {
-        step4.edit_postponed = true
+    if (!step4_edits.begin(force)) {
         return
     }
     const edit = step4_edit_state()
@@ -323,11 +279,7 @@ function step4_flush_edits(force = false) {
 // следующей задачей, а при нажатой кнопке мыши — после её отпускания; «Принять» само досчитывает окно
 function step4_window_change() {
     step4.window_pending = true
-    if (step4.pointer_down) {
-        step4.edit_postponed = true
-        return
-    }
-    setTimeout(step4_flush_window, 0)
+    step4_edits.change()
 }
 
 // Применить изменённое поле окна FFT: ближайшая степень двойки в сторону изменения (как поле окна шага 0
@@ -385,35 +337,16 @@ function step4_select_axis(axis) {
 
 // ---------- Форма параметров ----------
 
-// Загрузить метаданные один раз; по приходу — описания в построенную форму
-function step4_load_metadata() {
-    if (step4.metadata_requested) {
-        return
-    }
-    step4.metadata_requested = true
-    fetch("../FilterReview/params.json")
-        .then((res) => {
-            if (!res.ok) {
-                throw new Error("HTTP " + res.status + (res.statusText ? " " + res.statusText : "") + " для " + res.url)
-            }
-            return res.json()
-        })
-        .then((data) => {
-            step4.metadata = data
-            step4_apply_metadata()
-        })
-        .catch((e) => console.warn("Шаг 4: описания параметров (FilterReview/params.json) не загрузились, в форме только имена полей — " + e.message))
-}
-
-// Описания (title у подписи и поля) из метаданных — тем же префиксным обходом, что на шаге 3 (step3_find_metadata).
-// Единицы и диапазоны не показываются: у ATC_RAT_* в params.json — описание вертолёта (path AC_AttitudeControl_Heli,
-// у P единицы s/rad и диапазон до 0.35), у Copter они другие
+// Описания (title у подписи и поля) из метаданных (step_find_metadata). Единицы и диапазоны не показываются: у ATC_RAT_*
+// в params.json — описание вертолёта (path AC_AttitudeControl_Heli, у P единицы s/rad и диапазон до 0.35), у Copter
+// они другие
 function step4_apply_metadata() {
-    if (step4.metadata == null) {
+    const data = step_metadata()
+    if (data == null) {
         return
     }
     for (const p of document.querySelectorAll("#pidf_form p.param")) {
-        const metadata = step3_find_metadata(step4.metadata, p.dataset.name)
+        const metadata = step_find_metadata(data, p.dataset.name)
         if (metadata == null) {
             continue
         }
@@ -438,10 +371,11 @@ function step4_build_form() {
     }
     document.getElementById("pidf_form").innerHTML = html
     step4.form_built = true
-    if (step4.metadata != null) {
+    // Описания — сразу, если метаданные уже пришли, иначе по приходу (одна загрузка на страницу, step_load_metadata)
+    if (step_metadata() != null) {
         step4_apply_metadata()
     } else {
-        step4_load_metadata()
+        step_load_metadata().then(step4_apply_metadata)
     }
 }
 
@@ -488,7 +422,7 @@ function step4_render_inlog() {
     const log_values = step4_log_values()
     for (const p of document.querySelectorAll("#pidf_form p.param")) {
         const value = log_values[p.dataset.name]
-        p.querySelector(".inlog").textContent = Number.isFinite(value) ? "в логе: " + step4_value_text(value) : "в логе нет"
+        p.querySelector(".inlog").textContent = Number.isFinite(value) ? "в логе: " + step_value_text(value) : "в логе нет"
     }
 }
 
@@ -1034,22 +968,6 @@ function step4_accept() {
     }, "verdict4", "шага 4")
 }
 
-// Тот же файл в PIDReview — как «Открыть в FilterReview» шага 1 (Libraries/OpenIn.js, hook_load): страница того же
-// источника после загрузки получает File сообщением и подставляет его в поле выбора лога
-function step4_open_pidreview() {
-    if (state.file == null) {
-        return
-    }
-    const file = state.file
-    const w = window.open("../PIDReview/")
-    if (w == null) {
-        // Всплывающие окна запрещены
-        step_verdict("verdict4", "warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
-        return
-    }
-    w.addEventListener("load", () => w.postMessage({ type: "file", data: file }, location.origin))
-}
-
 // ---------- Отрисовка ----------
 
 function step4_redraw_all() {
@@ -1249,7 +1167,7 @@ function step4_response_text(metrics) {
 function step4_changes_text(axis, values) {
     const log = step4.calc[axis].gains
     return step4_gain_keys.filter((k) => !step4_same_value(values[k], log[k]))
-        .map((k) => k + " " + step4_value_text(log[k]) + " → " + step4_value_text(values[k])).join(", ")
+        .map((k) => k + " " + step_value_text(log[k]) + " → " + step_value_text(values[k])).join(", ")
 }
 
 // Текст неустойчивости строки — из отметок pidtune_flags («контур неустойчив (запас фазы …)» или «прогноз неустойчив —
@@ -1296,7 +1214,7 @@ function step4_render_axis_verdict() {
         if (!res.is_rate) {
             return
         }
-        const lag = (Number.isFinite(res.fltt) && (res.fltt > 0)) ? " (≈ " + (1000 / (2 * Math.PI * res.fltt)).toFixed(1) + " мс при FLTT " + step4_value_text(res.fltt) + " Гц)" : ""
+        const lag = (Number.isFinite(res.fltt) && (res.fltt > 0)) ? " (≈ " + (1000 / (2 * Math.PI * res.fltt)).toFixed(1) + " мс при FLTT " + step_value_text(res.fltt) + " Гц)" : ""
         parts.push("Цель — из RATE (сообщений PIDR/PIDP/PIDY в логе нет): она записана до фильтра FLTT, поэтому отклик включает FLTT и немного " +
                    "медленнее настоящего" + lag + ".")
     }
@@ -1432,7 +1350,7 @@ function step4_render_warnings() {
         lines.push("Notch-фильтр ошибки ПИД (" + prefix + "NEF = " + nef + ") в модели регулятора не учтён: сверка модели с данными и прогноз могут расходиться.")
     }
     if (Number.isFinite(res.slew) && (res.slew > 0)) {
-        lines.push("Ограничитель " + prefix + "SMAX = " + step4_value_text(res.slew) + " не моделируется: при его срабатывании (резкие манёвры, шум) " +
+        lines.push("Ограничитель " + prefix + "SMAX = " + step_value_text(res.slew) + " не моделируется: при его срабатывании (резкие манёвры, шум) " +
                    "настоящий отклик медленнее прогноза.")
     }
     const fast = params.get("FSTRATE_ENABLE")
@@ -1444,7 +1362,7 @@ function step4_render_warnings() {
     const ff = res.gains?.FF
     const dff = res.gains?.DFF
     if ((Number.isFinite(ff) && (ff != 0)) || (Number.isFinite(dff) && (dff != 0))) {
-        lines.push("Прямая связь " + prefix + "FF = " + step4_value_text(ff) + ", " + prefix + "D_FF = " + step4_value_text(dff) + " — вне контура: прогноз " +
+        lines.push("Прямая связь " + prefix + "FF = " + step_value_text(ff) + ", " + prefix + "D_FF = " + step_value_text(dff) + " — вне контура: прогноз " +
                    "вычитает её из измеренного отклика (φ = FF / C).")
     }
     for (const warning of res.mode?.warnings ?? []) {
@@ -1454,12 +1372,12 @@ function step4_render_warnings() {
         lines.push(warning + ".")
     }
     if ((res.status === "ok") && (params.get("SCHED_LOOP_RATE") == null)) {
-        lines.push("В логе нет SCHED_LOOP_RATE: модель регулятора (сверка и прогноз) — на заводских " + step4_value_text(res.loop_rate) + " Гц.")
+        lines.push("В логе нет SCHED_LOOP_RATE: модель регулятора (сверка и прогноз) — на заводских " + step_value_text(res.loop_rate) + " Гц.")
     }
     const accepted_rate = state.steps[2]?.accepted?.SCHED_LOOP_RATE
     if (res.predict_ok && Number.isFinite(accepted_rate) && (Math.fround(accepted_rate) !== Math.fround(res.loop_rate))) {
-        lines.push("На шаге 2 принят SCHED_LOOP_RATE " + step4_value_text(accepted_rate) + ": модель регулятора — на частоте контура лога " +
-                   step4_value_text(res.loop_rate) + " Гц.")
+        lines.push("На шаге 2 принят SCHED_LOOP_RATE " + step_value_text(accepted_rate) + ": модель регулятора — на частоте контура лога " +
+                   step_value_text(res.loop_rate) + " Гц.")
     }
     const box = document.getElementById("warnings4")
     box.innerHTML = lines.map(html_escape).join("<br>")
@@ -1552,12 +1470,6 @@ function step4_render_quality() {
     box.hidden = false
 }
 
-// Ячейка таблицы: text — основное значение, sub — мелкая строка, cls — "better" | "worse" | "", title — подсказка
-function step4_cell(text, sub, cls, title) {
-    return '<td class="num' + (cls ? " " + cls : "") + '"' + (title ? ' title="' + html_escape(title) + '"' : "") + '>' + html_escape(text) +
-        (sub ? '<small>' + html_escape(sub) + '</small>' : "") + '</td>'
-}
-
 // Пояснение под названием строки: с какими вариантами совпала
 function step4_row_note(row) {
     const titles = { log: "как в логе", rule: "по правилам", p_minus: "P −10 %", p_plus: "P +10 %", d_minus: "D −10 %", d_plus: "D +10 %" }
@@ -1581,15 +1493,15 @@ function step4_pred_cells(row, res, same_as_log) {
     const pm_cls = (flags?.low_pm || flags?.pm_drop || flags?.unstable) ? "worse" : ""
     if (pred.unstable) {
         const contour = Number.isFinite(pred.pm_deg) && (pred.pm_deg <= 0)
-        return step4_cell(contour ? pred.pm_deg.toFixed(1) : "—", null, "worse", null) + step4_cell(contour ? step4_fixed(pred.crossover_hz, 2) : "—", null, "", null) +
-            step4_cell("—", null, "worse", step4_unstable_text(row) + " — отклика нет") + step4_cell("—", null, "", step4_unstable_text(row) + " — отклика нет")
+        return step_cell(contour ? pred.pm_deg.toFixed(1) : "—", null, "worse", null) + step_cell(contour ? step4_fixed(pred.crossover_hz, 2) : "—", null, "", null) +
+            step_cell("—", null, "worse", step4_unstable_text(row) + " — отклика нет") + step_cell("—", null, "", step4_unstable_text(row) + " — отклика нет")
     }
     const m = pred.metrics
     const ms = (s) => Number.isFinite(s) ? s * 1000 : NaN
-    return step4_cell(step4_fixed(pred.pm_deg, 1), diff(pred.pm_deg, log?.pm_deg, 1), pm_cls, Number.isFinite(pred.gm_db) ? "запас по амплитуде " + pred.gm_db.toFixed(1) + " дБ" : null) +
-        step4_cell(step4_fixed(pred.crossover_hz, 2), diff(pred.crossover_hz, log?.crossover_hz, 2), "", null) +
-        step4_cell(step4_fixed(m?.overshoot_pct, 1), diff(m?.overshoot_pct, log?.metrics?.overshoot_pct, 1), flags?.overshoot ? "worse" : "", null) +
-        step4_cell(step4_fixed(ms(m?.rise_s), 1), diff(ms(m?.rise_s), ms(log?.metrics?.rise_s), 1), "", null)
+    return step_cell(step4_fixed(pred.pm_deg, 1), diff(pred.pm_deg, log?.pm_deg, 1), pm_cls, Number.isFinite(pred.gm_db) ? "запас по амплитуде " + pred.gm_db.toFixed(1) + " дБ" : null) +
+        step_cell(step4_fixed(pred.crossover_hz, 2), diff(pred.crossover_hz, log?.crossover_hz, 2), "", null) +
+        step_cell(step4_fixed(m?.overshoot_pct, 1), diff(m?.overshoot_pct, log?.metrics?.overshoot_pct, 1), flags?.overshoot ? "worse" : "", null) +
+        step_cell(step4_fixed(ms(m?.rise_s), 1), diff(ms(m?.rise_s), ms(log?.metrics?.rise_s), 1), "", null)
 }
 
 // Таблица вариантов оси: P / I / D, прогноз (запас фазы, частота среза, перерегулирование и нарастание к логу), оценка
@@ -1623,7 +1535,7 @@ function step4_render_candidates() {
         body += '<td><label for="' + id_attr + '">' + html_escape(row.title) + '</label>' + step4_row_note(row) + '</td>'
         for (const k of step4_gain_keys) {
             const changed = !step4_same_value(row.values[k], log_gains[k])
-            body += step4_cell(step4_value_text(row.values[k]), changed ? "было " + step4_value_text(log_gains[k]) : null, "", null)
+            body += step_cell(step_value_text(row.values[k]), changed ? "было " + step_value_text(log_gains[k]) : null, "", null)
         }
         if (!res.predict_ok) {
             body += '<td colspan="4">' + html_escape((res.status === "ok") ? "прогноз недостоверен" : "прогноза нет") + '</td>'
@@ -1666,14 +1578,14 @@ function step4_render_candidates() {
             const gyro_old = step4_gyro_old()
             const gyro_new = step4_gyro_new()
             if (gyro_old.INS_GYRO_FILTER !== gyro_new.INS_GYRO_FILTER) {
-                changes.push("INS_GYRO_FILTER " + step4_value_text(gyro_old.INS_GYRO_FILTER) + " → " + step4_value_text(gyro_new.INS_GYRO_FILTER) + " Гц")
+                changes.push("INS_GYRO_FILTER " + step_value_text(gyro_old.INS_GYRO_FILTER) + " → " + step_value_text(gyro_new.INS_GYRO_FILTER) + " Гц")
             }
             if (Object.keys(gyro_old).some((name) => (name !== "INS_GYRO_FILTER") && (gyro_old[name] !== gyro_new[name]))) {
                 changes.push("notch шага 2")
             }
             for (const [key, title] of [["flte", "FLTE"], ["fltd", "FLTD"]]) {
                 if (Math.fround(res.filters_new[key]) !== Math.fround(res.filters_log[key])) {
-                    changes.push(prefix + title + " " + step4_value_text(res.filters_log[key]) + " → " + step4_value_text(res.filters_new[key]) + " Гц")
+                    changes.push(prefix + title + " " + step_value_text(res.filters_log[key]) + " → " + step_value_text(res.filters_new[key]) + " Гц")
                 }
             }
             lines.push("Прогноз — из измеренной характеристики «цель → факт» (КИХ) и модели регулятора AC_PID; разница — к измеренному логу. " +
