@@ -266,36 +266,57 @@ function pidtune_rule(gains, axis, metrics, windows, quality, rules = pidtune_ru
 - `pidtune_rule(gains, axis, metrics, data_s, quality, rules)` — четвёртый аргумент — секунды данных, а не число окон; порядок отказов: нет коэффициента → мало данных → ненадёжно → нет отклика.
 - `pidtune_step_metrics` → `null` при нечисловом в отклике; `pidtune_fir` → `null` при NaN или Infinity в данных; `pidtune_d_noise` при нулевой D → `{ dB: null, off: true }`.
 
+**API задачи 6 после ревью** (`2019176` и правки по ревью; подробности — раздел 4 дизайна). Комплексные массивы — как в `Libraries/Array_Math.js`: `[re[], im[]]`.
+
 ```js
-// Регулятор C(f) — модель AC_PID: H_FLTE·(Kp + Ki·i_scale·dt/(1 − z⁻¹) + Kd·(1 − z⁻¹)/dt·H_FLTD), FF отдельно;
-// фильтры первого порядка — pid_lowpass_response (core/lowpass.js) → { C: [[re, im]], FF }
+// Регулятор C(f) — модель AC_PID: H_FLTE·(Kp + Ki·i_scale·dt/(1 − z⁻¹) + Kd·(1 − z⁻¹)/dt·H_FLTD); FF = Kff + Kdff·(1 − z⁻¹)/dt
+// отдельно (вне контура); на 0 Гц при Ki ≠ 0 — C = Infinity; нечисловые коэффициенты, фильтры и i_scale (и null) — NaN
+// → { freq, C: [re[], im[]], FF: [re[], im[]], ki: Ki·i_scale, loop_rate }
 function pidtune_controller(gains, filters, loop_rate, freq, i_scale = 1) { … }
-// Сверка регулятора по данным: C_изм = S_oe/S_ee (выход ← ошибка, окна 1024) против модели на 2–20 Гц
-// → { ok, max_mag_err, max_phase_err_deg }
-function pidtune_controller_check(axis, set_index, range, gains, filters, loop_rate, i_scale, rules = pidtune_rules) { … }
-// Отношение передаточных функций новых и старых фильтров гироскопа (шаги 2–3) на частотах freq: load_filters +
-// filter_transfer, среднее по окнам FFT гироскопа в интервале → [[re, im]] | null (без данных гироскопа — без поправки)
+// Есть ли у набора компоненты P, I, D (PIDx); у оси RATE нет
+function pidtune_has_components(axis, set_index) { … }
+// Сверка регулятора по данным: C_изм = S_oe/S_ee (e = Tar − Act, o = P + I + D; окна 1024 с шагом 64, отбор как у
+// отрезков КИХ) против модели на бинах 2–20 Гц: ||r| − 1| и |∠r|. Ось RATE — не запускается (skipped "rate")
+// → { ok, max_mag_err, max_phase_err_deg, worst_hz, min_coherence, windows, skipped: null | "rate" }
+function pidtune_controller_check(axis, set_index, range, gains, filters, loop_rate, i_scale = 1, rules = pidtune_rules) { … }
+// Поправка фильтров гироскопа: mean(H_new)/mean(H_old) по окнам FFT гироскопа в интервале (load_filters + filter_transfer);
+// одинаковые наборы — ровно 1 → [re[], im[]] | null (без данных гироскопа — без поправки)
 function pidtune_gyro_ratio(old_values, new_values, gyro_ctx, freq) { … }
-// Прогноз: T — FFT импульсной характеристики КИХ; R = (C_new·G_new)/(C_log·G_log); L_new = R·T/(1 − T);
-// T_new = R·T/(1 − T + R·T); частота среза |L_new| = 1, запас фазы, запас по амплитуде; отклик — обратное FFT +
-// накопленная сумма; метрики — pidtune_step_metrics → { L, T, crossover_hz, pm_deg, gm_db, step: { time, y }, metrics } | null
+// Сетка прогноза: n — степень двойки ≥ rate_hz / predict_resolution_hz, freq — k·rate_hz/n, k = 0…n/2 → { n, freq }
+function pidtune_predict_grid(rate_hz, rules = pidtune_rules) { … }
+// Все пересечения |L| = 1 сверху вниз выше crossover_min_hz; запас — наименьший, частота среза — первого; фаза первого —
+// развёрнутая от низких частот, следующих — главное значение
+// → { crossover_hz, pm_deg, gm_db, multiple_crossings, crossings: [{ freq_hz, pm_deg }] }
+function pidtune_margins(freq, L, rules = pidtune_rules) { … }
+// Прогноз: T — FFT КИХ на сетке pidtune_predict_grid; φ = FF/C; R = (C_new/C_log)·ratio; L_new = R·T/(1 + φ_log − T);
+// T_new = R·T·(1 + φ_new)/(1 + φ_log − T + R·T); предел на 0 Гц; неустойчив — запас ≤ 0 или доля энергии отклика
+// в последней четверти буфера > noncausal_max (тогда step и metrics — null). c_log, c_new — на той же сетке (длина и
+// шаг freq[1], иначе исключение); c_new строится с FLTE/FLTD, принятыми на шаге 3, c_log — с фильтрами лога
+// → { freq, T, L, crossover_hz, pm_deg, gm_db, multiple_crossings, crossings, unstable, noncausal, step | null, metrics | null } | null
 function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rules) { … }
-// Достоверность прогноза: quality.ok, сверка регулятора, когерентность «цель → факт» на частоте среза ≥ coherence_min
-// → { valid, reasons: [текст] }
+// Когерентность γ² «цель → факт» на частоте по окнам отбора отрезков (512) → γ² | null
+function pidtune_coherence(segments, rate_hz, freq_hz, rules = pidtune_rules) { … }
+// Достоверность прогноза: quality.ok, сверка регулятора (RATE — «по RATE прогноз не считается»), γ² на частоте среза
+// лога ≥ coherence_min → { valid, reasons: [текст] }
 function pidtune_validity(quality, controller_check, coherence_at_crossover, rules = pidtune_rules) { … }
-// Варианты оси: «Как в логе», «По правилам», P ±10 % (I по правилу), D ±10 % (без D при D = 0); дедупликация
-// (candidate_key), same_as → [{ id, title, values: { P, I, D } }]
+// Варианты оси: «Как в логе» (как есть), «По правилам», P ±10 % (I по правилу), D ±10 % (только при D > 0); изменённые —
+// 4 значащие цифры (pidtune_round); дедупликация (candidate_key) → [{ id, title, values: { P, I, D }, same_as: [id] }]
 function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) { … }
-// Отметки варианта: low_pm (< pm_min_deg), pm_drop (хуже прогноза лога > pm_max_drop_deg),
-// overshoot (> overshoot_pred_max_pct), incomplete; отказ при сомнении
+// Отметки варианта: unstable, low_pm (< pm_min_deg), pm_drop (хуже прогноза лога > pm_max_drop_deg),
+// overshoot (> overshoot_pred_max_pct), incomplete; отказ при сомнении; числа у порога — от порога (pidtune_beyond)
+// → { unstable, low_pm, pm_drop, overshoot, incomplete, flagged, reasons }
 function pidtune_flags(pred, pred_log, rules = pidtune_rules) { … }
+// Помощники: pidtune_round (4 значащие цифры), pidtune_beyond (число у порога — с округлением от него),
+// pidtune_spectra (суммы взаимных спектров по окнам; на нём pidtune_outer_peak и pidtune_coherence).
+// pidtune_segments отдаёт у отрезка ещё batch и begin (номер пакета и первый отсчёт — для сверки регулятора).
 ```
 
 Новые правила в `pidtune_rules`:
 
 - `pm_min_deg: 30`, `pm_max_drop_deg: 5`, `overshoot_pred_max_pct: 20` — решение пользователя 25.10.2026;
 - `coherence_min: 0.5` **[наше]**;
-- `controller_check: { band_hz: [2, 20], mag_err_max: 0.1, phase_err_max_deg: 10, window: 1024 }` **[наше]**.
+- `controller_check: { band_hz: [2, 20], mag_err_max: 0.1, phase_err_max_deg: 10, window: 1024, window_step: 64 }` **[наше]**;
+- после реализации: `round_digits: 4` (решение координатора по ревью задачи 5), `predict_resolution_hz: 0.1`, `crossover_min_hz: 0.5`, `noncausal_max: 1e-3` (ревью задачи 6) **[наше]**.
 
 **Тесты:**
 
@@ -306,6 +327,7 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) { … }
 - **Сверка регулятора:** верная модель проходит, испорченная (например, Kd ×2) — нет.
 - **Поправка фильтров:** одинаковые фильтры дают отношение 1.
 - **Варианты и отметки:** отметки на порогах; дедупликация; нет D ±10 % при D = 0; достоверность — каждая причина отказа.
+- **После ревью задачи 6:** неустойчивый вариант (K 290, P ×3) — `unstable`, отклика и метрик нет, отметка «контур неустойчив»; неустойчивость по причинности при положительном запасе; второе пересечение |L| = 1 (резонанс) — наименьший запас, у второго — главное значение фазы, у первого — развёрнутая (фаза ниже −360°); ось RATE — сверка не запускается, причина «по RATE прогноз не считается»; поправка фильтров при движущемся notch — отношение средних, а не среднее отношений; другая сетка (тот же размер, другой шаг) — исключение; нечисловой `i_scale` — NaN; числа у порога — с округлением от него.
 
 **Замер на логе пользователя** (скрипт в scratchpad), по каждой оси:
 

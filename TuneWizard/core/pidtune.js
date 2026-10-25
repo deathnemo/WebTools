@@ -109,6 +109,11 @@ const pidtune_rules = {
     // Частота среза ищется не ниже, Гц: ниже |L| велико из-за интеграторов регулятора и объекта, а оценка T там шумит
     // [наше, исследование]
     crossover_min_hz: 0.5,
+    // Прогноз неустойчив, если доля энергии его импульсной характеристики в последней четверти буфера обратного FFT
+    // (отрицательное время) больше [наше: синтетика rate-only — устойчивые прогнозы до 3e-6, в том числе при запасе
+    // фазы 2°; неустойчивые — 0.04–0.98]. Устойчивый, но звенящий дольше 3/4 буфера (7.7 с при 400 Гц) контур тоже
+    // отмечается — на практике то же самое
+    noncausal_max: 1e-3,
 }
 
 // Оси шага: префикс параметров регулятора скорости и P углового контура (масштаб I в Rate Loop Only)
@@ -306,7 +311,9 @@ function pidtune_fir_from(corr, rate_hz, ridge, rules = pidtune_rules) {
 
 // КИХ МНК «цель → факт» по отрезкам (pidtune_segments): нормальные уравнения по автокорреляции цели и взаимной
 // корреляции «факт ← цель», суммированным по отрезкам (Тёплиц, разложение Холецкого), гребень ridge·c_rr(0), h[0] = 0;
-// длина fir_length_s·rate_hz отводов.
+// длина fir_length_s·rate_hz отводов. У оси RATE цель — RDes до FLTT (у PIDx — после), поэтому отклик по RATE включает
+// FLTT и немного медленнее настоящего (первый порядок 20 Гц, по умолчанию, — ≈ 8 мс на низких частотах): вердикт
+// шага говорит об этом; прогноза по RATE нет (pidtune_controller_check, pidtune_validity).
 // → { h, time (с), step (накопленная сумма h на 0…step_length_s), windows, samples, ridge, corr (суммы — для
 // pidtune_quality) } | null — нет отрезков, частота ниже min_log_rate_hz (отклик не считается), нет энергии цели или
 // в цели или факте нечисловое (NaN, Infinity)
@@ -492,16 +499,16 @@ function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_r
         if (!checks.ridge.ok) {
             reasons.push((ridge == null) ? "проверка регуляризации не посчиталась"
                 : "отклик зависит от регуляризации: RMS разницы при λ " + rules.fir_ridge + " и " + rules.fir_ridge_check + " — " +
-                  ridge.toFixed(3) + " (порог " + q.ridge_rms_max + ")")
+                  pidtune_beyond(ridge, q.ridge_rms_max, 3) + " (порог " + q.ridge_rms_max + ")")
         }
         if (!checks.halves.ok) {
             reasons.push((halves == null) ? "половины данных не посчитались"
-                : "половины данных дают разный отклик: RMS " + halves.toFixed(3) + " (порог " + q.halves_rms_max + ") — режим " +
+                : "половины данных дают разный отклик: RMS " + pidtune_beyond(halves, q.halves_rms_max, 3) + " (порог " + q.halves_rms_max + ") — режим " +
                   "или объект менялись в интервале, или данных мало")
         }
         if (outer_applied && !checks.outer.ok) {
             reasons.push((outer == null) ? "подпись углового контура не посчиталась"
-                : "подпись углового контура: |цель → факт| до " + outer.value.toFixed(2) + " на " + outer.freq_hz.toFixed(1) + " Гц (порог " +
+                : "подпись углового контура: |цель → факт| до " + pidtune_beyond(outer.value, q.outer_t_max, 2) + " на " + outer.freq_hz.toFixed(1) + " Гц (порог " +
                   q.outer_t_max + " на " + q.outer_band_hz[0] + "–" + q.outer_band_hz[1] + " Гц) — цель скорости формирует угловой " +
                   "контур (Acro без «Rate Loop Only»)")
         }
@@ -838,6 +845,21 @@ function pidtune_round(value, rules = pidtune_rules) {
     return (Number.isFinite(value) && (value != 0)) ? Number(value.toPrecision(rules.round_digits)) : value
 }
 
+// Число для текста причины рядом с порогом limit: digits знаков после запятой. Обычное округление, а если оно попадает
+// на порог или за него — округление от порога (ниже порога — вниз, выше — вверх): 29.99 при пороге 30 — «29.9° ниже
+// 30°», а не «30.0°», 20.01 при пороге 20 — «20.1 % выше 20 %» [наше, ревью задачи 6]. Допуск 1e-9 — от двоичного
+// округления (0.43·100 = 43.00000000000001)
+function pidtune_beyond(value, limit, digits) {
+    const text = value.toFixed(digits)
+    const shown = Number(text)
+    if (((value < limit) && (shown >= limit)) || ((value > limit) && (shown <= limit))) {
+        const scale = 10 ** digits
+        const rounded = (value < limit) ? Math.floor(value * scale + 1e-9) : Math.ceil(value * scale - 1e-9)
+        return (rounded / scale).toFixed(digits)
+    }
+    return text
+}
+
 // Изменение P на sign·gain_step с пределами AutoTune; I по правилу: крен и тангаж — I = P [wiki, Manual tuning:
 // «Each time the P term is changed set the I term equal to the P term»], рыскание — I = yaw_i_ratio·P [код].
 // P округляется (pidtune_round) до пределов, I считается от округлённого P и тоже округляется.
@@ -860,8 +882,8 @@ function pidtune_change_p(gains, axis, sign, reason, rules) {
 
 // Предложение по правилам (раздел 3 дизайна). Без изменений (change null, причина), по порядку: P или I нет в логе
 // (не число); отобранных данных меньше min_data_s — «мало манёвров» (раньше качества: на коротком полёте причина —
-// данные, а не проверки); измерение ненадёжно (quality.ok ложно); нет метрик. Иначе одно изменение на коэффициент за
-// проход, правила по порядку:
+// данные, а не проверки); измерение ненадёжно (quality.ok ложно); нет метрик. По оси RATE метрики включают FLTT
+// (pidtune_fir) — правила те же. Иначе одно изменение на коэффициент за проход, правила по порядку:
 //   1. остаточные колебания (metrics.osc): частота выше osc_band_ratio полос отклика (bandwidth_hz) — «высокие» → D −10 %,
 //      не выше — «низкие» → P −10 %. При D = 0 (или D нет) правило для D не применяется — дальше по правилам;
 //   2. перерегулирование больше overshoot_high_pct → P −10 %;
@@ -879,7 +901,7 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         return keep("нет коэффициента в логе: " + missing.join(", "))
     }
     if (!(data_s >= rules.min_data_s)) {
-        return keep("мало манёвров: отобранных данных (окна с целью больше " + rules.target_min_dps + " °/с) " + (data_s ?? 0).toFixed(1) +
+        return keep("мало манёвров: отобранных данных (окна с целью больше " + rules.target_min_dps + " °/с) " + pidtune_beyond(data_s ?? 0, rules.min_data_s, 1) +
                     " с, нужно не меньше " + rules.min_data_s + " с")
     }
     if ((quality == null) || !quality.ok) {
@@ -890,15 +912,17 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         return keep("нет отклика")
     }
     const os = metrics.overshoot_pct
-    const os_text = "перерегулирование " + os.toFixed(1) + " %"
+    // Числа у порога — с округлением от него (pidtune_beyond)
+    const os_text = (limit) => "перерегулирование " + ((limit != null) ? pidtune_beyond(os, limit, 1) : os.toFixed(1)) + " %"
     const osc = metrics.osc
     let d_skipped = null
     if (osc != null) {
-        const osc_text = "колебания " + osc.freq_hz.toFixed(1) + " Гц, размах " + osc.amplitude_pp.toFixed(2)
+        const amplitude = ", размах " + osc.amplitude_pp.toFixed(2)
         if (metrics.bandwidth_hz == null) {
-            return keep(osc_text + ", а время нарастания не определено — частоту не с чем сравнить")
+            return keep("колебания " + osc.freq_hz.toFixed(1) + " Гц" + amplitude + ", а время нарастания не определено — частоту не с чем сравнить")
         }
         const limit = rules.osc_band_ratio * metrics.bandwidth_hz
+        const osc_text = "колебания " + pidtune_beyond(osc.freq_hz, limit, 1) + " Гц" + amplitude
         const band_text = rules.osc_band_ratio + " полос отклика (" + limit.toFixed(1) + " Гц)"
         if (osc.freq_hz > limit) {
             if (Number.isFinite(gains.D) && (gains.D > 0)) {
@@ -916,17 +940,17 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         }
     }
     if (os > rules.overshoot_high_pct) {
-        return pidtune_change_p(gains, axis, -1, (d_skipped != null ? d_skipped + "; " : "") + os_text + " больше " + rules.overshoot_high_pct +
+        return pidtune_change_p(gains, axis, -1, (d_skipped != null ? d_skipped + "; " : "") + os_text(rules.overshoot_high_pct) + " больше " + rules.overshoot_high_pct +
                                 " % → P −" + Math.round(rules.gain_step * 100) + " %", rules)
     }
     if (d_skipped != null) {
         return keep(d_skipped)
     }
     if (os < rules.overshoot_low_pct) {
-        return pidtune_change_p(gains, axis, 1, os_text + " меньше " + rules.overshoot_low_pct + " %, колебаний нет — отклик вялый, запас есть → P +" +
+        return pidtune_change_p(gains, axis, 1, os_text(rules.overshoot_low_pct) + " меньше " + rules.overshoot_low_pct + " %, колебаний нет — отклик вялый, запас есть → P +" +
                                 Math.round(rules.gain_step * 100) + " %", rules)
     }
-    return keep(os_text + " — от " + rules.overshoot_low_pct + " до " + rules.overshoot_high_pct + " %, колебаний нет — менять нечего")
+    return keep(os_text(null) + " — от " + rules.overshoot_low_pct + " до " + rules.overshoot_high_pct + " %, колебаний нет — менять нечего")
 }
 
 // ---------- Модель регулятора, прогноз, варианты и отметки (раздел 4 дизайна) ----------
@@ -942,15 +966,17 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
 // FLTT (поле Tar в PIDx); прогноз вычитает её из измеренной T (раздел 7 дизайна: FF ≠ 0 учитывается в T).
 // Не моделируются: notch ошибки и цели (NEF, NTF), ограничитель SMAX (Dmod), PDMX, pd_scale, IMAX и остановка
 // интегратора при насыщении моторов (limit).
-// gains = { P, I, D, FF, DFF }: P, I, D не числа — NaN в C; FF и DFF необязательны (null, undefined — 0).
+// gains = { P, I, D, FF, DFF }: P, I, D не числа — NaN в C; FF и DFF необязательны (null, undefined — 0). i_scale не
+// число (в том числе null) — NaN в C (отказ при сомнении), а не регулятор без I.
 // filters = { flte, fltd } — Гц (0 — без фильтра, нечисловые — NaN в C); freq — частоты, Гц. На 0 Гц при ki ≠ 0
-// интегратор бесконечен — C = [Infinity, 0]: предел отношения двух регуляторов — отношение ki (берёт pidtune_predict).
+// интегратор бесконечен — C = [Infinity, 0] (нечисловое в коэффициентах или фильтрах — NaN): предел отношения двух
+// регуляторов — отношение ki (берёт pidtune_predict).
 // → { freq, C: [re[], im[]], FF: [re[], im[]], ki: Ki·i_scale, loop_rate } (комплексные массивы как в Libraries/Array_Math.js)
 function pidtune_controller(gains, filters, loop_rate, freq, i_scale = 1) {
     const num = (v) => (typeof v === "number") ? v : NaN
     const dt = 1 / loop_rate
     const kp = num(gains.P)
-    const ki = num(gains.I) * i_scale
+    const ki = num(gains.I) * num(i_scale)
     const kd = num(gains.D)
     const kff = gains.FF ?? 0
     const kdff = gains.DFF ?? 0
@@ -967,38 +993,54 @@ function pidtune_controller(gains, filters, loop_rate, freq, i_scale = 1) {
         FF[1][k] = kdff / dt * ai
         // Kp + Kd·(1 − z⁻¹) / dt·H_FLTD
         const hd = pid_lowpass_response(filters.fltd, loop_rate, f)
+        const he = pid_lowpass_response(filters.flte, loop_rate, f)
         let sr = kp + kd / dt * (ar * hd[0] - ai * hd[1])
         let si = kd / dt * (ar * hd[1] + ai * hd[0])
         // + ki·dt / (1 − z⁻¹); при ki = 0 интегратора нет (update_i обнуляет его)
         if (ki != 0) {
             const ad = ar * ar + ai * ai
             if (ad == 0) {
-                C[0][k] = Infinity
+                // 0 Гц: интегратор бесконечен; нечисловое в коэффициентах или фильтрах — NaN, как на других частотах
+                C[0][k] = Number.isNaN(sr + si + ki + he[0] + he[1]) ? NaN : Infinity
                 C[1][k] = 0
                 continue
             }
             sr += ki * dt * ar / ad
             si -= ki * dt * ai / ad
         }
-        const he = pid_lowpass_response(filters.flte, loop_rate, f)
         C[0][k] = sr * he[0] - si * he[1]
         C[1][k] = sr * he[1] + si * he[0]
     }
     return { freq: freq, C: C, FF: FF, ki: ki, loop_rate: loop_rate }
 }
 
+// Есть ли у набора set_index оси компоненты регулятора P, I, D (сообщения PIDR/PIDP/PIDY). У оси RATE их нет:
+// цель RDes записана до FLTT, выход ROut — вместе с FF (AC_AttitudeControl_Logging.cpp) — прогноз по ней не считается
+function pidtune_has_components(axis, set_index) {
+    const batches = axis?.sets?.[set_index]
+    return (batches != null) && (batches.length > 0) && batches.every((b) => (b.P != null) && (b.I != null) && (b.D != null))
+}
+
 // Сверка модели регулятора с данными лога (достоверность прогноза, раздел 4 дизайна): C_изм = S_oe / S_ee — выход
 // регулятора по ошибке, суммы взаимных спектров (pidtune_spectra) окон controller_check.window с шагом window_step,
 // отобранных как отрезки КИХ (pidtune_segments: центр окна в range, max |цель·Ханн| ≥ target_min_dps). Ошибка
-// e = Tar − Act (до FLTE: он в модели) — в рад/с, выход o = P + I + D (FF и DFF — с цели, вне контура); у оси RATE
-// компонент нет — o = ROut (в нём и FF: при FF ≠ 0 сверка смещена). Модель — pidtune_controller(gains, filters,
-// loop_rate, частоты бинов, i_scale). На бинах band_hz отношение r = C_изм / C_мод: ошибка модуля ||r| − 1|, фазы |∠r|;
-// проходит, если наибольшие не больше mag_err_max и phase_err_max_deg [наше]. Нечисловое отношение — не проходит.
+// e = Tar − Act (до FLTE: он в модели) — в рад/с, выход o = P + I + D (FF и DFF — с цели, вне контура). Модель —
+// pidtune_controller(gains, filters, loop_rate, частоты бинов, i_scale) с коэффициентами и фильтрами лога. На бинах
+// band_hz отношение r = C_изм / C_мод: ошибка модуля ||r| − 1|, фазы |∠r|; проходит, если наибольшие не больше
+// mag_err_max и phase_err_max_deg [наше]. Нечисловое отношение — не проходит.
+// У оси без компонент регулятора (RATE, pidtune_has_components) сверка не запускается: цель RDes — до FLTT, выход ROut —
+// с FF, и при FLTT 20 Гц (по умолчанию) модель «не сходилась» бы всегда (ревью задачи 6: модуль 0.32, фаза 42°) —
+// skipped "rate", pidtune_validity называет настоящую причину.
 // → { ok, max_mag_err, max_phase_err_deg, worst_hz (бин наибольшей ошибки относительно порогов), min_coherence
-// (наименьшая γ² «ошибка → выход» на полосе), windows } — нет данных, окон или бинов полосы: ok false, числа null
+// (наименьшая γ² «ошибка → выход» на полосе), windows, skipped: null | "rate" } — RATE, нет данных, окон или бинов
+// полосы: ok false, числа null
 function pidtune_controller_check(axis, set_index, range, gains, filters, loop_rate, i_scale = 1, rules = pidtune_rules) {
     const cc = rules.controller_check
-    const fail = (windows) => ({ ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: windows })
+    const fail = (windows, skipped = null) => ({ ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null,
+                                                 windows: windows, skipped: skipped })
+    if ((axis != null) && axis.have_data && (axis.sets?.[set_index] != null) && !pidtune_has_components(axis, set_index)) {
+        return fail(0, "rate")
+    }
     const seg = pidtune_segments(axis, set_index, range, { ...rules, window: cc.window, window_step: cc.window_step })
     if ((seg == null) || (seg.windows == 0)) {
         return fail(0)
@@ -1014,14 +1056,13 @@ function pidtune_controller_check(axis, set_index, range, gains, filters, loop_r
     const batches = axis.sets[set_index]
     const pieces = seg.segments.map((s) => {
         const batch = batches[s.batch]
-        const components = (batch.P != null) && (batch.I != null) && (batch.D != null)
         const n = s.tar.length
         const e = new Float64Array(n)
         const o = new Float64Array(n)
         for (let i = 0; i < n; i++) {
             const j = s.begin + i
             e[i] = (s.tar[i] - s.act[i]) * Math.PI / 180
-            o[i] = components ? batch.P[j] + batch.I[j] + batch.D[j] : batch.Out[j]
+            o[i] = batch.P[j] + batch.I[j] + batch.D[j]
         }
         return { e: e, o: o, starts: s.starts }
     })
@@ -1065,6 +1106,7 @@ function pidtune_controller_check(axis, set_index, range, gains, filters, loop_r
         worst_hz: worst_hz,
         min_coherence: min_coherence,
         windows: seg.windows,
+        skipped: null,
     }
 }
 
@@ -1074,8 +1116,11 @@ function pidtune_controller_check(axis, set_index, range, gains, filters, loop_r
 // «выход → факт» меняется ровно в это отношение. gyro_ctx = { gyro, env, tracking, range, sensor } (как base шага 3:
 // sensor — индекс экземпляра, трекинг интерполирован к окнам FFT). H — filter_transfer на exp_jw(freq,
 // FFT.average_sample_rate) по окнам FFT экземпляра до конца интервала (с первого окна: индексы окон — те же, что
-// у трекинга, как в lowpass_bode); отношение H_new / H_old усредняется по окнам интервала комплексно: у статических
-// фильтров оно во всех окнах одно, у динамических notch окна различаются только около частот notch, где |L| мало.
+// у трекинга, как в lowpass_bode); поправка — отношение средних mean(H_new) / mean(H_old) по окнам интервала
+// (комплексных). У статических фильтров H во всех окнах одна, и это просто H_new / H_old. Где notch движется, окна
+// различаются около его частот, а там |L| мало, T ≈ L пропорциональна G, и КИХ, подобранный по всем окнам, — это T
+// при среднем G: усреднённая T масштабируется средним G, а не средним отношением. Отношение средних ещё и устойчиво
+// к окнам, где H_old ≈ 0 (глубокий notch точно на частоте сетки), — среднее отношений там взрывается [наше].
 // Одинаковые наборы (candidate_key) — ровно 1 без расчёта (и без данных гироскопа).
 // → [re[], im[]] | null — нет экземпляра, FFT или окон гироскопа: прогноз без поправки
 function pidtune_gyro_ratio(old_values, new_values, gyro_ctx, freq) {
@@ -1102,19 +1147,25 @@ function pidtune_gyro_ratio(old_values, new_values, gyro_ctx, freq) {
     const rate = FFT.average_sample_rate
     const H_old = filter_transfer(load_filters(old_values, gyro_ctx.env, gyro_ctx.tracking), index, time, rate, Z1, Z2)
     const H_new = filter_transfer(load_filters(new_values, gyro_ctx.env, gyro_ctx.tracking), index, time, rate, Z1, Z2)
-    const re = new Array(n).fill(0)
-    const im = new Array(n).fill(0)
+    // Суммы H по окнам интервала (на число окон отношение средних не зависит)
+    const sum_new = [new Array(n).fill(0), new Array(n).fill(0)]
+    const sum_old = [new Array(n).fill(0), new Array(n).fill(0)]
     for (let j = start; j < end; j++) {
-        const a = H_new[j]
-        const b = H_old[j]
         for (let k = 0; k < n; k++) {
-            const d = b[0][k] * b[0][k] + b[1][k] * b[1][k]
-            re[k] += (a[0][k] * b[0][k] + a[1][k] * b[1][k]) / d
-            im[k] += (a[1][k] * b[0][k] - a[0][k] * b[1][k]) / d
+            sum_new[0][k] += H_new[j][0][k]
+            sum_new[1][k] += H_new[j][1][k]
+            sum_old[0][k] += H_old[j][0][k]
+            sum_old[1][k] += H_old[j][1][k]
         }
     }
-    const count = end - start
-    return [re.map((v) => v / count), im.map((v) => v / count)]
+    const re = new Array(n)
+    const im = new Array(n)
+    for (let k = 0; k < n; k++) {
+        const d = sum_old[0][k] ** 2 + sum_old[1][k] ** 2
+        re[k] = (sum_new[0][k] * sum_old[0][k] + sum_new[1][k] * sum_old[1][k]) / d
+        im[k] = (sum_new[1][k] * sum_old[0][k] - sum_new[0][k] * sum_old[1][k]) / d
+    }
+    return [re, im]
 }
 
 // Сетка частот прогноза: n — степень двойки не меньше rate_hz / predict_resolution_hz и длины КИХ (FFT импульсной
@@ -1129,50 +1180,71 @@ function pidtune_predict_grid(rate_hz, rules = pidtune_rules) {
     return { n: n, freq: freq }
 }
 
-// Частота среза, запас фазы и запас по амплитуде разомкнутого контура L ([re[], im[]]) на сетке freq:
-//   частота среза — первый переход |L| через 1 сверху вниз (|L| ≥ 1 на бине и < 1 на следующем) не ниже
-//   crossover_min_hz, частота — линейная интерполяция |L| между бинами;
-//   запас фазы — 180° + ∠L на частоте среза: фаза интерполирована между бинами и приведена к (−360°, 0°], поэтому
-//   запас — в (−180°, 180°] (отрицательный — контур неустойчив);
-//   запас по амплитуде — −20·log10 |L| там, где фаза, развёрнутая от частоты среза вверх, впервые переходит −180°
-//   (|L| в дБ интерполирован); только при запасе фазы больше 0, перехода до конца сетки нет — null.
-// → { crossover_hz, pm_deg, gm_db } — нет частоты среза (или нечисловые L) — все null
+// Частота среза, запас фазы и запас по амплитуде разомкнутого контура L ([re[], im[]]) на сетке freq.
+//   пересечения — все переходы |L| через 1 сверху вниз (|L| ≥ 1 на бине и < 1 на следующем) выше crossover_min_hz,
+//   частота и фаза — линейная интерполяция между бинами, запас пересечения — 180° + фаза; crossover_hz — частота
+//   первого пересечения; pm_deg — наименьший запас по всем пересечениям (резонанс или большое D дают ещё пересечения,
+//   иногда с меньшим запасом); multiple_crossings — пересечений больше одного;
+//   фаза первого пересечения — развёрнутая от низких частот: от первого бина не ниже crossover_min_hz (там главное
+//   значение приводится к (−360°, 0°] — у контура скорости фаза L на 0.5 Гц около −90°…−120°: интегратор регулятора
+//   или объекта и запаздывание нуля PI, далеко от ±180°, ветвь однозначна) вверх с шагом между бинами в (−180°, 180°]
+//   (сетка 0.1 Гц: фаза меняется на единицы градусов). До первого пересечения |L| ≥ 1, T там намного выше шума,
+//   и развёртка надёжна; она даёт и запас меньше −180°;
+//   фаза следующих пересечений — главное значение в (−360°, 0°], запас в (−180°, 180°] (обычное определение — угол
+//   между L и −1): развёртка дальше идёт через участки с |L| < 1, где оценка фазы шумит и копит лишние обороты
+//   (синтетика с редкими манёврами, D ×6: «запас» −2061°). Устойчивость решает не запас, а причинность отклика
+//   (pidtune_predict), поэтому этого достаточно;
+//   запас по амплитуде — −20·log10 |L| там, где развёрнутая фаза выше первого пересечения впервые переходит −180°
+//   (|L| в дБ интерполирован); только при pm_deg больше 0, перехода до конца сетки нет — null.
+// → { crossover_hz, pm_deg, gm_db, multiple_crossings, crossings: [{ freq_hz, pm_deg }] } — нет пересечений (или
+// нечисловые L) — числа null, crossings пуст
 function pidtune_margins(freq, L, rules = pidtune_rules) {
-    const none = { crossover_hz: null, pm_deg: null, gm_db: null }
+    const none = { crossover_hz: null, pm_deg: null, gm_db: null, multiple_crossings: false, crossings: [] }
     const mag = (k) => Math.hypot(L[0][k], L[1][k])
     const phase = (k) => Math.atan2(L[1][k], L[0][k]) * 180 / Math.PI
     // Разность фаз соседних бинов — в (−180°, 180°]
     const step = (d) => d - 360 * Math.ceil((d - 180) / 360)
-    let kc = -1
-    for (let k = 1; k < freq.length; k++) {
-        if ((freq[k - 1] >= rules.crossover_min_hz) && (mag(k - 1) >= 1) && (mag(k) < 1)) {
-            kc = k
-            break
-        }
+    let k0 = 0
+    while ((k0 < freq.length) && !(freq[k0] >= rules.crossover_min_hz)) {
+        k0++
     }
-    if (kc < 0) {
-        return none
-    }
-    const m0 = mag(kc - 1)
-    const m1 = mag(kc)
-    const a = (m0 - 1) / (m0 - m1)
-    const crossover_hz = freq[kc - 1] + a * (freq[kc] - freq[kc - 1])
-    const p0 = phase(kc - 1)
-    const p1 = p0 + step(phase(kc) - p0)
-    const raw = p0 + a * (p1 - p0)
-    // Фаза среза — к (−360°, 0°]
-    const shift = -360 * Math.ceil(raw / 360)
-    const pm_deg = 180 + raw + shift
-    if (!Number.isFinite(pm_deg)) {
+    if (k0 >= freq.length - 1) {
         return none
     }
 
-    // Запас по амплитуде: фаза, развёрнутая от бина kc − 1 на той же ветви, что и фаза среза
+    // Развёрнутая фаза от k0 (главное значение на k0 — в (−360°, 0°])
+    const unwrapped = new Array(freq.length).fill(NaN)
+    const p0 = phase(k0)
+    unwrapped[k0] = p0 - 360 * Math.ceil(p0 / 360)
+    for (let k = k0 + 1; k < freq.length; k++) {
+        unwrapped[k] = unwrapped[k - 1] + step(phase(k) - phase(k - 1))
+    }
+
+    const crossings = []
+    for (let k = k0 + 1; k < freq.length; k++) {
+        const m0 = mag(k - 1)
+        const m1 = mag(k)
+        if ((m0 >= 1) && (m1 < 1)) {
+            const a = (m0 - 1) / (m0 - m1)
+            let phase_deg = unwrapped[k - 1] + a * (unwrapped[k] - unwrapped[k - 1])
+            if (crossings.length > 0) {
+                // Следующие пересечения — главное значение в (−360°, 0°]
+                phase_deg -= 360 * Math.ceil(phase_deg / 360)
+            }
+            crossings.push({ freq_hz: freq[k - 1] + a * (freq[k] - freq[k - 1]), pm_deg: 180 + phase_deg, bin: k })
+        }
+    }
+    if ((crossings.length == 0) || !crossings.every((c) => Number.isFinite(c.pm_deg))) {
+        return none
+    }
+    const pm_deg = Math.min(...crossings.map((c) => c.pm_deg))
+
+    // Запас по амплитуде: первый переход развёрнутой фазы через −180° выше первого пересечения
     let gm_db = null
     if (pm_deg > 0) {
-        let prev = p0 + shift
-        for (let k = kc; k < freq.length; k++) {
-            const next = prev + step(phase(k) - phase(k - 1))
+        for (let k = crossings[0].bin; k < freq.length; k++) {
+            const prev = unwrapped[k - 1]
+            const next = unwrapped[k]
             if ((prev > -180) && (next <= -180)) {
                 const b = (prev + 180) / (prev - next)
                 const db0 = 20 * Math.log10(mag(k - 1))
@@ -1180,10 +1252,15 @@ function pidtune_margins(freq, L, rules = pidtune_rules) {
                 gm_db = -(db0 + b * (db1 - db0))
                 break
             }
-            prev = next
         }
     }
-    return { crossover_hz: crossover_hz, pm_deg: pm_deg, gm_db: gm_db }
+    return {
+        crossover_hz: crossings[0].freq_hz,
+        pm_deg: pm_deg,
+        gm_db: gm_db,
+        multiple_crossings: crossings.length > 1,
+        crossings: crossings.map((c) => ({ freq_hz: c.freq_hz, pm_deg: c.pm_deg })),
+    }
 }
 
 // Прогноз варианта по измеренной T (раздел 4 дизайна). T — FFT импульсной характеристики КИХ fir.h, дополненной нулями
@@ -1199,10 +1276,18 @@ function pidtune_margins(freq, L, rules = pidtune_rules) {
 // Отклик — обратное FFT T_new и накопленная сумма на 0…step_length_s (сетка — как у fir.step); метрики —
 // pidtune_step_metrics; частота среза и запасы — pidtune_margins(L_new). Нечисловые коэффициенты дают NaN в L и T,
 // метрики и запасы null — pidtune_flags отметят вариант.
-// fir — pidtune_fir; c_log, c_new — pidtune_controller на частотах сетки (другая сетка — исключение); rate_hz — частота
-// лога (pidtune_segments).
-// → { freq, T (T_new), L (L_new) — [re[], im[]] на 0…rate_hz/2, crossover_hz, pm_deg, gm_db, step: { time, y }, metrics }
-// | null — нет КИХ или регулятора
+// Неустойчивый вариант: обратное FFT T_new неустойчивого контура — не отклик, а периодический непричинный ряд
+// (ревью задачи 6: K 290, P ×3 — «0 %» при правде 316 %). Поэтому unstable — запас фазы (наименьший по пересечениям)
+// не больше 0 или импульсная характеристика прогноза непричинна: доля её энергии в последней четверти буфера
+// (отрицательное время) noncausal больше noncausal_max. Тогда step и metrics — null. Второй признак нужен: на синтетике
+// с редкими манёврами прогноз P ×3 при запасе +0.3° и D ×6 при запасе +37° неустойчив (доля 0.17 и 0.12), у устойчивых
+// прогнозов доля не больше 3e-6.
+// fir — pidtune_fir; c_log, c_new — pidtune_controller на частотах сетки (по длине и шагу freq[1]; другая сетка —
+// исключение), ratio — [re[], im[]] той же длины или null; rate_hz — частота лога (pidtune_segments). Страница (шаг 4)
+// строит c_new с FLTE и FLTD, принятыми на шаге 3, а c_log — с фильтрами лога (как и pidtune_controller_check).
+// → { freq, T (T_new), L (L_new) — [re[], im[]] на 0…rate_hz/2 (L[·][0] — Infinity или NaN: 0 Гц на бодэ не рисовать),
+// crossover_hz, pm_deg, gm_db, multiple_crossings, crossings (pidtune_margins), unstable, noncausal, step: { time, y }
+// | null, metrics | null } | null — нет КИХ или регулятора
 function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rules) {
     if ((fir == null) || (c_log == null) || (c_new == null)) {
         return null
@@ -1210,10 +1295,11 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
     const grid = pidtune_predict_grid(rate_hz, rules)
     const n = grid.n
     const half = n / 2
-    for (const arr of [c_log.C, c_log.FF, c_new.C, c_new.FF, ratio]) {
-        if ((arr != null) && ((arr[0].length != half + 1) || (arr[1].length != half + 1))) {
-            throw new Error("pidtune_predict: регуляторы и поправка фильтров — на сетке pidtune_predict_grid (" + (half + 1) + " частот)")
-        }
+    const off_grid = (c) => (c.freq == null) || (c.freq.length != half + 1) || !(Math.abs(c.freq[1] - grid.freq[1]) <= 1e-9 * grid.freq[1])
+    const bad_length = (arr) => (arr != null) && ((arr[0].length != half + 1) || (arr[1].length != half + 1))
+    if (off_grid(c_log) || off_grid(c_new) || [c_log.C, c_log.FF, c_new.C, c_new.FF, ratio].some(bad_length)) {
+        throw new Error("pidtune_predict: регуляторы и поправка фильтров — на сетке pidtune_predict_grid (" + (half + 1) + " частот, шаг " +
+                        grid.freq[1] + " Гц)")
     }
 
     // T = FFT h (дополнение нулями до n)
@@ -1290,17 +1376,36 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
     }
     const impulse = fft.createComplexArray()
     fft.inverseTransform(impulse, full)
-    const n_out = Math.min(n, Math.round(rules.step_length_s * rate_hz) + 1)
-    const time = new Array(n_out)
-    const y = new Array(n_out)
-    let sum = 0
-    for (let i = 0; i < n_out; i++) {
-        sum += impulse[2 * i]
-        time[i] = i / rate_hz
-        y[i] = sum
-    }
 
+    // Причинность: доля энергии в последней четверти буфера (отрицательное время)
+    let energy = 0
+    let negative = 0
+    for (let i = 0; i < n; i++) {
+        const e = impulse[2 * i] ** 2
+        energy += e
+        if (i >= n - n / 4) {
+            negative += e
+        }
+    }
+    const noncausal = negative / energy
     const margins = pidtune_margins(grid.freq, L, rules)
+    const unstable = ((margins.pm_deg != null) && !(margins.pm_deg > 0)) || (noncausal > rules.noncausal_max)
+
+    let step = null
+    let metrics = null
+    if (!unstable) {
+        const n_out = Math.min(n, Math.round(rules.step_length_s * rate_hz) + 1)
+        const time = new Array(n_out)
+        const y = new Array(n_out)
+        let sum = 0
+        for (let i = 0; i < n_out; i++) {
+            sum += impulse[2 * i]
+            time[i] = i / rate_hz
+            y[i] = sum
+        }
+        step = { time: time, y: y }
+        metrics = pidtune_step_metrics(time, y, rules)
+    }
     return {
         freq: grid.freq,
         T: T_new,
@@ -1308,17 +1413,23 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
         crossover_hz: margins.crossover_hz,
         pm_deg: margins.pm_deg,
         gm_db: margins.gm_db,
-        step: { time: time, y: y },
-        metrics: pidtune_step_metrics(time, y, rules),
+        multiple_crossings: margins.multiple_crossings,
+        crossings: margins.crossings,
+        unstable: unstable,
+        noncausal: noncausal,
+        step: step,
+        metrics: metrics,
     }
 }
 
 // Достоверность прогноза оси (раздел 4 дизайна). Для коэффициентов лога прогноз совпадает с измеренным по построению,
 // поэтому проверяется, можно ли доверять T и модели регулятора:
 //   измерение надёжно — quality.ok (pidtune_quality: (а)–(в), в Acro «Rate Loop Only» — (а) и (б));
-//   модель регулятора сходится с данными — controller_check.ok (pidtune_controller_check);
+//   модель регулятора сходится с данными — controller_check.ok (pidtune_controller_check); у оси RATE сверка не
+//   запускается (skipped "rate") — причина «по RATE прогноз не считается» (решение координатора по ревью задачи 6:
+//   честный отказ — цель записана до FLTT, выход — с FF; FLTT не моделируется);
 //   когерентность γ² «цель → факт» на частоте среза лога (pidtune_coherence) не меньше coherence_min [наше].
-// Нет значения (null, нечисловое) — проверка не пройдена (отказ при сомнении).
+// Нет значения (null, нечисловое) — проверка не пройдена (отказ при сомнении). Числа у порога — с округлением от него.
 // → { valid, reasons: [текст по каждой непройденной проверке] }
 function pidtune_validity(quality, controller_check, coherence_at_crossover, rules = pidtune_rules) {
     const reasons = []
@@ -1331,19 +1442,22 @@ function pidtune_validity(quality, controller_check, coherence_at_crossover, rul
     const cc = rules.controller_check
     const mag = controller_check?.max_mag_err
     const phase = controller_check?.max_phase_err_deg
-    if (!Number.isFinite(mag) || !Number.isFinite(phase)) {
+    if (controller_check?.skipped == "rate") {
+        reasons.push("по RATE прогноз не считается: цель записана до фильтра FLTT, выход — с FF; включите бит PID в LOG_BITMASK " +
+                     "(сообщения PIDR, PIDP, PIDY)")
+    } else if (!Number.isFinite(mag) || !Number.isFinite(phase)) {
         reasons.push("сверка модели регулятора с данными не посчиталась: нет окон " + cc.window + " отсчётов с целью больше " +
                      rules.target_min_dps + " °/с или коэффициенты регулятора не числа")
     } else if (!controller_check.ok) {
-        reasons.push("модель регулятора не сходится с данными: модуль C_изм / C_мод отличается от 1 до " + (mag * 100).toFixed(1) +
-                     " %, фаза — до " + phase.toFixed(1) + "° (худшее — на " + controller_check.worst_hz.toFixed(1) + " Гц; порог " +
+        reasons.push("модель регулятора не сходится с данными: модуль C_изм / C_мод отличается от 1 до " +
+                     pidtune_beyond(mag * 100, cc.mag_err_max * 100, 1) + " %, фаза — до " + pidtune_beyond(phase, cc.phase_err_max_deg, 1) + "° (худшее — на " + controller_check.worst_hz.toFixed(1) + " Гц; порог " +
                      cc.mag_err_max * 100 + " % и " + cc.phase_err_max_deg + "° на " + cc.band_hz[0] + "–" + cc.band_hz[1] + " Гц)")
     }
 
     if (!Number.isFinite(coherence_at_crossover)) {
         reasons.push("когерентность «цель → факт» на частоте среза не посчиталась: частота среза не найдена или нет окон")
     } else if (!(coherence_at_crossover >= rules.coherence_min)) {
-        reasons.push("когерентность «цель → факт» на частоте среза γ² = " + coherence_at_crossover.toFixed(2) + " ниже " + rules.coherence_min +
+        reasons.push("когерентность «цель → факт» на частоте среза γ² = " + pidtune_beyond(coherence_at_crossover, rules.coherence_min, 2) + " ниже " + rules.coherence_min +
                      " — отклик на этой частоте плохо связан с целью (возмущения, шум)")
     }
     return { valid: reasons.length == 0, reasons: reasons }
@@ -1403,31 +1517,40 @@ function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) {
 }
 
 // Отметки прогноза варианта pred против прогноза для коэффициентов лога pred_log (оба — pidtune_predict, могут быть
-// null) — решение пользователя 25.10.2026:
+// null) — решение пользователя 25.10.2026, плюс неустойчивость (ревью задачи 6):
+//   unstable — прогноз неустойчив (pred.unstable: запас фазы не больше 0 или непричинный отклик); метрик у такого
+//   прогноза нет, перерегулирование отмечено без своего текста, неполным он не считается;
 //   low_pm — запас фазы ниже pm_min_deg;
 //   pm_drop — запас фазы хуже лога больше чем на pm_max_drop_deg;
 //   overshoot — перерегулирование в прогнозе выше overshoot_pred_max_pct;
-//   incomplete — нет прогноза, запаса фазы (частота среза не найдена) или метрик у варианта, нет запаса фазы у лога.
+//   incomplete — у устойчивого прогноза нет запаса фазы (частота среза не найдена) или метрик, нет прогноза, у лога нет
+//   запаса фазы.
 // Отметки отказывают при сомнении: !(значение в пределах порога), поэтому NaN и null отмечаются; ровно на пороге —
-// без отметки [наше]. Выбор они не блокируют.
-// → { low_pm, pm_drop, overshoot, incomplete, flagged (хотя бы одна), reasons: [текст] }
+// без отметки [наше]. Числа в текстах у порога — с округлением от него (pidtune_beyond). Выбор отметки не блокируют.
+// → { unstable, low_pm, pm_drop, overshoot, incomplete, flagged (хотя бы одна), reasons: [текст] }
 function pidtune_flags(pred, pred_log, rules = pidtune_rules) {
     const value = (v) => (typeof v === "number") ? v : NaN
     const pm = value(pred?.pm_deg)
     const pm_log = value(pred_log?.pm_deg)
     const os = value(pred?.metrics?.overshoot_pct)
+    const unstable = pred?.unstable === true
     const flags = {
+        unstable: unstable,
         low_pm: !(pm >= rules.pm_min_deg),
         pm_drop: !(pm_log - pm <= rules.pm_max_drop_deg),
         overshoot: !(os <= rules.overshoot_pred_max_pct),
-        incomplete: !Number.isFinite(pm) || !Number.isFinite(pm_log) || !Number.isFinite(os),
+        incomplete: (!unstable && (!Number.isFinite(pm) || !Number.isFinite(os))) || (pred == null) || !Number.isFinite(pm_log),
     }
     const reasons = []
+    if (unstable) {
+        reasons.push("контур неустойчив (" + (Number.isFinite(pm) ? "запас фазы " + pidtune_beyond(pm, 0, 1) + "°" : "запаса фазы нет") +
+                     ((Number.isFinite(pm) && (pm > 0)) ? "; прогноз отклика непричинный — у контура есть неустойчивые полюса" : "") + ")")
+    }
     if (flags.incomplete) {
         const missing = []
         if (pred == null) {
             missing.push("нет прогноза")
-        } else {
+        } else if (!unstable) {
             if (!Number.isFinite(pm)) {
                 missing.push("частота среза не найдена")
             }
@@ -1441,15 +1564,15 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) {
         reasons.push("прогноз неполный: " + missing.join(", "))
     }
     if (flags.low_pm && Number.isFinite(pm)) {
-        reasons.push("запас фазы " + pm.toFixed(1) + "° ниже " + rules.pm_min_deg + "°")
+        reasons.push("запас фазы " + pidtune_beyond(pm, rules.pm_min_deg, 1) + "° ниже " + rules.pm_min_deg + "°")
     }
     if (flags.pm_drop && Number.isFinite(pm) && Number.isFinite(pm_log)) {
-        reasons.push("запас фазы хуже лога на " + (pm_log - pm).toFixed(1) + "° (больше " + rules.pm_max_drop_deg + "°)")
+        reasons.push("запас фазы хуже лога на " + pidtune_beyond(pm_log - pm, rules.pm_max_drop_deg, 1) + "° (больше " + rules.pm_max_drop_deg + "°)")
     }
     if (flags.overshoot && Number.isFinite(os)) {
-        reasons.push("перерегулирование в прогнозе " + os.toFixed(1) + " % выше " + rules.overshoot_pred_max_pct + " %")
+        reasons.push("перерегулирование в прогнозе " + pidtune_beyond(os, rules.overshoot_pred_max_pct, 1) + " % выше " + rules.overshoot_pred_max_pct + " %")
     }
-    flags.flagged = flags.low_pm || flags.pm_drop || flags.overshoot || flags.incomplete
+    flags.flagged = flags.unstable || flags.low_pm || flags.pm_drop || flags.overshoot || flags.incomplete
     flags.reasons = reasons
     return flags
 }

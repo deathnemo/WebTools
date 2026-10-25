@@ -1009,6 +1009,12 @@ test('pidtune_controller: только P — C = Kp, с FLTE — Kp·H_FLTE; ф�
     // Нечисловые коэффициенты и фильтры — NaN (отказ при сомнении дальше по цепочке)
     assert.ok(Number.isNaN(pidtune_controller({ P: null, I: 0.1, D: 0 }, FILTERS0, RATE_HZ, [5]).C[0][0]), 'P null')
     assert.ok(Number.isNaN(pidtune_controller({ P: 0.1, I: 0.1, D: 0.003 }, { flte: 0, fltd: NaN }, RATE_HZ, [5]).C[0][0]), 'FLTD NaN')
+    // Нечисловой i_scale (в том числе null) — NaN (отказ при сомнении), а не регулятор без I; на 0 Гц — тоже NaN
+    for (const bad of [null, NaN, '4.5']) {
+        const c = pidtune_controller({ P: 0.1, I: 0.1, D: 0.003 }, FILTERS0, RATE_HZ, [0, 5], bad)
+        assert.ok(Number.isNaN(c.C[0][0]) && Number.isNaN(c.C[0][1]) && Number.isNaN(c.ki), 'i_scale ' + bad)
+    }
+    assert.ok(Number.isNaN(pidtune_controller({ P: NaN, I: 0.1, D: 0.003 }, FILTERS0, RATE_HZ, [0]).C[0][0]), 'P NaN на 0 Гц')
 })
 
 test('pidtune_controller: совпадает с разностными уравнениями update_all (первая разность импульсной характеристики), i_scale множит Ki, FF и DFF — отдельно', () => {
@@ -1074,12 +1080,68 @@ test('pidtune_margins: L = (fc/f)·e^(−j(90° + 360°·f·τ)) — срез fc
     const unstable = pidtune_margins(freq, loop(5.03, 0.06))
     close_to(unstable.pm_deg, 90 - 360 * 5.03 * 0.06, 0.1, 'отрицательный запас')
     assert.equal(unstable.gm_db, null)
+    assert.equal(m.multiple_crossings, false)
+    assert.equal(m.crossings.length, 1)
+    // Фаза первого пересечения развёрнута от низких частот: при τ 0.3 с она ниже −360° — запас 90° − 360°·fc·τ ≈ −453°
+    // (главное значение дало бы −93°)
+    close_to(pidtune_margins(freq, loop(5.03, 0.3)).pm_deg, 90 - 360 * 5.03 * 0.3, 0.1, 'запас при фазе ниже −360°')
     // Срез ниже crossover_min_hz (0.5 Гц) и |L| меньше 1 везде — частоты среза нет
-    assert.deepEqual(pidtune_margins(freq, loop(0.3, 0.02)), { crossover_hz: null, pm_deg: null, gm_db: null })
+    const none = { crossover_hz: null, pm_deg: null, gm_db: null, multiple_crossings: false, crossings: [] }
+    assert.deepEqual(pidtune_margins(freq, loop(0.3, 0.02)), none)
     // Нечисловое L — нет
     const bad = loop(5.03, 0.021)
     bad[0] = bad[0].map(() => NaN)
-    assert.deepEqual(pidtune_margins(freq, bad), { crossover_hz: null, pm_deg: null, gm_db: null })
+    assert.deepEqual(pidtune_margins(freq, bad), none)
+})
+
+test('pidtune_margins: резонанс даёт второе пересечение — запас наименьший по всем, частота среза — первого, у второго — главное значение фазы', () => {
+    // L = (fc/f)·e^(−j(90° + 360°·f·τ))·P(f), P — резонанс 30 Гц, ζ 0.03 (пик |P| ≈ 16.7): |L| поднимается выше 1 у 30 Гц.
+    // τ 5 мс — у второго пересечения запас отрицательный (наименьший); τ 12 мс — фаза второго ниже −360°, берётся
+    // главное значение (развёрнутая дала бы запас около −206° вместо 154°)
+    const fc = 5.03
+    const resonance = (f) => {
+        const r = f / 30
+        return { mag: 1 / Math.hypot(1 - r * r, 2 * 0.03 * r), deg: Math.atan2(-2 * 0.03 * r, 1 - r * r) * R2D }
+    }
+    const mag = (f) => fc / f * resonance(f).mag
+    const freq = Array.from({ length: 2001 }, (_, k) => k * 0.1)
+    // Пересечения сверху вниз — бисекцией по аналитическому |L|
+    const down = (a, b) => {
+        for (let i = 0; i < 60; i++) {
+            const c = (a + b) / 2
+            if (mag(c) >= 1) a = c
+            else b = c
+        }
+        return (a + b) / 2
+    }
+    const f1 = down(4, 7)
+    const f2 = down(31, 40)
+    for (const tau of [0.005, 0.012]) {
+        // Фаза непрерывная: аргумент резонанса — от 0° до −180°
+        const deg = (f) => -90 - 360 * f * tau + resonance(f).deg
+        const L = [freq.map((f) => (f > 0) ? mag(f) * Math.cos(deg(f) / R2D) : Infinity), freq.map((f) => (f > 0) ? mag(f) * Math.sin(deg(f) / R2D) : 0)]
+        const m = pidtune_margins(freq, L)
+        const what = 'τ ' + tau
+        assert.equal(m.multiple_crossings, true, what)
+        assert.equal(m.crossings.length, 2, what)
+        close_to(m.crossings[0].freq_hz, f1, 2e-3, what + ': первое пересечение')
+        close_to(m.crossings[1].freq_hz, f2, 2e-3, what + ': второе пересечение')
+        close_to(m.crossover_hz, f1, 2e-3, what + ': частота среза — первого пересечения')
+        close_to(m.crossings[0].pm_deg, 180 + deg(f1), 0.1, what + ': запас первого — развёрнутая фаза')
+        const principal = deg(f2) - 360 * Math.ceil(deg(f2) / 360)
+        close_to(m.crossings[1].pm_deg, 180 + principal, 0.5, what + ': запас второго — главное значение')
+        assert.equal(m.pm_deg, Math.min(m.crossings[0].pm_deg, m.crossings[1].pm_deg), what)
+        if (tau == 0.005) {
+            assert.ok(m.crossings[1].pm_deg < 0, 'второе пересечение неустойчиво: ' + m.crossings[1].pm_deg)
+            assert.equal(m.pm_deg, m.crossings[1].pm_deg)
+            assert.equal(m.gm_db, null, 'запас фазы не больше 0 — запаса по амплитуде нет')
+        } else {
+            assert.ok(deg(f2) < -360, 'фаза второго ниже −360°: ' + deg(f2))
+            assert.ok(m.crossings[1].pm_deg > 90, 'запас второго ' + m.crossings[1].pm_deg)
+            assert.equal(m.pm_deg, m.crossings[0].pm_deg)
+            assert.ok(m.gm_db > 0, 'запас по амплитуде ' + m.gm_db)
+        }
+    }
 })
 
 test('pidtune_predict: на известном контуре — T_new = G·g·(C_new + FF) / (1 + G·g·C_new) точно, с FF ≠ 0 и поправкой фильтров', () => {
@@ -1185,6 +1247,8 @@ test('pidtune_predict: rate-only синтетика — прогноз P ±10 %,
             const truth = pidtune_step_metrics(...Object.values(truth_step({ kp: v.P, ki: v.I, kd: v.D, fltd: FILTERS0.fltd }, plant)))
             const truth_pm = pidtune_margins(grid.freq, cmul(c_new.C, Gp)).pm_deg
             const what = 'K ' + plant.K + ', ' + title
+            assert.equal(pred.unstable, false, what)
+            assert.ok(pred.noncausal < 1e-6, what + ': доля энергии до нуля времени ' + pred.noncausal)
             close_to(pred.metrics.overshoot_pct, truth.overshoot_pct, 3, what + ': перерегулирование, %')
             close_to(pred.pm_deg, truth_pm, 5, what + ': запас фазы, °')
         }
@@ -1213,6 +1277,11 @@ test('pidtune_predict: для коэффициентов лога прогноз
     assert.equal(pidtune_predict(null, c_log, c_log, null, seg.rate_hz), null)
     const short = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq.slice(0, 100))
     assert.throws(() => pidtune_predict(fir, c_log, short, null, seg.rate_hz), /сетке/)
+    // Та же длина, другой шаг (сетка частоты 300 Гц: тоже 2049 частот) — тоже исключение
+    const other = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, pidtune_predict_grid(300).freq)
+    assert.equal(other.C[0].length, grid.freq.length)
+    assert.throws(() => pidtune_predict(fir, c_log, other, null, seg.rate_hz), /шаг/)
+    assert.throws(() => pidtune_predict(fir, c_log, c_log, [new Array(5).fill(1), new Array(5).fill(0)], seg.rate_hz), /сетке/)
     // Пустое поле формы (NaN) — прогноз есть, но без метрик и запасов: отметки — «неполный»
     const broken = pidtune_predict(fir, c_log, pidtune_controller({ ...LOG_GAINS, D: NaN }, FILTERS0, RATE_HZ, grid.freq), null, seg.rate_hz)
     assert.equal(broken.metrics, null)
@@ -1242,7 +1311,8 @@ test('pidtune_controller_check: верная модель на синтетик�
     assert.equal(pidtune_controller_check(axis, 0, [0, 1e9], { ...LOG_GAINS, I: LOG_GAINS.I / 4.5 }, FILTERS0, RATE_HZ, 4.5).ok, true, 'Ki / 4.5 × i_scale 4.5')
     // Интервал вне данных — окон нет; нечисловые коэффициенты — не проходит
     assert.deepEqual(pidtune_controller_check(axis, 0, [500, 600], LOG_GAINS, FILTERS0, RATE_HZ, 1),
-                     { ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: 0 })
+                     { ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: 0, skipped: null })
+    assert.equal(right.skipped, null)
     assert.equal(pidtune_controller_check(axis, 0, [0, 1e9], { ...LOG_GAINS, P: NaN }, FILTERS0, RATE_HZ, 1).ok, false)
 })
 
@@ -1326,7 +1396,9 @@ test('pidtune_validity: всё пройдено — достоверен; каж
         [q_ok, cc_bad, 0.9, 'модель регулятора не сходится с данными: модуль C_изм / C_мод отличается от 1 до 43.0 %'],
         [q_ok, cc_none, 0.9, 'сверка модели регулятора с данными не посчиталась'],
         [q_ok, null, 0.9, 'сверка модели регулятора с данными не посчиталась'],
+        [q_ok, { ...cc_none, skipped: 'rate' }, 0.9, 'по RATE прогноз не считается: цель записана до фильтра FLTT, выход — с FF; включите бит PID в LOG_BITMASK'],
         [q_ok, cc_ok, 0.49, 'когерентность «цель → факт» на частоте среза γ² = 0.49 ниже 0.5'],
+        [q_ok, cc_ok, 0.4999, 'когерентность «цель → факт» на частоте среза γ² = 0.49 ниже 0.5'],
         [q_ok, cc_ok, null, 'когерентность «цель → факт» на частоте среза не посчиталась'],
         [q_ok, cc_ok, NaN, 'когерентность «цель → факт» на частоте среза не посчиталась'],
     ]
@@ -1390,13 +1462,13 @@ test('pidtune_flags: отметки на порогах — запас фазы 
     // Чуть за порогом — по одной отметке
     const low = pidtune_flags(pred(29.99, 5), pred(33, 5))
     assert.deepEqual([low.low_pm, low.pm_drop, low.overshoot, low.flagged], [true, false, false, true])
-    assert.equal(low.reasons[0], 'запас фазы 30.0° ниже 30°')
+    assert.equal(low.reasons[0], 'запас фазы 29.9° ниже 30°', 'у порога — с округлением от него, а не «30.0° ниже 30°»')
     const drop = pidtune_flags(pred(44.99, 10), log)
     assert.deepEqual([drop.low_pm, drop.pm_drop, drop.overshoot], [false, true, false])
-    assert.equal(drop.reasons[0], 'запас фазы хуже лога на 5.0° (больше 5°)')
+    assert.equal(drop.reasons[0], 'запас фазы хуже лога на 5.1° (больше 5°)')
     const os = pidtune_flags(pred(50, 20.01), log)
     assert.deepEqual([os.low_pm, os.pm_drop, os.overshoot], [false, false, true])
-    assert.equal(os.reasons[0], 'перерегулирование в прогнозе 20.0 % выше 20 %')
+    assert.equal(os.reasons[0], 'перерегулирование в прогнозе 20.1 % выше 20 %')
     // Лучше лога — без отметки ухудшения
     assert.equal(pidtune_flags(pred(60, 5), log).flagged, false)
     // Неполный прогноз: нет прогноза, частоты среза, метрик или запаса у лога — отметка (отказ при сомнении)
@@ -1415,6 +1487,29 @@ test('pidtune_flags: отметки на порогах — запас фазы 
     assert.deepEqual([no_os.low_pm, no_os.pm_drop, no_os.overshoot], [false, false, true])
     const no_log = pidtune_flags(pred(50, 10), null)
     assert.deepEqual([no_log.low_pm, no_log.pm_drop, no_log.overshoot, no_log.incomplete], [false, true, false, true])
+    // Неустойчивый прогноз: отметка unstable с запасом фазы, метрик нет, но «неполным» он не считается
+    const unstable = pidtune_flags({ pm_deg: -6.74, metrics: null, unstable: true }, log)
+    assert.deepEqual([unstable.unstable, unstable.low_pm, unstable.pm_drop, unstable.overshoot, unstable.incomplete, unstable.flagged],
+                     [true, true, true, true, false, true])
+    assert.deepEqual(unstable.reasons, ['контур неустойчив (запас фазы -6.7°)', 'запас фазы -6.7° ниже 30°', 'запас фазы хуже лога на 56.7° (больше 5°)'])
+    // Неустойчив при положительном запасе (непричинный отклик)
+    const noncausal = pidtune_flags({ pm_deg: 12, metrics: null, unstable: true }, log)
+    assert.equal(noncausal.unstable, true)
+    assert.ok(noncausal.reasons[0].startsWith('контур неустойчив (запас фазы 12.0°; прогноз отклика непричинный'), noncausal.reasons[0])
+    assert.equal(pidtune_flags(pred(50, 10), log).unstable, false)
+})
+
+test('pidtune_beyond: число у порога — с округлением от порога, вдали от порога — обычное округление', () => {
+    assert.equal(pidtune_beyond(29.99, 30, 1), '29.9')
+    assert.equal(pidtune_beyond(20.01, 20, 1), '20.1')
+    assert.equal(pidtune_beyond(0.4999, 0.5, 2), '0.49')
+    assert.equal(pidtune_beyond(5.04, 5, 1), '5.1', '«5.0 больше 5» нельзя')
+    // Вдали от порога — как toFixed
+    assert.equal(pidtune_beyond(0.0731, 0.035, 3), '0.073')
+    assert.equal(pidtune_beyond(-6.74, 0, 1), '-6.7')
+    assert.equal(pidtune_beyond(0.43 * 100, 10, 1), '43.0', '43.00000000000001')
+    assert.equal(pidtune_beyond(30, 30, 1), '30.0', 'ровно на пороге')
+    assert.equal(pidtune_beyond(29.96, 30, 1), '29.9', 'toFixed дал бы 30.0')
 })
 
 test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I только у варианта — 1; только у лога — T(0)', () => {
@@ -1429,4 +1524,82 @@ test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I тол
     // Без интеграторов — обычная формула: R(0) = Kp_new / Kp_log
     const p = (P) => pidtune_controller({ P: P, I: 0, D: 0.002 }, FILTERS0, RATE_HZ, grid.freq)
     close_to(pidtune_predict(fir, p(0.1), p(0.3), null, RATE_HZ).T[0][0], 3 * 0.9 / (0.1 + 3 * 0.9), 1e-12, 'без I')
+})
+
+test('pidtune_predict: неустойчивый вариант (K 290, P ×3) — unstable, отклика и метрик нет, отметка «контур неустойчив»', () => {
+    // Обратное FFT T_new неустойчивого контура — периодический непричинный ряд: без проверки прогноз показал бы 0 %
+    // при правде 316 % (ревью задачи 6)
+    const { seg, fir } = rate_only_flight(PLANT_FAST)
+    const grid = pidtune_predict_grid(seg.rate_hz)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const pred_log = pidtune_predict(fir, c_log, c_log, null, seg.rate_hz)
+    const p3 = { P: 3 * G0.kp, I: 3 * G0.ki, D: G0.kd }
+    const truth = pidtune_step_metrics(...Object.values(truth_step({ kp: p3.P, ki: p3.I, kd: p3.D, fltd: FILTERS0.fltd }, PLANT_FAST)))
+    assert.ok(truth.overshoot_pct > 100, 'правда: ' + truth.overshoot_pct)
+    const pred = pidtune_predict(fir, c_log, pidtune_controller(p3, FILTERS0, RATE_HZ, grid.freq), null, seg.rate_hz)
+    assert.equal(pred.unstable, true)
+    assert.ok(pred.pm_deg < 0, 'запас фазы ' + pred.pm_deg)
+    assert.ok(pred.noncausal > pidtune_rules.noncausal_max, 'доля энергии до нуля времени ' + pred.noncausal)
+    assert.equal(pred.step, null)
+    assert.equal(pred.metrics, null)
+    assert.ok(pred.crossover_hz > 0, 'частота среза и L остаются для бодэ')
+    const flags = pidtune_flags(pred, pred_log)
+    assert.equal(flags.unstable, true)
+    assert.equal(flags.incomplete, false)
+    assert.ok(flags.reasons[0].startsWith('контур неустойчив (запас фазы -'), flags.reasons[0])
+    // Неустойчивость по причинности при положительном запасе: порог доли энергии до нуля — по правилам
+    const strict = { ...pidtune_rules, noncausal_max: 1e-40 }
+    const stable = pidtune_predict(fir, c_log, c_log, null, seg.rate_hz, strict)
+    assert.ok(stable.pm_deg > 0)
+    assert.equal(stable.unstable, true, 'доля ' + stable.noncausal + ' больше порога 1e-40')
+    assert.equal(stable.metrics, null)
+    assert.equal(pred_log.unstable, false)
+})
+
+test('pidtune_controller_check и pidtune_validity: ось RATE — сверка не запускается, причина «по RATE прогноз не считается»', () => {
+    const rate = rate_axis()
+    assert.equal(pidtune_has_components(rate, 0), false)
+    assert.equal(pidtune_has_components(rate_only_flight(PLANT_NORMAL).axis, 0), true)
+    const cc = pidtune_controller_check(rate, 0, [12, 28], LOG_GAINS, FILTERS0, RATE_HZ, 1)
+    assert.deepEqual(cc, { ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: 0, skipped: 'rate' })
+    const v = pidtune_validity({ ok: true, checks: {}, reasons: [] }, cc, 0.9)
+    assert.equal(v.valid, false)
+    assert.equal(v.reasons.length, 1, v.reasons.join('; '))
+    assert.ok(v.reasons[0].startsWith('по RATE прогноз не считается'), v.reasons[0])
+    assert.ok(!v.reasons[0].includes('не сходится'), 'не ложная причина «модель не сходится»')
+})
+
+test('pidtune_gyro_ratio: H меняется по окнам (движущийся notch) — отношение средних, а не среднее отношений', () => {
+    // Источник трекинга-заглушка: частота notch по окнам 80…120 Гц
+    const centers = [80, 90, 100, 110, 120]
+    const moving = { mode_value: 1, warnings: [], have_data: () => true, no_data_error: () => null,
+                     get_interpolated_target_freq: (instance, index) => [centers[index]] }
+    const gyro = [{ FFT: { time: [1, 2, 3, 4, 5], average_sample_rate: 1000, x: [[0], [0], [0], [0], [0]] } }]
+    const env = { filter_version: 2 }
+    const ctx = { gyro, env, tracking: [moving], range: [0, 10], sensor: 0 }
+    const notch = (att) => ({ INS_GYRO_FILTER: 40, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 100, INS_HNTCH_BW: 20,
+                              INS_HNTCH_ATT: att, INS_HNTCH_HMNCS: 1 })
+    const freq = [5, 30, 85, 100, 115]
+    const ratio = pidtune_gyro_ratio(notch(30), notch(15), ctx, freq)
+    // Ожидаемое — по тем же filter_transfer, усреднение — своё
+    const Z = exp_jw(freq, 1000)
+    const H = (values) => filter_transfer(load_filters(values, env, ctx.tracking), 0, gyro[0].FFT.time, 1000, complex_inverse(Z), complex_inverse(complex_square(Z)))
+    const H_old = H(notch(30))
+    const H_new = H(notch(15))
+    const start = find_start_index(gyro[0].FFT.time, ctx.range)
+    const end = find_end_index(gyro[0].FFT.time, ctx.range) + 1
+    assert.equal(end - start, 5, 'все пять окон')
+    const div = (a, b) => [(a[0] * b[0] + a[1] * b[1]) / (b[0] ** 2 + b[1] ** 2), (a[1] * b[0] - a[0] * b[1]) / (b[0] ** 2 + b[1] ** 2)]
+    let differs = 0
+    for (let k = 0; k < freq.length; k++) {
+        const mean = (Hs) => [0, 1].map((c) => Hs.slice(start, end).reduce((sum, h) => sum + h[c][k], 0) / (end - start))
+        const expected = div(mean(H_new), mean(H_old))
+        close_to(ratio[0][k], expected[0], 1e-12, 'Re на ' + freq[k] + ' Гц')
+        close_to(ratio[1][k], expected[1], 1e-12, 'Im на ' + freq[k] + ' Гц')
+        const each = [0, 1].map((c) => H_old.slice(start, end).reduce((sum, h, j) => sum + div(H_new[start + j].map((a) => a[k]), h.map((b) => b[k]))[c], 0) / (end - start))
+        differs = Math.max(differs, Math.hypot(each[0] - expected[0], each[1] - expected[1]))
+    }
+    assert.ok(differs > 0.05, 'отношение средних отличается от среднего отношений: ' + differs)
+    // Вдали от notch — почти 1
+    close_to(Math.hypot(ratio[0][0], ratio[1][0]), 1, 1e-3, '|отношение| на 5 Гц')
 })
