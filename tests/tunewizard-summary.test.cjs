@@ -20,11 +20,14 @@ function load_page_scripts(files) {
     }
 }
 
-// Нужное итогу в порядке страницы: param_file_text (Param_Helpers.js, params.js), notch_param_names (filters.js),
-// pidtune_axes (pidtune.js; ему при загрузке нужны константы core/pid.js)
+// Нужное итогу и тестам в порядке страницы: param_file_text (Param_Helpers.js, params.js), notch_param_names
+// (filters.js), lowpass_param_names (lowpass.js; ему при загрузке нужен candidate_rules из candidates.js),
+// pidtune_axes (pidtune.js; ему — константы core/pid.js)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
     'TuneWizard/core/filters.js',
+    'TuneWizard/core/candidates.js',
+    'TuneWizard/core/lowpass.js',
     'TuneWizard/core/pid.js',
     'TuneWizard/core/pidtune.js',
     'TuneWizard/core/params.js',
@@ -40,15 +43,6 @@ function fake_params(values) {
         has: (name) => name in values,
     }
 }
-
-// Имена шагов — как их собирает страница: step2_param_names(), lowpass_param_names(params) для лога 4.6+
-// (пределы ATC_ACC_*_MAX), step4_param_names()
-const STEP2_NAMES = ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...notch_param_names().flatMap((n) => Object.values(n))]
-const STEP3_NAMES = ['INS_GYRO_FILTER', 'INS_ACCEL_FILTER',
-    ...['RLL', 'PIT', 'YAW'].flatMap((a) => ['FLTT', 'FLTE', 'FLTD'].map((k) => 'ATC_RAT_' + a + '_' + k)),
-    'ATC_ACC_R_MAX', 'ATC_ACC_P_MAX', 'ATC_ACC_Y_MAX']
-const STEP4_NAMES = Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
-const NAMES = { 2: STEP2_NAMES, 3: STEP3_NAMES, 4: STEP4_NAMES }
 
 // Лог как у тестового: версия фильтра 2 (ESCMSK нет), первый notch включён, второй выключен — полей INS_HNTC2_*,
 // кроме ENABLE, в логе нет. Дробные значения — как float32 из лога
@@ -67,8 +61,15 @@ const BASE_LOG = {
     ATC_RAT_YAW_P: Math.fround(0.18), ATC_RAT_YAW_I: Math.fround(0.018), ATC_RAT_YAW_D: 0,
 }
 
-// Принятое шага: по всем именам шага — значение из changes, иначе из лога, иначе 0 (как форма шага 2 даёт
-// значения и скрытым полям)
+// Имена шагов — как их собирает страница: step2_param_names() (steps/step2.js — под Node не грузится, тот же
+// состав), lowpass_param_names(params) — для BASE_LOG пределы ATC_ACC_*_MAX, step4_param_names() (тот же состав)
+const STEP2_NAMES = ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...notch_param_names().flatMap((n) => Object.values(n))]
+const STEP3_NAMES = lowpass_param_names(fake_params(BASE_LOG))
+const STEP4_NAMES = Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
+const NAMES = { 2: STEP2_NAMES, 3: STEP3_NAMES, 4: STEP4_NAMES }
+
+// Принятое шага: по всем именам шага — значение из changes, иначе из лога, иначе 0. Упрощение: форма шага 2
+// для отсутствующих в логе полей берёт умолчания (values_from_log), а не 0 — итогу это не важно
 function accepted_values(names, log, changes = {}) {
     return Object.fromEntries(names.map((name) => [name, (name in changes) ? changes[name] : ((name in log) ? log[name] : 0)]))
 }
@@ -79,7 +80,7 @@ function step4_axes(reliable = {}) {
         metrics: { reliable: reliable[axis] ?? true } }]))
 }
 
-// Вход summary_rows: лог (поверх BASE_LOG), принятые шаги, версия фильтра и размер маски HMNCS
+// Вход summary_rows: лог (целиком заменяет BASE_LOG), принятые шаги, версия фильтра и размер маски HMNCS
 function rows_ctx({ log = BASE_LOG, steps = [], filter_version = 2, bits = 8 } = {}) {
     return { params: fake_params(log), steps: steps, names: NAMES, filter_version: filter_version, bits: bits }
 }
@@ -110,6 +111,18 @@ test('summary_same: маски — целые; HMNCS без знака по ра
     assert.equal(summary_same('INS_HNTCH_HMNCS', 2**24 + 1, 2**24, 32), false)
     assert.equal(summary_same('INS_HNTCH_OPTS', -128, 128, 8), false)
     assert.equal(summary_same('INS_HNTC2_ESCMSK', 15, 15, 8), true)
+})
+
+// ---------------------------------------------------------------- summary_notch_enabling
+
+test('summary_notch_enabling: ENABLE в логе нет или ≤ 0, а принято > 0', () => {
+    assert.equal(summary_notch_enabling(null, 1), true)
+    assert.equal(summary_notch_enabling(0, 1), true)
+    assert.equal(summary_notch_enabling(-1, 2), true)
+    assert.equal(summary_notch_enabling(0, 0), false)
+    assert.equal(summary_notch_enabling(null, 0), false)
+    assert.equal(summary_notch_enabling(1, 1), false)
+    assert.equal(summary_notch_enabling(1, 0), false)
 })
 
 // ---------------------------------------------------------------- summary_rows
@@ -160,6 +173,7 @@ test('summary_rows: маска HMNCS 8 бит — лог −128 и принят�
     assert.equal(row_of(changed, 'INS_HNTCH_HMNCS').changed, true)
     assert.equal(row_of(changed, 'INS_HNTCH_HMNCS').value, 128)
     assert.deepEqual(summary_param_values(changed.rows, 8), { INS_HNTCH_HMNCS: -128 })
+    assert.equal(summary_param_text(changed.rows, 8), 'INS_HNTCH_HMNCS,-128\n')
 
     // 32 бита: сравнение и запись как есть
     const wide = summary_rows(rows_ctx({ log: { ...BASE_LOG, INS_HNTCH_HMNCS: -128 }, steps: steps, bits: 32 }))
@@ -179,6 +193,10 @@ test('summary_rows: ESCMSK при версии фильтра ниже 4 — с�
     const v4 = summary_rows(rows_ctx({ log: log, steps: steps, filter_version: 4 }))
     assert.deepEqual(v4.rows.filter((r) => r.name.endsWith('_ESCMSK')).map((r) => r.name), ['INS_HNTCH_ESCMSK', 'INS_HNTC2_ESCMSK'])
     assert.equal(row_of(v4, 'INS_HNTCH_ESCMSK').changed, false)
+
+    // Версия фильтра неизвестна — как ниже 4 (защитное правило, как step2_save_param)
+    const unknown = summary_rows({ ...rows_ctx({ log: log, steps: steps }), filter_version: undefined })
+    assert.deepEqual(unknown.rows.filter((r) => r.name.endsWith('_ESCMSK')), [])
 })
 
 test('summary_rows: включаемый второй notch — все поля INS_HNTC2_* изменены, у отсутствующих в логе log = null', () => {
@@ -218,6 +236,42 @@ test('summary_rows: notch остаётся выключенным — поля �
         { name: 'INS_HNTC2_FREQ', log: null, value: 153, step: 2, changed: false, note: 'нет в логе — не пишется' })
     assert.equal(result.rows.some((r) => r.changed), false)
     assert.equal(summary_param_text(result.rows, 8), null)
+})
+
+test('summary_rows: поле включаемого notch, совпавшее с логом, всё равно изменено', () => {
+    const log = { ...BASE_LOG, INS_HNTC2_FREQ: 80 }
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTC2_ENABLE: 1 }) }
+    const result = summary_rows(rows_ctx({ log: log, steps: steps }))
+    assert.deepEqual(row_of(result, 'INS_HNTC2_FREQ'),
+        { name: 'INS_HNTC2_FREQ', log: 80, value: 80, step: 2, changed: true, note: null })
+    assert.equal(summary_param_values(result.rows, 8).INS_HNTC2_FREQ, 80)
+})
+
+test('summary_rows: выключение notch — меняется только ENABLE, прочие поля сравниваются как обычно', () => {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_ENABLE: 0, INS_HNTCH_FREQ: 75 }) }
+    const result = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(result.rows.filter((r) => r.changed).map((r) => r.name), ['INS_HNTCH_ENABLE', 'INS_HNTCH_FREQ'])
+    assert.equal(row_of(result, 'INS_HNTCH_BW').changed, false)
+    assert.equal(row_of(result, 'INS_HNTCH_BW').note, null)
+})
+
+test('summary_rows: включение первого notch — все поля INS_HNTCH_* изменены', () => {
+    // В логе первый notch выключен: из его полей есть только ENABLE
+    const log = Object.fromEntries(Object.entries(BASE_LOG).filter(([name]) => !name.startsWith('INS_HNTCH_')))
+    log.INS_HNTCH_ENABLE = 0
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTCH_ENABLE: 1, INS_HNTCH_FREQ: 80 }) }
+    const result = summary_rows(rows_ctx({ log: log, steps: steps }))
+    const notch1 = result.rows.filter((r) => r.name.startsWith('INS_HNTCH_'))
+    assert.deepEqual(notch1.map((r) => r.name), Object.values(notch_param_names()[0]).filter((name) => !name.endsWith('_ESCMSK')))
+    for (const row of notch1) {
+        assert.equal(row.changed, true, row.name)
+        assert.equal(row.log, (row.name === 'INS_HNTCH_ENABLE') ? 0 : null, row.name)
+    }
+    // Второй notch остаётся выключенным: его поля без лога не пишутся
+    assert.deepEqual(result.rows.filter((r) => r.changed).map((r) => r.name), notch1.map((r) => r.name))
 })
 
 test('summary_rows: INS_GYRO_FILTER шагов 2 и 3 — одна строка от шага 3, расхождение в conflicts', () => {
@@ -268,9 +322,22 @@ test('summary_rows: ненадёжная ось шага 4 — ручная пр
     assert.equal(row_of(result, 'ATC_RAT_YAW_P').note, null)
 })
 
+test('summary_rows: шаг 4 без axes или с metrics null — правка без пометки', () => {
+    const accepted = accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.15 })
+    const no_metrics = step4_axes()
+    no_metrics.roll.metrics = null
+    for (const step4 of [{ accepted: accepted }, { accepted: accepted, axes: no_metrics }]) {
+        const steps = []
+        steps[4] = step4
+        const row = row_of(summary_rows(rows_ctx({ steps: steps })), 'ATC_RAT_RLL_P')
+        assert.equal(row.changed, true)
+        assert.equal(row.note, null)
+    }
+})
+
 // ---------------------------------------------------------------- .param
 
-test('summary_param_text: только изменённые, натуральный порядок имён; без изменений — null', () => {
+test('summary_param_text: только изменённые, текст — param_file_text их значений; без изменений — null', () => {
     const steps = []
     steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 75, INS_HNTCH_FM_RAT: 0.7 }) }
     steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { ATC_RAT_RLL_FLTD: 25, INS_ACCEL_FILTER: 10 }) }
@@ -278,6 +345,7 @@ test('summary_param_text: только изменённые, натуральн�
     const result = summary_rows(rows_ctx({ steps: steps }))
     assert.equal(summary_param_text(result.rows, 8),
         'ATC_RAT_PIT_D,0.004\nATC_RAT_RLL_FLTD,25\nINS_ACCEL_FILTER,10\nINS_HNTCH_FM_RAT,0.7\nINS_HNTCH_FREQ,75\n')
+    assert.equal(summary_param_text(result.rows, 8), param_file_text(summary_param_values(result.rows, 8)))
     assert.deepEqual(Object.keys(summary_param_values(result.rows, 8)).sort(),
         ['ATC_RAT_PIT_D', 'ATC_RAT_RLL_FLTD', 'INS_ACCEL_FILTER', 'INS_HNTCH_FM_RAT', 'INS_HNTCH_FREQ'])
 
@@ -295,44 +363,59 @@ test('summary_file_name: имя лога без последнего расши�
     assert.equal(summary_file_name('2026-06-18 18-54-42_anon.bin'), '2026-06-18 18-54-42_anon_tune.param')
     assert.equal(summary_file_name('log'), 'log_tune.param')
     assert.equal(summary_file_name(null), 'tune.param')
+    assert.equal(summary_file_name(''), 'tune.param')
 })
 
 // ---------------------------------------------------------------- отпечаток входов
 
-// Состояние для отпечатка: интервал, ключ FFT шага 1, принятые шаги 2 и 3
+// Состояние для отпечатка: интервал, ключ FFT и версия фильтра шага 1, принятые шаги 2 и 3
 function inputs_ctx() {
     const steps = []
     steps[2] = { accepted: { INS_HNTCH_FREQ: 80, INS_GYRO_FILTER: 40 } }
     steps[3] = { accepted: { INS_GYRO_FILTER: 45, INS_ACCEL_FILTER: 10 } }
-    return { start: 10, end: 100, fft_key: 'batch:16', steps: steps }
+    return { start: 10, end: 100, fft_key: 'batch:16', filter_version: 4, steps: steps }
 }
 
-test('summary_inputs_key: JSON [начало, конец, ключ FFT, принятое шагов 2..n−1 с именами по алфавиту]', () => {
+// Состояние, в котором шаги 2–4 приняты с отпечатками от него самого
+function inputs_ctx_accepted() {
     const ctx = inputs_ctx()
-    assert.deepEqual(JSON.parse(summary_inputs_key(2, ctx)), [10, 100, 'batch:16', []])
+    ctx.steps[4] = { accepted: { ATC_RAT_RLL_P: 0.135 } }
+    for (const n of [2, 3, 4]) {
+        ctx.steps[n].inputs = summary_inputs_key(n, ctx)
+    }
+    return ctx
+}
+
+test('summary_inputs_key: JSON [начало, конец, ключ FFT, версия фильтра, принятое шагов 2..n−1 с именами по алфавиту]', () => {
+    const ctx = inputs_ctx()
+    assert.deepEqual(JSON.parse(summary_inputs_key(2, ctx)), [10, 100, 'batch:16', 4, []])
     assert.deepEqual(JSON.parse(summary_inputs_key(3, ctx)),
-        [10, 100, 'batch:16', [[['INS_GYRO_FILTER', 40], ['INS_HNTCH_FREQ', 80]]]])
-    // Шаг 4: ключа FFT нет; непринятый шаг — null
+        [10, 100, 'batch:16', 4, [[['INS_GYRO_FILTER', 40], ['INS_HNTCH_FREQ', 80]]]])
+    // Шаг 4: ключа FFT и версии фильтра нет; непринятый шаг — null
     ctx.steps[2] = null
     assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx)),
-        [10, 100, null, [null, [['INS_ACCEL_FILTER', 10], ['INS_GYRO_FILTER', 45]]]])
+        [10, 100, null, null, [null, [['INS_ACCEL_FILTER', 10], ['INS_GYRO_FILTER', 45]]]])
     // Порядок имён в принятом не важен
     const swapped = inputs_ctx()
     swapped.steps[2] = { accepted: { INS_GYRO_FILTER: 40, INS_HNTCH_FREQ: 80 } }
     assert.equal(summary_inputs_key(3, swapped), summary_inputs_key(3, inputs_ctx()))
 })
 
+test('summary_inputs_key: нет интервала, ключа FFT или версии фильтра (undefined) — null', () => {
+    assert.deepEqual(JSON.parse(summary_inputs_key(2, { steps: [] })), [null, null, null, null, []])
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, { steps: [] })), [null, null, null, null, [null, null]])
+})
+
 test('summary_stale: принятое с отпечатком текущего состояния — не устарело; смена принятого шага 2, интервала или FFT — устарело', () => {
-    const fresh = () => {
-        const ctx = inputs_ctx()
-        ctx.steps[3].inputs = summary_inputs_key(3, ctx)
-        return ctx
+    const fresh = inputs_ctx_accepted
+    for (const n of [2, 3, 4]) {
+        assert.equal(summary_stale(n, fresh()), false, 'шаг ' + n)
     }
-    assert.equal(summary_stale(3, fresh()), false)
 
     const accepted2 = fresh()
-    accepted2.steps[2] = { accepted: { INS_HNTCH_FREQ: 75, INS_GYRO_FILTER: 40 } }
+    accepted2.steps[2] = { ...accepted2.steps[2], accepted: { INS_HNTCH_FREQ: 75, INS_GYRO_FILTER: 40 } }
     assert.equal(summary_stale(3, accepted2), true)
+    assert.equal(summary_stale(4, accepted2), true)
 
     const start = fresh()
     start.start = 12
@@ -352,6 +435,17 @@ test('summary_stale: принятое с отпечатком текущего �
     late.steps[3].inputs = summary_inputs_key(3, late)
     late.steps[2] = inputs_ctx().steps[2]
     assert.equal(summary_stale(3, late), true)
+})
+
+test('summary_stale: смена версии фильтра — шаги 2 и 3 устарели, шаг 4 — нет', () => {
+    // Лог с версией 4: на шаге 1 поставили 3 и приняли шаг 2 (форма пишет ESCMSK 0), затем вернули 4
+    const ctx = inputs_ctx_accepted()
+    ctx.filter_version = 3
+    assert.equal(summary_stale(2, ctx), true)
+    assert.equal(summary_stale(3, ctx), true)
+    assert.equal(summary_stale(4, ctx), false)
+    ctx.filter_version = 4
+    assert.equal(summary_stale(2, ctx), false)
 })
 
 test('summary_stale: непринятый шаг — не устарел; принятое без отпечатка — устарело', () => {

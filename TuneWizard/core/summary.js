@@ -12,7 +12,8 @@
 // Одно ли значение у параметра name: a и b — числа или null (параметра нет). Оба null — одно, один null — разное.
 // Маски (is_bitmask_param) — целые: *_HMNCS сравниваются без знака по размеру маски bits (mask_unsigned: 8-битная
 // −128 из лога — та же гармоника 8, что 128 из формы), остальные маски — как есть; во float32 маски потеряли бы
-// младшие биты. Прочее — как float32: так прошивка хранит параметры, 0.7 из формы и 0.699999988 из лога — одно [код]
+// младшие биты. Прочее — как float32: так прошивка хранит параметры, 0.7 из формы и 0.699999988 из лога — одно [код].
+// bits (hmncs_bits) обязателен для *_HMNCS; у остальных имён не используется
 function summary_same(name, a, b, bits) {
     if ((a == null) || (b == null)) {
         return (a == null) && (b == null)
@@ -23,10 +24,17 @@ function summary_same(name, a, b, bits) {
     return Math.fround(a) === Math.fround(b)
 }
 
+// Включается ли notch: его ENABLE в логе нет (log null) или ≤ 0, а принято value > 0. Пока notch выключен, прошивка
+// скрывает остальные его поля — в логе их нет [код]
+function summary_notch_enabling(log, value) {
+    return ((log == null) || (log <= 0)) && (value > 0)
+}
+
 // Строки итога по принятым шагам 2–4. ctx = { params, steps, names: { 2: […], 3: […], 4: […] }, filter_version, bits }:
 // params — параметры лога (get(name) → число или null, has(name)); steps — state.steps (принятое шага n —
-// steps[n].accepted, имя → число; у шага 4 ещё steps[4].axes[ось].metrics.reliable); names — имена параметров шагов;
-// filter_version — версия фильтра лога; bits — размер маски HMNCS (hmncs_bits).
+// steps[n].accepted, имя → число, в нём должно быть каждое имя из names[n]; у шага 4 ещё
+// steps[4].axes[ось].metrics.reliable); names — имена параметров шагов; filter_version — версия фильтра лога (нет —
+// считается 1, как в step2_save_param); bits — размер маски HMNCS (hmncs_bits).
 // → { rows, conflicts, accepted }:
 // - accepted — { 2, 3, 4 }: принят ли шаг (steps[n] != null);
 // - rows — строки { name, log, value, step, changed, note } только принятых шагов, по шагам 2 → 3 → 4 и порядку имён
@@ -35,10 +43,10 @@ function summary_same(name, a, b, bits) {
 //   от notch шага 2 [решение пользователя 25.10.2026];
 // - conflicts — такие имена с разными значениями шагов: { name, values: { шаг: значение }, used: шаг строки }.
 // *_ESCMSK при версии фильтра ниже 4 строки не получает: у прошивок ниже её нет, а 0 вместо настоящей маски сменил бы
-// набор моторов (как «Сохранить .param» шага 2). Включаемый notch (ENABLE в логе нет или ≤ 0, принято > 0): прошивка
-// скрывает остальные его поля, пока он выключен, — все поля изменены, «было» у отсутствующих — null. Прочий параметр
-// без лога не изменён и не пишется: значение для него в лог не попало, сравнить не с чем [наше]. Изменённая строка
-// шага 4 ненадёжной оси (metrics.reliable === false) — значение введено вручную, а не из измерения: пометка
+// набор моторов (как «Сохранить .param» шага 2). Включаемый notch (summary_notch_enabling): все его поля изменены,
+// даже совпавшие с логом, «было» у отсутствующих — null. Прочий параметр без лога не изменён и не пишется: значение
+// для него в лог не попало, сравнить не с чем [наше]. Изменённая строка шага 4 ненадёжной оси
+// (metrics.reliable === false) — значение введено вручную, а не из измерения: пометка
 function summary_rows(ctx) {
     const steps_order = [2, 3, 4]
     const log_value = (name) => ctx.params.has(name) ? ctx.params.get(name) : null
@@ -53,19 +61,20 @@ function summary_rows(ctx) {
             continue
         }
         for (const name of ctx.names[n]) {
-            (sources[name] ??= {})[n] = ctx.steps[n].accepted[name]
+            if (!(name in sources)) {
+                sources[name] = {}
+            }
+            sources[name][n] = ctx.steps[n].accepted[name]
             last[name] = n
         }
     }
+    // Значение, которое идёт в итог: от последнего принявшего имя шага
+    const final_value = (name) => sources[name][last[name]]
 
     // Поля включаемых notch
     const enabling = new Set()
     for (const notch of notch_param_names()) {
-        if (!(notch.enable in last)) {
-            continue
-        }
-        const log = log_value(notch.enable)
-        if (((log == null) || (log <= 0)) && (sources[notch.enable][last[notch.enable]] > 0)) {
+        if ((notch.enable in last) && summary_notch_enabling(log_value(notch.enable), final_value(notch.enable))) {
             for (const name of Object.values(notch)) {
                 enabling.add(name)
             }
@@ -82,11 +91,11 @@ function summary_rows(ctx) {
             if (last[name] !== n) {
                 continue
             }
-            if (name.endsWith("_ESCMSK") && (ctx.filter_version < 4)) {
+            if (name.endsWith("_ESCMSK") && ((ctx.filter_version ?? 1) < 4)) {
                 continue
             }
             const log = log_value(name)
-            const value = sources[name][n]
+            const value = final_value(name)
             let changed
             let note = null
             if (enabling.has(name)) {
@@ -134,16 +143,19 @@ function summary_param_text(rows, bits) {
     return (Object.keys(values).length > 0) ? param_file_text(values) : null
 }
 
-// Имя файла .param: имя лога без последнего расширения + «_tune.param»; лога нет (null) — «tune.param»
+// Имя файла .param: имя лога без последнего расширения + «_tune.param»; имени нет (null или пустая строка) —
+// «tune.param»
 function summary_file_name(log_name) {
-    return ((log_name != null) ? log_name.replace(/\.[^.]*$/, "") + "_" : "") + "tune.param"
+    return (((log_name != null) && (log_name !== "")) ? log_name.replace(/\.[^.]*$/, "") + "_" : "") + "tune.param"
 }
 
-// Отпечаток входов шага n (2–4) для «устарело»: строка JSON [start, end, fft_key, [принятое шагов 2..n−1]],
-// ctx = { start, end, fft_key, steps } — интервал анализа (state.settings.start/end), ключ FFT шага 1 (step1.fft_key)
-// и state.steps. Ключ FFT — только у шагов 2–3: они всегда считают шаг 1 до «Принять»; шаг 4 можно принять,
-// не открывая шаг 1, и ключ FFT, появившийся позже, давал бы ложное «устарело» — на его месте null. Принятое шага k —
-// пары [имя, значение] с именами по алфавиту (как candidate_key), значения как есть; не принят — null.
+// Отпечаток входов шага n (2–4) для «устарело»: строка JSON [start, end, fft_key, filter_version, [принятое шагов
+// 2..n−1]], ctx = { start, end, fft_key, filter_version, steps } — интервал анализа (state.settings.start/end), ключ
+// FFT шага 1 (step1.fft_key), версия фильтра шага 1 и state.steps; нет значения (undefined) — null.
+// Ключ FFT и версия фильтра — только у шагов 2–3: они всегда считают шаг 1 до «Принять» (версия фильтра меняет и
+// форму шага 2: ниже 4 ESCMSK — 0); шаг 4 можно принять, не открывая шаг 1, и ключ FFT, появившийся позже, давал бы
+// ложное «устарело» — на их месте null; шаг 4 устаревает через изменённое принятое шагов 2–3. Принятое шага k — пары
+// [имя, значение] с именами по алфавиту (как candidate_key), значения как есть; не принят — null.
 // Ключи расчёта шагов (calc_key) не годятся: в них окно FFT и выбор набора, их смена давала бы ложное «устарело» [наше]
 function summary_inputs_key(n, ctx) {
     const accepted = []
@@ -151,7 +163,8 @@ function summary_inputs_key(n, ctx) {
         const values = ctx.steps[k]?.accepted ?? null
         accepted.push((values != null) ? Object.keys(values).sort().map((name) => [name, values[name]]) : null)
     }
-    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, (n < 4) ? (ctx.fft_key ?? null) : null, accepted])
+    const step1 = (n < 4) ? [ctx.fft_key ?? null, ctx.filter_version ?? null] : [null, null]
+    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...step1, accepted])
 }
 
 // Устарело ли принятое шага n: шаг принят (steps[n] != null), а отпечаток, сохранённый при «Принять»
