@@ -1582,7 +1582,8 @@ function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) {
 //   (запас фазы …)»; иначе (непричинный отклик) — «прогноз неустойчив — вариант на грани устойчивости или прогноз
 //   ненадёжен»: этот признак срабатывает и у вариантов, устойчивых по правде, когда прогноз ненадёжен (большое
 //   изменение D или фильтров гироскопа — например, выключенный notch, мало возбуждения на высоких частотах) — отказ при
-//   сомнении;
+//   сомнении. Запаса у такого прогноза (первое пересечение > 0) тоже нет — он недостоверен (шаг 4 показывает «—»
+//   и «запас недостоверен»), поэтому low_pm и pm_drop с числом запаса не ставятся: остаётся одна отметка unstable;
 //   low_pm — запас фазы ниже pm_min_deg;
 //   pm_drop — запас фазы хуже лога больше чем на pm_max_drop_deg;
 //   overshoot — перерегулирование в прогнозе выше overshoot_pred_max_pct;
@@ -1597,10 +1598,12 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) {
     const pm_log = value(pred_log?.pm_deg)
     const os = value(pred?.metrics?.overshoot_pct)
     const unstable = pred?.unstable === true
+    // Неустойчив по причинности при запасе первого пересечения больше 0 (или без него): запас недостоверен
+    const margin_unreliable = unstable && !(pm <= 0)
     const flags = {
         unstable: unstable,
-        low_pm: !(pm >= rules.pm_min_deg),
-        pm_drop: !(pm_log - pm <= rules.pm_max_drop_deg),
+        low_pm: !margin_unreliable && !(pm >= rules.pm_min_deg),
+        pm_drop: !margin_unreliable && !(pm_log - pm <= rules.pm_max_drop_deg),
         overshoot: !(os <= rules.overshoot_pred_max_pct),
         incomplete: (!unstable && (!Number.isFinite(pm) || !Number.isFinite(os))) || (pred == null) || !Number.isFinite(pm_log),
     }

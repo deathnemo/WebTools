@@ -1550,7 +1550,16 @@ test('pidtune_flags: отметки на порогах — запас фазы 
     assert.equal(noncausal.unstable, true)
     assert.equal(noncausal.reasons[0], 'прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D или ' +
                  'фильтров гироскопа, мало возбуждения на высоких частотах)')
-    assert.ok(noncausal.reasons[1].startsWith('запас фазы 12.0° ниже 30°'), noncausal.reasons[1])
+    // Запас такого прогноза недостоверен: без отметок запаса с числом — одна причина
+    assert.deepEqual([noncausal.low_pm, noncausal.pm_drop, noncausal.overshoot, noncausal.incomplete, noncausal.flagged], [false, false, true, false, true])
+    assert.equal(noncausal.reasons.length, 1, noncausal.reasons.join('; '))
+    // Без запаса вовсе (частота среза не найдена) — так же одна причина
+    const unstable_no_pm = pidtune_flags({ pm_deg: null, metrics: null, unstable: true }, log)
+    assert.deepEqual([unstable_no_pm.low_pm, unstable_no_pm.pm_drop, unstable_no_pm.incomplete, unstable_no_pm.reasons.length], [false, false, false, 1])
+    // При запасе не больше 0 — «контур неустойчив» и отметки запаса с числом, как раньше
+    const zero = pidtune_flags({ pm_deg: 0, metrics: null, unstable: true }, log)
+    assert.equal(zero.reasons[0], 'контур неустойчив (запас фазы 0.0°)')
+    assert.deepEqual([zero.low_pm, zero.pm_drop], [true, true])
     assert.equal(pidtune_flags(pred(50, 10), log).unstable, false)
 })
 
