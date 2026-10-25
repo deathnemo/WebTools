@@ -175,6 +175,62 @@ function step3_plots(page) {
     })))
 }
 
+// Сводка шага 4: открытая ось, вкладки (выбрана ли, состояние оси, что в форме), сводка и вердикт оси, строки таблицы
+// (подписи, рекомендованные, отмеченная), итоги проверок (а)–(в); из расчёта открытой оси — статус, непройденные
+// проверки, достоверность прогноза, окна и секунды отобранных данных
+function step4_summary(page) {
+    return page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#candidates4 tbody tr')]
+        const title = (tr) => tr.querySelector('label').textContent
+        const res = step4.calc?.[step4.axis] ?? null
+        return {
+            axis: step4.axis,
+            tabs: [...document.querySelectorAll('#step4_tabs [role="tab"]')].map((tab) => ({ id: tab.id, selected: tab.getAttribute('aria-selected'),
+                state: tab.querySelector('.s').textContent, form: tab.querySelector('.f').textContent })),
+            verdict: document.getElementById('verdict4').textContent,
+            verdict_class: document.getElementById('verdict4').className,
+            axis_verdict: document.getElementById('axis_verdict4').textContent,
+            axis_verdict_class: document.getElementById('axis_verdict4').className,
+            titles: rows.map(title),
+            recommended: rows.filter((tr) => tr.classList.contains('recommended')).map(title),
+            recommended_marks: (document.getElementById('candidates4').textContent.match(/рекомендуется/g) ?? []).length,
+            selected: document.querySelector('#candidates4 input[name="cand4"]:checked')?.value ?? null,
+            quality: [...document.querySelectorAll('#quality4 tbody tr')].map((tr) => tr.lastElementChild.textContent),
+            status: res?.status ?? null,
+            failed: step4_failed_checks(res?.quality),
+            predict_ok: res?.predict_ok ?? null,
+            windows: res?.seg?.windows ?? 0,
+            windows_text: step4_windows_text(res?.seg?.windows ?? 0),
+            data_s: res?.seg?.data_s ?? 0,
+        }
+    })
+}
+
+// Сводка графиков шага 4: трассы (имя, точек, конечных y, видимость, отпечаток данных — сумма конечных y), трассы
+// с данными, видимые фигуры, фон, тип оси x, наименьшая частота с данными, подпись под графиком
+function step4_plots(page) {
+    return page.evaluate(() => Object.fromEntries(step4_plot_ids.map((id, i) => {
+        const gd = document.getElementById(id)
+        const traces = gd.data.map((t) => {
+            const y = Array.from(t.y).filter(Number.isFinite)
+            return { name: t.name, n: t.x.length, finite: y.length, visible: t.visible, sum: y.reduce((sum, v) => sum + v, 0).toFixed(6) }
+        })
+        const with_data = gd.data.filter((t) => Array.from(t.y).some(Number.isFinite))
+        // Окна PIDReview — сотни тысяч точек: наименьшее — свёрткой, а не Math.min(...) (переполнил бы стек аргументов)
+        const min_x = with_data.flatMap((t) => Array.from(t.x)).reduce((min, x) => (Number.isFinite(x) && ((min == null) || (x < min))) ? x : min, null)
+        const note = document.getElementById(step4_note_ids[i])
+        return [id, {
+            traces: traces,
+            with_data: with_data.length,
+            shapes: (gd.layout.shapes ?? []).filter((s) => s.visible).map((s) => s.name),
+            bg: gd.layout.paper_bgcolor,
+            xtype: gd.layout.xaxis.type,
+            min_x: min_x,
+            note: note.hidden ? null : note.textContent,
+        }]
+    })))
+}
+
 // Ключ значений формы и ключ значений варианта id — одинаковые, если вариант применён
 function form_matches_variant(page, id) {
     return page.evaluate((id) => step2_key(values_from_form()) === step2_key(step2_rows().find((r) => r.id === id).values), id)
@@ -756,6 +812,254 @@ async function main() {
         await page.screenshot({ path: path.join(shots, 'step3.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
 
+        // Шаг 4 «PID по осям» — после шага 3: приняты notch шага 2 и свои значения шага 3, интервал — снова по умолчанию
+        // (выше начало сдвигалось на 20 с; на сдвинутом у крена не проходят (а) и (б)). Факт лога пользователя на всём
+        // интервале (раздел 3 дизайна): ни одна ось не проходит проверки качества измерения — у всех не пройдена (б)
+        // (смешение режимов ACRO, STABILIZE, POSHOLD), поэтому правил и прогноза нет: в таблицах только «Как в логе»,
+        // бодэ L пуст, сводка советует тестовый полёт. Варианты и прогноз проверяются ниже явной подменой
+        await page.fill('#TimeStart', String(start))
+        await page.dispatchEvent('#TimeStart', 'change')
+        await page.click('#wizbar button:nth-child(5)')
+        assert.deepEqual(await visible_steps(page), ['4'], 'открыт шаг 4')
+        await wait_overlay(page)
+        const p4 = await step4_summary(page)
+        assert.deepEqual(p4.tabs.map((tab) => tab.id), ['step4_tab_roll', 'step4_tab_pitch', 'step4_tab_yaw'], 'три вкладки осей')
+        assert.match(p4.verdict_class, /verdict--warn/, 'сводка — предупреждение')
+        assert.match(p4.verdict, /^Измерение ненадёжно на всех осях/, p4.verdict)
+        assert.match(p4.verdict, /тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only»/, 'сводка советует тестовый полёт: ' + p4.verdict)
+        const axes4 = {}
+        for (const axis of ['roll', 'pitch', 'yaw']) {
+            await page.click('#step4_tab_' + axis)
+            const s = await step4_summary(page)
+            assert.equal(s.axis, axis, 'открыта вкладка ' + axis)
+            assert.deepEqual(s.tabs.map((tab) => tab.selected), ['roll', 'pitch', 'yaw'].map((a) => String(a === axis)), axis + ': выбрана своя вкладка')
+            assert.equal(s.status, 'unreliable', axis + ': измерение ненадёжно')
+            assert.ok(s.failed.includes('(б)'), axis + ': не пройдена проверка (б): ' + s.failed.join(', '))
+            assert.equal(s.quality[1], 'не пройдена', axis + ': в таблице проверок (б) — «не пройдена»')
+            assert.match(s.axis_verdict, /^Измерение ненадёжно — правил и прогноза нет: /, axis + ': ' + s.axis_verdict)
+            assert.match(s.axis_verdict, /Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only»/, axis + ': вердикт объясняет тестовый полёт')
+            assert.deepEqual(s.titles, ['Как в логе'], axis + ': в таблице только «Как в логе»')
+            assert.equal(s.recommended_marks, 0, axis + ': рекомендации нет')
+            assert.equal(s.predict_ok, false, axis + ': прогноза нет')
+            const g = await step4_plots(page)
+            const [windows, mean, measured, pred] = g.StepResp4.traces
+            assert.ok(measured.finite > 0 && measured.visible === true, axis + ': измеренный отклик на графике')
+            assert.match(measured.name, /^измеренный \(КИХ МНК\) — измерение ненадёжно$/, axis + ': пометка в легенде')
+            assert.match(g.StepResp4.note, /^Измеренный отклик — с пометкой: измерение ненадёжно \(.*\(б\).*\); по нему не судят/, axis + ': пометка в подписи: ' + g.StepResp4.note)
+            assert.equal(pred.n, 0, axis + ': прогноза на графике нет')
+            assert.ok((windows.finite > 0) && (mean.finite > 0) && (windows.visible === 'legendonly') && (mean.visible === 'legendonly'), axis + ': отклик PIDReview — только в легенде')
+            assert.match(mean.name, /занижено методом/, axis + ': подпись, что отклик PIDReview занижен методом')
+            assert.deepEqual(g.StepResp4.shapes, ['one', 'band_lo', 'band_hi'], axis + ': горизонтали 1 и ±5 % от плато')
+            assert.equal(g.TarAct4.with_data, 2, axis + ': цель и факт с данными')
+            assert.ok(g.TarAct4.traces.every((t) => t.n <= 6100), axis + ': цель и факт прорежены для отрисовки: ' + g.TarAct4.traces.map((t) => t.n).join(', '))
+            assert.equal(g.DSpec4.with_data, 2, axis + ': спектры D и выхода с данными')
+            assert.deepEqual(g.DSpec4.shapes, ['d_noise'], axis + ': вертикаль шума D')
+            assert.equal(g.LBode4.with_data, 0, axis + ': бодэ L пуст')
+            assert.deepEqual(g.LBode4.shapes, [], axis + ': отметок на бодэ нет')
+            assert.match(g.LBode4.note, /^Бодэ L — только при достоверном прогнозе: измерение ненадёжно/, axis + ': причина пустого бодэ: ' + g.LBode4.note)
+            axes4[axis] = { windows: s.windows, windows_text: s.windows_text, data_s: s.data_s, failed: s.failed, plots: g }
+        }
+        for (const axis of ['roll', 'pitch']) {
+            assert.ok(axes4[axis].data_s >= 10, axis + ': отобранных данных не меньше 10 с: ' + axes4[axis].windows + ' окон, ' + axes4[axis].data_s.toFixed(1) + ' с')
+        }
+        // Переключение вкладки меняет графики: у крена и тангажа — свои данные
+        for (const [id, index] of [['StepResp4', 2], ['TarAct4', 0], ['DSpec4', 1]]) {
+            assert.notEqual(axes4.roll.plots[id].traces[index].sum, axes4.pitch.plots[id].traces[index].sum, id + ': у тангажа свои данные')
+        }
+
+        // Правки формы: настоящий набор с клавиатуры (выделить всё тройным щелчком и напечатать), пересчёт правки ещё не
+        // прошёл (отложен на 400 мс), дождаться, пока правки досчитаются
+        const edit_pending4 = () => page.evaluate(() => step4.edit_timer != null)
+        const type_into = async (selector, text) => {
+            await page.click(selector, { clickCount: 3 })
+            await page.keyboard.type(text)
+        }
+        const wait_edits4 = () => page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed, null, { timeout: 30000 })
+
+        // ПОДМЕНА, а не данные лога: у тангажа — режим тестового полёта Acro «Rate Loop Only» (pidtune_log_mode) и
+        // пройденные проверки (а), (б) (pidtune_quality при rate_only), чтобы проверить варианты и прогноз — на логе
+        // пользователя надёжной оси нет. Notch шага 2 на время подмены — из лога (state.steps[2] убран): принятый выше
+        // вариант без третьей гармоники (HMNCS 5 → 1) даёт поправку фильтров гироскопа |G_new/G_log| ≈ 6 у частоты
+        // Найквиста, и прогноз всех вариантов выходит непричинным — «прогноз неустойчив» (вопрос ядра, не графиков).
+        // INS_GYRO_FILTER и FLTD шага 3 остаются — поправка фильтров в прогнозе есть. После проверок подмена снимается
+        // и шаг пересчитывается
+        await page.evaluate(() => {
+            window.__step4_orig = { mode: pidtune_log_mode, quality: pidtune_quality, steps2: state.steps[2] }
+            state.steps[2] = undefined
+            pidtune_log_mode = (...args) => {
+                const mode = window.__step4_orig.mode(...args)
+                return (args[4] === 'pitch') ? { ...mode, rate_only: true, mixed_modes: [] } : mode
+            }
+            pidtune_quality = (segments, rate_hz, fir, options, rules) => {
+                const quality = window.__step4_orig.quality(segments, rate_hz, fir, options, rules)
+                if ((fir == null) || !options?.rate_only) {
+                    return quality
+                }
+                quality.checks.ridge.ok = true
+                quality.checks.halves.ok = true
+                return { ...quality, ok: true, reasons: [] }
+            }
+            step4.key = null
+            step4_show()
+        })
+        await wait_overlay(page)
+        await page.click('#step4_tab_pitch')
+        const sub4 = await step4_summary(page)
+        assert.equal(sub4.status, 'ok', 'подмена: измерение тангажа надёжно')
+        assert.equal(sub4.predict_ok, true, 'подмена: прогноз тангажа достоверен')
+        assert.match(sub4.axis_verdict, /Лог тестового полёта Acro «Rate Loop Only»/, 'подмена: вердикт тангажа — тестовый полёт')
+        assert.ok(sub4.titles.length >= 4, 'подмена: варианты тангажа: ' + sub4.titles.join('; '))
+        assert.equal(sub4.recommended.length, 1, 'подмена: одна строка рекомендуется: ' + sub4.recommended.join('; '))
+        assert.equal(sub4.recommended_marks, 1, 'подмена: одна пометка «рекомендуется»')
+        assert.equal(sub4.quality[2], 'не применяется (Rate Loop Only)', 'подмена: (в) в Rate Loop Only не применяется')
+        const sub_title = (id) => page.evaluate((id) => step4_rows('pitch').find((r) => r.id === id).title, id)
+        const gs1 = await step4_plots(page)
+        assert.equal(gs1.LBode4.with_data, 4, 'подмена: бодэ L — амплитуда и фаза лога и выбранного')
+        assert.equal(gs1.LBode4.xtype, 'log', 'бодэ L — логарифмическая ось частот')
+        assert.ok(gs1.LBode4.min_x >= 0.5 && gs1.LBode4.min_x < 0.6, 'бодэ L — от 0.5 Гц, без 0 Гц: ' + gs1.LBode4.min_x)
+        assert.deepEqual(gs1.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm', 'sel:fc', 'sel:fc', 'sel:pm'], 'подмена: отметки частоты среза и запаса фазы')
+        assert.match(gs1.LBode4.traces[0].name, /^лог · срез [\d.]+ Гц · запас [\d.]+°$/, 'частота среза и запас лога в легенде: ' + gs1.LBode4.traces[0].name)
+        assert.equal(gs1.LBode4.note, null, 'подмена: подписи-причины у бодэ нет')
+        const sel_title = await sub_title(sub4.selected)
+        assert.equal(gs1.StepResp4.traces[3].name, 'прогноз «' + sel_title + '»', 'подмена: на графике отклика — прогноз выбранного варианта')
+        assert.ok(gs1.StepResp4.traces[3].finite > 0, 'подмена: прогноз выбранного варианта с данными')
+        assert.match(gs1.StepResp4.traces[2].name, /^измеренный \(КИХ МНК\)$/, 'подмена: без пометки «ненадёжно»')
+        // Выбор другой строки щелчком — прогноз на графиках меняется
+        const other4 = await page.evaluate(() => step4_rows('pitch').find((r) => (r.id !== step4.selected.pitch) && (r.pred?.step != null))?.id ?? null)
+        assert.ok(other4 != null, 'подмена: есть другой устойчивый вариант')
+        await page.check('#cand4_' + other4)
+        const gs2 = await step4_plots(page)
+        const other_title = await sub_title(other4)
+        assert.equal(gs2.StepResp4.traces[3].name, 'прогноз «' + other_title + '»', 'выбор строки — прогноз этой строки на графике отклика')
+        assert.notEqual(gs2.StepResp4.traces[3].sum, gs1.StepResp4.traces[3].sum, 'выбор строки — данные прогноза на графике отклика сменились')
+        assert.ok(gs2.LBode4.traces[1].name.startsWith('«' + other_title + '» · срез'), 'выбор строки — название на бодэ: ' + gs2.LBode4.traces[1].name)
+        assert.notEqual(gs2.LBode4.traces[1].sum, gs1.LBode4.traces[1].sum, 'выбор строки — данные выбранного на бодэ сменились')
+        assert.equal(gs2.LBode4.traces[0].sum, gs1.LBode4.traces[0].sum, 'выбор строки — бодэ лога прежнее')
+        // Стрелки в таблице меняют выбранную строку, а с ней и графики
+        await page.focus('#cand4_' + other4)
+        await page.keyboard.press('ArrowDown')
+        const arrow4 = await step4_summary(page)
+        assert.notEqual(arrow4.selected, other4, 'стрелка вниз — выбрана другая строка')
+        assert.equal(await page.evaluate(() => step4.selected.pitch), arrow4.selected, 'выбор стрелкой — в step4.selected')
+        assert.notEqual((await step4_plots(page)).LBode4.traces[1].sum, gs2.LBode4.traces[1].sum, 'выбор стрелкой — бодэ выбранного сменилось')
+        // Неустойчивый вариант: «Свой» тангажа P = I = 0.5 (×5 к логу) — линии прогноза на графике отклика нет, причина
+        // в подписи; на бодэ L варианта есть (по ней видно, почему), запас фазы не больше 0
+        await type_into('#pidf_ATC_RAT_PIT_P', '0.5')
+        await type_into('#pidf_ATC_RAT_PIT_I', '0.5')
+        await page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed && (step4.selected.pitch === 'custom') &&
+            (step4_rows('pitch').find((r) => r.id === 'custom')?.values.I === Math.fround(0.5)), null, { timeout: 30000 })
+        const gu = await step4_plots(page)
+        assert.equal(gu.StepResp4.traces[3].n, 0, 'неустойчивый «Свой» — линии прогноза нет')
+        assert.match(gu.StepResp4.note, /Прогноз «Свой»: контур неустойчив \(запас фазы -[\d.]+°\) — линии отклика нет\./, 'причина в подписи: ' + gu.StepResp4.note)
+        assert.ok(gu.LBode4.traces[1].finite > 0, 'неустойчивый «Свой» — L на бодэ есть')
+        assert.match(gu.LBode4.traces[1].name, /^«Свой» · срез [\d.]+ Гц · запас -[\d.]+°$/, 'запас фазы неустойчивого — не больше 0: ' + gu.LBode4.traces[1].name)
+        assert.match(gu.LBode4.note, /^«Свой»: контур неустойчив/, 'причина под бодэ: ' + gu.LBode4.note)
+        await page.evaluate(() => {
+            step4_set_form_values(step4_log_values_of('pitch'))
+            step4_flush_edits(true)
+        })
+        assert.deepEqual((await step4_summary(page)).titles, sub4.titles, 'поля тангажа снова из лога — строки «Свой» нет')
+        const sub_lines = { titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
+        // Снять подмену и пересчитать: снова ненадёжно на всех осях, бодэ пуст
+        await page.evaluate(() => {
+            pidtune_log_mode = window.__step4_orig.mode
+            pidtune_quality = window.__step4_orig.quality
+            state.steps[2] = window.__step4_orig.steps2
+            step4.key = null
+            step4_show()
+        })
+        await wait_overlay(page)
+        const back4 = await step4_summary(page)
+        assert.match(back4.verdict, /^Измерение ненадёжно на всех осях/, 'подмена снята: ' + back4.verdict)
+        assert.deepEqual(back4.titles, ['Как в логе'], 'подмена снята: в таблице только «Как в логе»')
+        assert.equal((await step4_plots(page)).LBode4.with_data, 0, 'подмена снята: бодэ L пуст')
+
+        // Регрессия правок: настоящий набор с клавиатуры и немедленный щелчок — раньше пересчёта правки (400 мс), кнопки
+        // досчитывают правки сами, а щелчок не теряется
+        // Правка P крена и сразу «Принять»: принимаются значения формы, у крена — «Свой»
+        await page.click('#step4_tab_roll')
+        await type_into('#pidf_ATC_RAT_RLL_P', '0.125')
+        assert.equal(await edit_pending4(), true, 'щелчок раньше пересчёта правки')
+        await page.click('#pidf_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['5'], '«Принять» шага 4 открывает шаг 5')
+        const acc4 = await page.evaluate(() => state.steps[4])
+        assert.equal(acc4.accepted.ATC_RAT_RLL_P, Math.fround(0.125), 'правка и сразу «Принять» — значение формы')
+        assert.deepEqual([acc4.axes.roll.candidate_id, acc4.axes.pitch.candidate_id, acc4.axes.yaw.candidate_id], ['custom', 'log', 'log'], 'у крена «Свой», у остальных — лог')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        const e1 = await step4_summary(page)
+        assert.deepEqual(e1.titles, ['Как в логе', 'Свой'], 'у крена строка «Свой»')
+        assert.equal(e1.selected, 'custom', 'выбрана строка «Свой»')
+        assert.match(e1.verdict, /^Принято: крен свои значения, тангаж «Как в логе», рыскание «Как в логе»\.$/, e1.verdict)
+        // Строка «Как в логе» крена выбрана; правка поля тангажа и сразу «Применить вариант»: вкладка остаётся на крене,
+        // применена строка крена (поля крена — значения лога), правка тангажа — в его строке «Свой»
+        await page.check('#cand4_log')
+        await type_into('#pidf_ATC_RAT_PIT_P', '0.1')
+        assert.equal(await edit_pending4(), true, 'щелчок раньше пересчёта правки')
+        await page.click('#cand4_apply')
+        await wait_edits4()
+        const e2 = await page.evaluate(() => {
+            const form = step4_axis_gains(step4_values_from_form(), 'roll')
+            const log = step4_log_gains('roll')
+            return { axis: step4.axis, roll_log: step4_gain_keys.every((k) => step4_same_value(form[k], log[k])), pitch_p: document.getElementById('pidf_ATC_RAT_PIT_P').value,
+                     pitch_rows: step4_rows('pitch').map((r) => r.id), pitch_mark: document.querySelector('#step4_tab_pitch .f').textContent }
+        })
+        assert.equal(e2.axis, 'roll', '«Применить вариант» после правки тангажа — вкладка осталась на крене')
+        assert.equal(e2.roll_log, true, 'применена строка крена «Как в логе»')
+        assert.equal(e2.pitch_p, '0.1', 'правка тангажа осталась в поле')
+        assert.ok(e2.pitch_rows.includes('custom'), 'у тангажа строка «Свой»: ' + e2.pitch_rows.join(', '))
+        assert.equal(e2.pitch_mark, 'в форме свои значения', 'пометка на вкладке тангажа')
+        // Правка поля рыскания и сразу щелчок по вкладке рыскания: вкладка открывается, в таблице — «Свой», она выбрана
+        await type_into('#pidf_ATC_RAT_YAW_P', '0.25')
+        assert.equal(await edit_pending4(), true, 'щелчок раньше пересчёта правки')
+        await page.click('#step4_tab_yaw')
+        await page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed && step4_rows('yaw').some((r) => r.id === 'custom'), null, { timeout: 30000 })
+        const e3 = await step4_summary(page)
+        assert.equal(e3.axis, 'yaw', 'правка и сразу щелчок по вкладке — вкладка рыскания открыта')
+        assert.equal(e3.tabs[2].selected, 'true', 'вкладка рыскания выбрана')
+        assert.deepEqual(e3.titles, ['Как в логе', 'Свой'], 'у рыскания строка «Свой»')
+        assert.equal(e3.selected, 'custom', 'у рыскания выбрана строка «Свой»')
+        // Окно FFT 1024 и сразу «Принять»: принято с новым окном
+        await type_into('#step4_window', '1024')
+        await page.click('#pidf_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['5'], '«Принять» с новым окном открывает шаг 5')
+        const acc_w = await page.evaluate(() => ({ window: step4.window, key_window: JSON.parse(state.steps[4].calc_key)[2], yaw_p: state.steps[4].accepted.ATC_RAT_YAW_P }))
+        assert.deepEqual(acc_w, { window: 1024, key_window: 1024, yaw_p: Math.fround(0.25) }, 'окно FFT 1024 и сразу «Принять» — принято с новым окном')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        assert.equal(await page.inputValue('#step4_window'), '1024', 'в поле — окно 1024')
+        assert.match((await step4_summary(page)).verdict, /^Принято: /, 'вердикт шага 4 — «Принято»')
+        assert.equal((await step4_plots(page)).DSpec4.traces[1].n, 513, 'спектр выхода — окном 1024 (513 бинов)')
+
+        // Устаревание: «Принять» на шаге 3 с другими значениями (INS_GYRO_FILTER 39) после «Принять» на шаге 4 — фильтры
+        // для прогноза сменились, вердикт шага 4 — «Принято раньше …»
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        await page.fill('#lpf_INS_GYRO_FILTER', '39')
+        await page.click('#lpf_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['4'], '«Принять» шага 3 открывает шаг 4')
+        assert.equal(await page.evaluate(() => state.steps[3].accepted.INS_GYRO_FILTER), 39, 'на шаге 3 принят INS_GYRO_FILTER 39')
+        const stale4 = await step4_summary(page)
+        assert.match(stale4.verdict, /^Принято раньше для другого интервала, окна FFT, набора или фильтров шагов 2–3/, stale4.verdict)
+        assert.match(stale4.verdict_class, /verdict--warn/, '«Принято раньше» — предупреждение')
+
+        // Графики шага 4 на крене: данные, фон --surface, ширина как у контейнера (проверка после перезагрузки страницы
+        // в конце строже: снимки выше уже включили autosize), скриншот
+        await page.click('#step4_tab_roll')
+        const g4 = await step4_plots(page)
+        for (const id of ['StepResp4', 'TarAct4', 'DSpec4']) {
+            assert.ok(g4[id].with_data > 0, id + ': с данными')
+        }
+        for (const id of ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4']) {
+            assert.equal(g4[id].bg, surface, id + ': фон — --surface')
+        }
+        await assert_plot_widths(page, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4'])
+        await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
+        await page.click('#wizbar button:nth-child(1)')
+
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):
         // шаг 1 считается заново начисто
         await page.evaluate(() => { window.__old_log = state.log; window.__fft = null })
@@ -785,6 +1089,16 @@ async function main() {
         for (const id of ['Spectrum3', 'DTerm3', 'Bode3']) {
             assert.equal(g5[id].with_data, g5[id].traces, id + ': после повторной загрузки — снова с данными')
         }
+        // Шаг 4 после повторной загрузки: принятое забыто, форма снова из лога, строк «Свой» нет, вкладка — крен
+        assert.equal(await page.evaluate(() => state.steps[4] ?? null), null, 'принятое на шаге 4 сброшено')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        const p5 = await step4_summary(page)
+        assert.equal(p5.axis, 'roll', 'после повторной загрузки — вкладка крена')
+        assert.deepEqual(p5.titles, ['Как в логе'], 'после повторной загрузки — только «Как в логе»')
+        assert.doesNotMatch(p5.verdict, /^Принято/, 'вердикт шага 4 — не «Принято»: ' + p5.verdict)
+        assert.equal(await page.evaluate(() => candidate_key(step4_values_from_form()) === candidate_key(step4_log_values())), true, 'форма шага 4 снова из лога')
+        assert.ok((await step4_plots(page)).StepResp4.traces[2].finite > 0, 'после повторной загрузки — измеренный отклик снова на графике')
         // Шаг 1 после этого — тот же, что при первом прогоне
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
@@ -801,23 +1115,30 @@ async function main() {
         // Ширина графиков, впервые показанных после регистрации в скрытой секции. Проверки ширины выше её не ловят:
         // первый же полностраничный снимок (step0.png) меняет размер окна, обработчик responsive у Plotly включает
         // autosize всем графикам, и даже скрытым, — дальше любой react берёт ширину контейнера. После перезагрузки
-        // снимков ещё не было: лог заново и шаги 1–3 по очереди, без снимков
+        // снимков ещё не было: лог заново и шаги 1–4 по очереди, без снимков. У шага 4 графики ещё и в панели оси, скрытой
+        // до первого расчёта
         await page.setInputFiles('#fileItem', log_path)
         await page.locator('#log_verdict').waitFor({ state: 'visible', timeout: 180000 })
         await wait_overlay(page)
         assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.autosize ?? null), null, 'снимков после перезагрузки не было: autosize не включён')
-        for (const [button, ids] of [[2, ['Spectrum1', 'Spectrogram1']], [3, ['Spectrum2', 'Bode2', 'Spectrogram2']], [4, ['Spectrum3', 'DTerm3', 'Bode3']]]) {
+        for (const [button, ids] of [[2, ['Spectrum1', 'Spectrogram1']], [3, ['Spectrum2', 'Bode2', 'Spectrogram2']], [4, ['Spectrum3', 'DTerm3', 'Bode3']],
+                                     [5, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4']]]) {
             await page.click('#wizbar button:nth-child(' + button + ')')
             await wait_overlay(page)
             await assert_plot_widths(page, ids)
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаги 0–3 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+        console.log('tunewizard-browser: шаги 0–4 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
         console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
         console.log('  шаг 2: варианты ' + v1.titles.join('; ') + '; рекомендован ' + v1.best_id + '; вердикт «' + v1.verdict + '»')
         console.log('  шаг 3: варианты ' + w2.titles.join('; ') + '; рекомендован ' + w2.recommended.join('; ') + '; вердикт «' + w2.verdict + '»')
+        const axis_names4 = { roll: 'крен', pitch: 'тангаж', yaw: 'рыскание' }
+        console.log('  шаг 4: ' + Object.entries(axes4).map(([axis, a]) => axis_names4[axis] + ' — ' + a.windows_text + ', ' + a.data_s.toFixed(1) + ' с данных, ' +
+            ((a.failed.length == 1) ? 'не пройдена ' : 'не пройдены ') + a.failed.join(', ')).join('; ') + '; итог — измерение ненадёжно на всех осях, прогноз ' +
+            'недостоверен (правил и прогноза нет); под подменой у тангажа — варианты ' + sub_lines.titles.join('; ') + ', рекомендуется «' +
+            sub_lines.recommended.join('; ') + '», бодэ ' + sub_lines.log)
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {
