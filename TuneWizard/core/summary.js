@@ -1,13 +1,15 @@
 // Итог прохода мастера (шаг 5 «Сводка»): строки «было → станет» по принятому на шагах 2–4, значения и текст
-// файла .param из изменённых параметров, отпечаток входов принятого шага и «устарело». Без DOM: работает
-// в браузере и под Node (тесты). Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 2.
+// файла .param из изменённых параметров, отпечаток входов принятого шага и «устарело», «что перелететь». Без DOM:
+// работает в браузере и под Node (тесты). Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 2.
 // Источники: [решение пользователя 25.10.2026]; [наше] — решение мастера; [код] — исходники ArduPilot и шагов мастера.
 //
-// Списки имён параметров шагов ядро получает аргументом (страница собирает их step2_param_names(),
-// lowpass_param_names(state.params), step4_param_names()), чтобы core/ не зависело от steps/.
+// Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
+// (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()), совет
+// тестового полёта (step4_test_flight_short) и поиск записи в метаданных параметров (step_find_metadata).
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, mask_unsigned, mask_signed; ему —
-// Libraries/Param_Helpers.js), core/filters.js (notch_param_names), core/pidtune.js (pidtune_axes).
+// Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
+// core/pidtune.js (pidtune_axes).
 
 // Одно ли значение у параметра name: a и b — числа или null (параметра нет). Оба null — одно, один null — разное.
 // Маски (is_bitmask_param) — целые: *_HMNCS сравниваются без знака по размеру маски bits (mask_unsigned: 8-битная
@@ -153,8 +155,9 @@ function summary_file_name(log_name) {
 // 2..n−1]], ctx = { start, end, fft_key, filter_version, steps } — интервал анализа (state.settings.start/end), ключ
 // FFT шага 1 (step1.fft_key), версия фильтра шага 1 и state.steps; нет значения (undefined) — null.
 // Ключ FFT и версия фильтра — только у шагов 2–3: они всегда считают шаг 1 до «Принять» (версия фильтра меняет и
-// форму шага 2: ниже 4 ESCMSK — 0); шаг 4 можно принять, не открывая шаг 1, и ключ FFT, появившийся позже, давал бы
-// ложное «устарело» — на их месте null; шаг 4 устаревает через изменённое принятое шагов 2–3. Принятое шага k — пары
+// форму шага 2: ниже 4 ESCMSK — 0); у шага 4 на их месте null. Ключ FFT: шаг 4 можно принять, не открывая шаг 1, и
+// ключ, появившийся позже, давал бы ложное «устарело». Версия фильтра: шаг 4 зависит от неё только через фильтры
+// гироскопа и устаревает через изменённое принятое шагов 2–3. Принятое шага k — пары
 // [имя, значение] с именами по алфавиту (как candidate_key), значения как есть; не принят — null.
 // Ключи расчёта шагов (calc_key) не годятся: в них окно FFT и выбор набора, их смена давала бы ложное «устарело» [наше]
 function summary_inputs_key(n, ctx) {
@@ -163,8 +166,8 @@ function summary_inputs_key(n, ctx) {
         const values = ctx.steps[k]?.accepted ?? null
         accepted.push((values != null) ? Object.keys(values).sort().map((name) => [name, values[name]]) : null)
     }
-    const step1 = (n < 4) ? [ctx.fft_key ?? null, ctx.filter_version ?? null] : [null, null]
-    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...step1, accepted])
+    const from_step1 = (n < 4) ? [ctx.fft_key ?? null, ctx.filter_version ?? null] : [null, null]
+    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...from_step1, accepted])
 }
 
 // Устарело ли принятое шага n: шаг принят (steps[n] != null), а отпечаток, сохранённый при «Принять»
@@ -172,4 +175,73 @@ function summary_inputs_key(n, ctx) {
 // ctx — как у summary_inputs_key. Устаревшее предупреждается, не блокирует [решение пользователя 25.10.2026]
 function summary_stale(n, ctx) {
     return (ctx.steps[n] != null) && (ctx.steps[n].inputs !== summary_inputs_key(n, ctx))
+}
+
+// Подсказка про включаемый notch: пока его ENABLE на аппарате ≤ 0, прошивка скрывает остальные поля notch [код] —
+// записать их можно только после ENABLE = 1 и обновления списка параметров. enable_name — имя ENABLE
+// (INS_HNTC2_ENABLE), префикс полей — оно без «ENABLE»; log_value — ENABLE в логе (null — нет в логе, пишется 0).
+// Один текст у шага 2 (step2_second_notch_hint) и у «что перелететь»
+function summary_notch_enable_hint(enable_name, log_value) {
+    const prefix = enable_name.replace(/ENABLE$/, "")
+    return "В логе " + enable_name + " = " + param_to_string(log_value ?? 0) + ": на аппарате сначала запишите " +
+        enable_name + " = 1 и обновите список параметров — остальные " + prefix + "* появятся только после этого, " +
+        "затем загрузите файл ещё раз."
+}
+
+// «Что перелететь»: пункты [{ source, text }] по порядку [решение пользователя 25.10.2026].
+// ctx = { checks, rows, steps, reboot_names, test_flight }: checks — проверки шага 0 (state.checks: { status, title,
+// fix }; null — проверок нет), rows — строки итога (summary_rows), steps — state.steps, reboot_names — имена, которым
+// нужна перезагрузка (summary_reboot_names), test_flight — совет тестового полёта (step4_test_flight_short).
+// 1. "check" — проверки warn или fail с непустым fix: «title: fix»;
+// 2. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
+//    summary_notch_enable_hint;
+// 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк;
+// 4. "test_flight" — шаг 4 принят и у осей metrics.reliable === false: «оси через запятую: » + test_flight, оси —
+//    pidtune_axes[ось].title в порядке pidtune_axes;
+// 5. "repeat" — всегда последним: слетать тем же профилем и загрузить лог
+function summary_refly(ctx) {
+    const items = []
+    for (const check of ctx.checks ?? []) {
+        if (((check.status === "warn") || (check.status === "fail")) && ((check.fix ?? "") !== "")) {
+            items.push({ source: "check", text: check.title + ": " + check.fix })
+        }
+    }
+
+    const changed = ctx.rows.filter((row) => row.changed)
+    const enables = notch_param_names().map((notch) => notch.enable)
+    for (const row of changed) {
+        if (enables.includes(row.name) && summary_notch_enabling(row.log, row.value)) {
+            items.push({ source: "notch", text: summary_notch_enable_hint(row.name, row.log) })
+        }
+    }
+
+    const reboot = changed.map((row) => row.name).filter((name) => ctx.reboot_names.includes(name))
+    if (reboot.length > 0) {
+        const text = "После записи перезагрузите полётный контроллер: изменены " + reboot.join(", ") +
+            " — они действуют после перезагрузки."
+        items.push({ source: "reboot", text: text })
+    }
+
+    const step4 = ctx.steps[4]
+    if (step4 != null) {
+        const axes = Object.keys(pidtune_axes).filter((axis) => step4.axes?.[axis]?.metrics?.reliable === false)
+        if (axes.length > 0) {
+            const text = axes.map((axis) => pidtune_axes[axis].title).join(", ") + ": " + ctx.test_flight
+            items.push({ source: "test_flight", text: text })
+        }
+    }
+
+    items.push({ source: "repeat", text: "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, " +
+        "что применено, шаги 2–4 — сбылся ли прогноз." })
+    return items
+}
+
+// Имена из names, которым после записи нужна перезагрузка: в метаданных параметров (FilterReview/params.json —
+// описания ArduPilot) RebootRequired = "True" [код]. find(metadata, name) → запись или null (страница передаёт
+// step_find_metadata); metadata null (не загрузились) — [], find не зовётся
+function summary_reboot_names(names, metadata, find) {
+    if (metadata == null) {
+        return []
+    }
+    return names.filter((name) => find(metadata, name)?.RebootRequired === "True")
 }

@@ -1,7 +1,8 @@
 // Тесты итога прохода мастера настройки (TuneWizard/core/summary.js): сравнение значений как float32 и масок,
 // строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER, ESCMSK по версии фильтра,
 // включаемый notch, параметры без лога, ненадёжные оси шага 4), значения и текст .param из изменённых, имя
-// файла, отпечаток входов принятого шага и «устарело».
+// файла, отпечаток входов принятого шага и «устарело», «что перелететь» (проверки шага 0, включаемый notch,
+// перезагрузка, тестовый полёт, повтор) и имена с перезагрузкой по метаданным.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pidtune.test.cjs).
 const test = require('node:test')
@@ -438,7 +439,8 @@ test('summary_stale: принятое с отпечатком текущего �
 })
 
 test('summary_stale: смена версии фильтра — шаги 2 и 3 устарели, шаг 4 — нет', () => {
-    // Лог с версией 4: на шаге 1 поставили 3 и приняли шаг 2 (форма пишет ESCMSK 0), затем вернули 4
+    // Лог с версией 4: шаги 2–4 приняты при версии 4, затем на шаге 1 поставили 3 (форма шага 2 писала бы ESCMSK 0) —
+    // шаги 2 и 3 устарели, шаг 4 — нет; вернули 4 — шаг 2 снова не устарел
     const ctx = inputs_ctx_accepted()
     ctx.filter_version = 3
     assert.equal(summary_stale(2, ctx), true)
@@ -472,4 +474,176 @@ test('summary_inputs_key: у шага 2 не зависит от шага 3, у 
     // А принятое шага 3 — входит
     step4.steps[3] = { accepted: { INS_GYRO_FILTER: 50, INS_ACCEL_FILTER: 10 } }
     assert.equal(summary_stale(4, step4), true)
+})
+
+// ---------------------------------------------------------------- что перелететь
+
+// Текст подсказки step2_second_notch_hint до выноса в ядро (steps/step2.js) — дословно, при INS_HNTC2_ENABLE = 0
+// в логе
+const STEP2_HINT_OLD = 'В логе INS_HNTC2_ENABLE = 0: на аппарате сначала запишите INS_HNTC2_ENABLE = 1 ' +
+    'и обновите список параметров — остальные INS_HNTC2_* появятся только после этого, затем загрузите файл ещё раз.'
+
+const REPEAT = { source: 'repeat',
+    text: 'Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–4 — сбылся ли прогноз.' }
+
+// Совет тестового полёта — подставной (страница передаёт step4_test_flight_short)
+const TEST_FLIGHT = 'нужен тестовый полёт'
+
+// Вход summary_refly: строки итога — summary_rows по тем же принятым шагам
+function refly_ctx({ checks = [], steps = [], log = BASE_LOG, filter_version = 2, reboot_names = [] } = {}) {
+    return { checks: checks, rows: summary_rows(rows_ctx({ log: log, steps: steps, filter_version: filter_version })).rows,
+             steps: steps, reboot_names: reboot_names, test_flight: TEST_FLIGHT }
+}
+
+function of_source(items, source) {
+    return items.filter((item) => item.source === source)
+}
+
+test('summary_notch_enable_hint: текст подсказки шага 2 дословно; ENABLE нет в логе — 0; префикс — имя без ENABLE', () => {
+    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', 0), STEP2_HINT_OLD)
+    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', null), STEP2_HINT_OLD)
+    assert.equal(summary_notch_enable_hint('INS_HNTCH_ENABLE', -1),
+        'В логе INS_HNTCH_ENABLE = -1: на аппарате сначала запишите INS_HNTCH_ENABLE = 1 ' +
+        'и обновите список параметров — остальные INS_HNTCH_* появятся только после этого, затем загрузите файл ещё раз.')
+})
+
+test('summary_refly: ничего не принято и проверок нет — только «repeat»; checks null — как пустой список', () => {
+    assert.deepEqual(summary_refly(refly_ctx()), [REPEAT])
+    assert.deepEqual(summary_refly({ ...refly_ctx(), checks: null }), [REPEAT])
+})
+
+test('summary_refly: проверки warn и fail с fix — «title: fix» по порядку; ok и без fix — нет', () => {
+    const checks = [
+        { id: 'pid_log', status: 'warn', title: 'Сообщения PID', text: 'PID с частотой 10 Гц', fix: 'Включите бит ATTITUDE_FAST' },
+        { id: 'vibe', status: 'ok', title: 'Вибрации', text: 'в норме', fix: 'не показывать' },
+        { id: 'clipping', status: 'warn', title: 'Клиппинг', text: 'есть', fix: null },
+        { id: 'flight', status: 'warn', title: 'Полёт', text: 'короткий', fix: '' },
+        { id: 'tracking', status: 'warn', title: 'Слежение', text: 'нет' },
+        { id: 'hover_throttle', status: 'fail', title: 'Газ висения', text: 'высокий', fix: 'Облегчите аппарат' },
+    ]
+    assert.deepEqual(summary_refly(refly_ctx({ checks: checks })), [
+        { source: 'check', text: 'Сообщения PID: Включите бит ATTITUDE_FAST' },
+        { source: 'check', text: 'Газ висения: Облегчите аппарат' },
+        REPEAT,
+    ])
+})
+
+test('summary_refly: включение второго notch — пункт с подсказкой шага 2 (INS_HNTC2_ENABLE, префикс INS_HNTC2_)', () => {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTC2_ENABLE: 1, INS_HNTC2_FREQ: 153 }) }
+    const items = summary_refly(refly_ctx({ steps: steps }))
+    assert.deepEqual(items, [{ source: 'notch', text: STEP2_HINT_OLD }, REPEAT])
+    assert.match(items[0].text, /INS_HNTC2_ENABLE = 1/)
+    assert.match(items[0].text, /остальные INS_HNTC2_\* появятся/)
+
+    // ENABLE нет в логе вовсе — «= 0», как у шага 2
+    const no_enable = { ...BASE_LOG }
+    delete no_enable.INS_HNTC2_ENABLE
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ log: no_enable, steps: steps })), 'notch'),
+        [{ source: 'notch', text: STEP2_HINT_OLD }])
+})
+
+test('summary_refly: notch не включается (остаётся выключенным, уже включён, выключается) — пункта нет', () => {
+    for (const changes of [{ INS_HNTC2_FREQ: 153 }, { INS_HNTCH_FREQ: 75 }, { INS_HNTCH_ENABLE: 0 }]) {
+        const steps = []
+        steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, changes) }
+        assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'notch'), [], JSON.stringify(changes))
+    }
+})
+
+test('summary_refly: включаются оба notch — два пункта по порядку notch', () => {
+    const log = Object.fromEntries(Object.entries(BASE_LOG).filter(([name]) => !name.startsWith('INS_HNTCH_')))
+    log.INS_HNTCH_ENABLE = 0
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTCH_ENABLE: 1, INS_HNTC2_ENABLE: 1 }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ log: log, steps: steps })), 'notch').map((item) => item.text),
+        [summary_notch_enable_hint('INS_HNTCH_ENABLE', 0), STEP2_HINT_OLD])
+})
+
+test('summary_refly: изменённые из reboot_names — один пункт с именами по порядку строк; неизменённые — нет', () => {
+    const reboot_names = ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS']
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTCH_HMNCS: 7, INS_HNTCH_FREQ: 75 }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: reboot_names })), 'reboot'), [{
+        source: 'reboot',
+        text: 'После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE, INS_HNTCH_HMNCS — они действуют после перезагрузки.',
+    }])
+
+    // HMNCS не изменён — только SCHED_LOOP_RATE
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTCH_FREQ: 75 }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: reboot_names })), 'reboot').map((item) => item.text),
+        ['После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE — они действуют после перезагрузки.'])
+
+    // SCHED_LOOP_RATE совпал с логом — пункта нет
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 400, INS_HNTCH_FREQ: 75 }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: ['SCHED_LOOP_RATE'] })), 'reboot'), [])
+})
+
+test('summary_refly: ненадёжные крен и тангаж — «крен, тангаж: » + совет; все надёжны или metrics null — пункта нет', () => {
+    const steps = []
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ roll: false, pitch: false }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight'),
+        [{ source: 'test_flight', text: 'крен, тангаж: ' + TEST_FLIGHT }])
+
+    // Оси — в порядке pidtune_axes
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ yaw: false, roll: false }) }
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight').map((item) => item.text),
+        ['крен, рыскание: ' + TEST_FLIGHT])
+
+    const no_metrics = step4_axes()
+    no_metrics.roll.metrics = null
+    for (const axes of [step4_axes(), no_metrics, undefined]) {
+        steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: axes }
+        assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight'), [])
+    }
+})
+
+test('summary_refly: шаг 4 не принят — пункта тестового полёта нет', () => {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 75 }) }
+    assert.deepEqual(summary_refly(refly_ctx({ steps: steps })), [REPEAT])
+})
+
+test('summary_refly: порядок пунктов — проверки, notch, перезагрузка, тестовый полёт, последним «repeat»', () => {
+    const checks = [{ id: 'vibe', status: 'warn', title: 'Вибрации', text: 'высокие', fix: 'Проверьте крепление' }]
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTC2_ENABLE: 1 }) }
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ pitch: false }) }
+    const items = summary_refly(refly_ctx({ checks: checks, steps: steps, reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTC2_HMNCS'] }))
+    assert.deepEqual(items.map((item) => item.source), ['check', 'notch', 'reboot', 'test_flight', 'repeat'])
+    // Поля включаемого notch изменены — его HMNCS тоже в пункте перезагрузки
+    assert.equal(items[2].text,
+        'После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE, INS_HNTC2_HMNCS — они действуют после перезагрузки.')
+    assert.equal(items[3].text, 'тангаж: ' + TEST_FLIGHT)
+    assert.deepEqual(items.at(-1), REPEAT)
+})
+
+// Метаданные в форме FilterReview/params.json: группы по префиксу, внутри — записи по полному имени
+const FAKE_METADATA = {
+    INS: { INS_GYRO_FILTER: { DisplayName: 'Gyro filter cutoff frequency' } },
+    INS_HNTCH_: {
+        INS_HNTCH_FREQ: { DisplayName: 'Harmonic Notch Filter base frequency' },
+        INS_HNTCH_HMNCS: { DisplayName: 'Harmonic Notch Filter harmonics', RebootRequired: 'True' },
+        INS_HNTCH_OPTS: { DisplayName: 'Harmonic Notch Filter options', RebootRequired: 'False' },
+    },
+    SCHED_: { SCHED_LOOP_RATE: { DisplayName: 'Scheduling main loop rate', RebootRequired: 'True' } },
+    json: { version: 0 },
+}
+
+// Простой поиск записи: группа, в которой есть имя
+function find_in_groups(data, name) {
+    const group = Object.values(data).find((g) => name in g)
+    return (group != null) ? group[name] : null
+}
+
+test('summary_reboot_names: имена с RebootRequired = "True" в порядке names; без метаданных — []', () => {
+    const names = ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', 'INS_HNTCH_FREQ', 'INS_HNTCH_HMNCS', 'INS_HNTCH_OPTS', 'ATC_RAT_RLL_P']
+    assert.deepEqual(summary_reboot_names(names, FAKE_METADATA, find_in_groups), ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'])
+    assert.deepEqual(summary_reboot_names([], FAKE_METADATA, find_in_groups), [])
+    // Поиск получает метаданные и имя
+    const calls = []
+    summary_reboot_names(['SCHED_LOOP_RATE'], FAKE_METADATA, (data, name) => { calls.push([data, name]); return null })
+    assert.deepEqual(calls, [[FAKE_METADATA, 'SCHED_LOOP_RATE']])
+    // Метаданные не загрузились — поиск не зовётся
+    assert.deepEqual(summary_reboot_names(names, null, () => { throw new Error('поиск без метаданных') }), [])
 })

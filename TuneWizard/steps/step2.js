@@ -690,14 +690,14 @@ function step2_recalc() {
 }
 
 // Подсказка про второй notch: в логе он выключен, а в значениях включён — на аппарате остальные INS_HNTC2_*
-// появляются только после записи INS_HNTC2_ENABLE = 1 и обновления списка параметров; null — подсказка не нужна
+// появляются только после записи INS_HNTC2_ENABLE = 1 и обновления списка параметров; null — подсказка не нужна.
+// Текст — из ядра (summary_notch_enable_hint): тот же пункт есть в «что перелететь» сводки
 function step2_second_notch_hint(values) {
     const enable = notch_param_names()[1].enable
     if (!(values[enable] > 0) || (state.params.get(enable) > 0)) {
         return null
     }
-    return "В логе INS_HNTC2_ENABLE = " + param_to_string(state.params.get(enable) ?? 0) + ": на аппарате сначала запишите INS_HNTC2_ENABLE = 1 " +
-        "и обновите список параметров — остальные INS_HNTC2_* появятся только после этого, затем загрузите файл ещё раз."
+    return summary_notch_enable_hint(enable, state.params.get(enable))
 }
 
 // «Сохранить .param»: параметры INS_* формы (как save_parameters FilterReview); ESCMSK — только с версии
