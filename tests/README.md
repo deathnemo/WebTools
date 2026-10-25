@@ -56,3 +56,11 @@ isolation, preserve the same vehicle's pan/zoom, and recenter after a vehicle ch
 or explicit disconnect. A duplicated tab with copied session storage must acquire
 a different component ID. Review validation also removes individual fixes in
 isolated copies and verifies that the targeted regression tests fail.
+
+## Мастер настройки (TuneWizard)
+
+`tunewizard.test.cjs` — тесты ядра `TuneWizard/core` под Node на поддельных логах с интерфейсом парсера
+(история параметров, окно полёта по газу, сводка VIBE, проверки пригодности лога). `npm run test:tunewizard`
+запускает `tunewizard-browser.cjs`: smoke-прогон шага 0 в настоящем браузере (Playwright, `CHROME_PATH` — путь
+к chrome.exe) на локальном логе (`TUNEWIZARD_LOG` или первый `.bin` в `TuneWizard/logs/`); без лога тест
+пропускается. Скриншоты пишутся в `TuneWizard/logs/screenshots/`.

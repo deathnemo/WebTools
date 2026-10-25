@@ -5,3 +5,6 @@ node_modules/
 
 # Local deployment backups
 backup/
+
+# TuneWizard: local flight logs for manual checks
+TuneWizard/logs/

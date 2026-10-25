@@ -53,7 +53,13 @@ const RUNTIME_GLOBALS = {
 }
 
 // Scripts that also run under Node and use CommonJS behind a `typeof module` check.
-const DUAL_SCRIPTS = ['AirspeedFit/airspeedfit_core.js', 'SimpleGCS/commands.js']
+const DUAL_SCRIPTS = [
+  'AirspeedFit/airspeedfit_core.js',
+  'SimpleGCS/commands.js',
+  // Ядро мастера настройки: те же скрипты гоняются под Node в tests/tunewizard.test.cjs
+  'TuneWizard/core/log.js',
+  'TuneWizard/core/checks.js'
+]
 
 const libraryGlobals = (src) => LIBRARY_GLOBALS[Object.keys(LIBRARY_GLOBALS).find((key) => src.toLowerCase().includes(key))]
 
