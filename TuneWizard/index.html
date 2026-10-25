@@ -181,7 +181,8 @@ tr:last-child td{border-bottom:0}
 /* Шаг 4: числа вариантов не переносятся; плитки метрик — по пять в ряд на широком экране */
 #candidates4 td.num{white-space:nowrap}
 #metrics4{grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr))}
-/* Вкладки осей шага 4: выбранная — как текущий шаг в полосе шагов; вторая строка — короткое состояние оси */
+/* Вкладки осей шага 4: выбранная — как текущий шаг в полосе шагов; вторая строка — короткое состояние оси, третья —
+   что в форме, если не значения лога. Место третьей строки занято всегда: пометка после правки не сдвигает разметку */
 .tabs{display:flex; flex-wrap:wrap; border:1px solid var(--line); background:var(--surface)}
 .tabs button{border:0; border-right:1px solid var(--line); border-radius:0; background:var(--surface); padding:9px 16px; min-width:170px;
   display:flex; flex-direction:column; gap:2px; text-align:left; color:var(--ink-2)}
@@ -190,6 +191,7 @@ tr:last-child td{border-bottom:0}
 .tabs button .s--bad{color:var(--high)}
 .tabs button .s--warn{color:var(--accent)}
 .tabs button .s--ok{color:var(--ok)}
+.tabs button .f{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; line-height:1.5; min-height:1.5em; color:var(--accent)}
 .tabs button[aria-selected="true"]{background:var(--accent-soft); box-shadow:inset 0 -2px 0 var(--accent)}
 .tabpanel{display:flex; flex-direction:column; gap:14px}
 #pidf_form input[type=number]{width:112px}
@@ -625,9 +627,9 @@ tr:last-child td{border-bottom:0}
   <div class="verdict" id="verdict4" hidden></div>
 
   <div class="tabs" id="step4_tabs" role="tablist" aria-label="Оси" hidden>
-    <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span></button>
-    <button type="button" role="tab" id="step4_tab_pitch" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Тангаж</span><span class="s"></span></button>
-    <button type="button" role="tab" id="step4_tab_yaw" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Рыскание</span><span class="s"></span></button>
+    <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span><span class="f"></span></button>
+    <button type="button" role="tab" id="step4_tab_pitch" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Тангаж</span><span class="s"></span><span class="f"></span></button>
+    <button type="button" role="tab" id="step4_tab_yaw" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Рыскание</span><span class="s"></span><span class="f"></span></button>
   </div>
 
   <div class="tabpanel" id="step4_panel" role="tabpanel" aria-labelledby="step4_tab_roll" hidden>
