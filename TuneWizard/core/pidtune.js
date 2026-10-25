@@ -1,6 +1,7 @@
 // Шаг 4 «PID по осям»: измеренный отклик контура скорости (КИХ МНК во времени), проверки качества измерения, метрики
-// отклика, шум D, режим лога и правила ATC_RAT_*_P/I/D. Без DOM: работает в браузере и под Node (тесты).
-// Дизайн — docs/plans/2026-10-25-tune-wizard-stage4-design.md, раздел 3; план — …-stage4.md, задача 5.
+// отклика, шум D, режим лога и правила ATC_RAT_*_P/I/D; модель регулятора AC_PID, прогноз вариантов из измеренной
+// характеристики «цель → факт», его достоверность, варианты и отметки. Без DOM: работает в браузере и под Node (тесты).
+// Дизайн — docs/plans/2026-10-25-tune-wizard-stage4-design.md, разделы 3–4; план — …-stage4.md, задачи 5–6.
 // Источники: [wiki] — ardupilot.org/copter/docs/ac_rollpitchtuning.html (ручная настройка); [код] — исходники ArduPilot;
 // [PIDReview] — PIDReview/PIDReview.js (перенос — core/pid.js); [наше] — эвристика мастера (исследование 25.10.2026,
 // скрипты step_method/ в scratchpad сеанса: синтетика с известным ответом и лог пользователя).
@@ -18,13 +19,27 @@
 // четыре решения (отклик, (а), две половины (б)). При 400 Гц ≈ 80 мс на ось, при 800 Гц ≈ 0.4 с, при 1 кГц ≈ 0.7 с
 // (110 с отобранных данных). Если понадобится быстрее — Левинсон — Дурбин для тёплицевой системы, O(M²).
 //
-// Измерение ненадёжно, если не пройдена любая из трёх проверок (pidtune_quality). Главная беда обычного полёта: в Acro
-// при ATC_RATE_FF_ENAB = 0 цель скорости выше 4–5 Гц формирует угловой контур из самого факта, и «цель → факт» там
-// показывает обратную величину углового контура (|T| растёт с частотой, фаза около −90°). Точно мастер считает тестовый
-// полёт Acro с ACRO_OPTIONS «Rate Loop Only» (pidtune_log_mode) — решение пользователя 25.10.2026.
+// Измерение ненадёжно, если не пройдена любая из трёх проверок (pidtune_quality; в Acro «Rate Loop Only» — (а) и (б),
+// (в) не применяется). Главная беда обычного полёта: в Acro при ATC_RATE_FF_ENAB = 0 цель скорости выше 4–5 Гц
+// формирует угловой контур из самого факта, и «цель → факт» там показывает обратную величину углового контура (|T|
+// растёт с частотой, фаза около −90°). Точно мастер считает тестовый полёт Acro с ACRO_OPTIONS «Rate Loop Only»
+// (pidtune_log_mode) — решение пользователя 25.10.2026.
 //
-// Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/fft.js (hanning), US2S (core/log.js), find_start_index
-// и find_end_index (core/gyro.js), PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN (core/pid.js).
+// Прогноз (раздел 4 дизайна) — из измеренной T («цель → факт», FFT импульсной характеристики КИХ), а не из оценки
+// объекта «выход → факт»: та по замкнутому контуру смещена (P_H1 = ρ·P − (1 − ρ)/C, ρ — когерентность «цель → ошибка»,
+// на логе пользователя 0.52–0.87, а для 10 % на частоте среза нужно ρ ≥ 0.9). Объект вместе с фильтрами гироскопа
+// лога выражается через T и модель регулятора лога, новый вариант — через отношение регуляторов и фильтров
+// (pidtune_predict). Для коэффициентов лога прогноз совпадает с измеренным по построению, поэтому достоверность
+// проверяется отдельно (pidtune_validity): качество измерения, сверка модели регулятора с данными, когерентность.
+// На синтетике (условия как у лога, исследование): ошибка перерегулирования до 2.8 пункта при P +30 %, изменение
+// перерегулирования для P ±10 % и D ±10 % — в пределах ±1.5 пункта, запас фазы ±5°. Через этот модуль на синтетике
+// rate-only (задача 6, против прямой симуляции вариантов P ±10 %, D ±10 %, P +30 %): при частых резких манёврах
+// (тестовый полёт) — до 0.2 пункта и 0.6°, при редких манёврах и сильной турбулентности — до 2.9 пункта и 3°.
+//
+// Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/fft.js (hanning), Libraries/Array_Math.js (exp_jw,
+// complex_inverse, complex_square), US2S (core/log.js), find_start_index и find_end_index (core/gyro.js), load_filters
+// и filter_transfer (core/filters.js), candidate_key (core/candidates.js), pid_lowpass_response (core/lowpass.js),
+// PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN (core/pid.js).
 
 const pidtune_rules = {
     target_min_dps: 20,           // окно — |цель·Ханн| не меньше 20 °/с [PIDReview, redraw_step]
@@ -58,6 +73,9 @@ const pidtune_rules = {
     p_min: 0.01,                  // [код, AC_AutoTune_Multi.cpp, AUTOTUNE_RP_MIN]
     p_max: 2.0,                   // [код, AUTOTUNE_RP_MAX]
     d_max: 0.2,                   // [код, AUTOTUNE_RD_MAX]
+    // Предлагаемые значения (правила и варианты) — 4 значащие цифры: 0.12793 → 0.1279, 0.002637 → 0.002637; I по
+    // правилу — от уже округлённого P [наше, решение координатора по ревью задачи 5: правило давало 0.12793000000000002]
+    round_digits: 4,
     d_noise_hz: 50,               // шум D — выше этой частоты [наше]
     // Порог шума D, дБ от СКО D-составляющей выше d_noise_hz (выход регулятора: 1 — полный диапазон): выше —
     // «горячие моторы» [наше]. Калибровка на логе пользователя (AutoTune, 4.6.3, лог PID 400 Гц, notch на моторах,
@@ -71,6 +89,26 @@ const pidtune_rules = {
     // 01.10.2025, первый тег Copter-4.7.0, в 4.6.x нет]. По версии 4.7 масштаб получат и беты 4.7, собранные до
     // 01.10.2025, где его ещё не было
     i_scale_since: [4, 7],
+    // Отметки прогноза варианта (решение пользователя 25.10.2026): запас фазы ниже pm_min_deg, хуже прогноза лога
+    // больше чем на pm_max_drop_deg, перерегулирование в прогнозе выше overshoot_pred_max_pct. Выбор не блокируют
+    pm_min_deg: 30,
+    pm_max_drop_deg: 5,
+    overshoot_pred_max_pct: 20,
+    // Достоверность прогноза: когерентность γ² «цель → факт» на частоте среза лога не меньше [наше]. На логе пользователя
+    // на частоте среза по T (окно 512): 49–540 с — 0.48 / 0.55 / 0.84 (крен, тангаж, рыскание), 80–464 с — 0.29 / 0.58 /
+    // 0.80 (окно 1024 — в пределах 0.03 от этих); синтетика rate-only — 0.94–0.96
+    coherence_min: 0.5,
+    // Сверка модели регулятора с данными на band_hz: ||C_изм / C_мод| − 1| ≤ mag_err_max и |∠| ≤ phase_err_max_deg,
+    // окна Ханна window с шагом window_step (1/16 окна, как у отклика PIDReview) [наше]. Модель на логе пользователя
+    // (49–540 и 80–464 с, все оси): модуль до 0.031, фаза до 1.2°, γ² ≥ 0.993; в исследовании в точках 2/5/10/20 Гц —
+    // 0.95–1.05 и не больше 3°
+    controller_check: { band_hz: [2, 20], mag_err_max: 0.1, phase_err_max_deg: 10, window: 1024, window_step: 64 },
+    // Шаг сетки частот прогноза, Гц: FFT импульсной характеристики КИХ, дополненной нулями до степени двойки не меньше
+    // частота / шаг (4096 точек — 10.24 с при 400 Гц: хвост отклика за это время не заворачивается в первые 0.5 с) [наше]
+    predict_resolution_hz: 0.1,
+    // Частота среза ищется не ниже, Гц: ниже |L| велико из-за интеграторов регулятора и объекта, а оценка T там шумит
+    // [наше, исследование]
+    crossover_min_hz: 0.5,
 }
 
 // Оси шага: префикс параметров регулятора скорости и P углового контура (масштаб I в Rate Loop Only)
@@ -92,7 +130,8 @@ const pidtune_mode_names = {
 // (элемент load_pid().axes), где max |цель·Ханн| ≥ target_min_dps (как TarMax в PIDReview) и центр окна (время
 // отсчёта начало + window/2) в range = [t0, t1]; перекрывающиеся окна сливаются в непрерывный отрезок, пакеты —
 // не сливаются (между ними разрыв лога).
-// → { segments: [{ start_time, tar, act (Float64Array, °/с), starts: [начала окон внутри отрезка] }], rate_hz, windows,
+// → { segments: [{ start_time, tar, act (Float64Array, °/с), starts: [начала окон внутри отрезка], batch (номер пакета
+// в axis.sets[set_index]), begin (первый отсчёт отрезка в пакете) }], rate_hz, windows,
 // data_s } — rate_hz — средняя частота пакетов набора не короче окна (как average_sample_rate у pid_run_batch_fft, но по
 // набору), windows — число отобранных окон, data_s — секунды отобранных данных (отсчёты отрезков / rate_hz: время,
 // покрытое окнами, без повторов). null — нет данных: ось без данных, нет набора или ни одного пакета не короче окна.
@@ -109,7 +148,9 @@ function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
     let rate_count = 0
     let windows = 0
     let samples = 0
-    for (const batch of axis.sets[set_index]) {
+    const batches = axis.sets[set_index]
+    for (let b = 0; b < batches.length; b++) {
+        const batch = batches[b]
         const n = batch.Tar.length
         if (n < N) {
             continue
@@ -149,7 +190,7 @@ function pidtune_segments(axis, set_index, range, rules = pidtune_rules) {
                 j++
             }
             segments.push({ start_time: batch.time[begin], tar: Float64Array.from(batch.Tar.slice(begin, end)),
-                            act: Float64Array.from(batch.Act.slice(begin, end)), starts: own })
+                            act: Float64Array.from(batch.Act.slice(begin, end)), starts: own, batch: b, begin: begin })
             windows += own.length
             samples += end - begin
             i = j
@@ -316,6 +357,48 @@ function pidtune_halves(segments, window) {
     return [first, second]
 }
 
+// Суммы взаимных спектров по окнам: pieces — [{ [x_key], [y_key] (массивы отсчётов), starts: [начала окон] }], окно
+// Ханна длиной N, бины k0…k1 (realTransform FFTJS: k ≤ N/2). → { yx_re, yx_im — Σ Y·conj(X), xx — Σ |X|², yy — Σ |Y|²
+// (Float64Array, элемент k − k0), count — число окон }
+function pidtune_spectra(pieces, x_key, y_key, N, k0, k1) {
+    const fft = new FFTJS(N)
+    const w = hanning(N)
+    const xw = new Float64Array(N)
+    const yw = new Float64Array(N)
+    const X = fft.createComplexArray()
+    const Y = fft.createComplexArray()
+    const len = Math.max(0, k1 - k0 + 1)
+    const yx_re = new Float64Array(len)
+    const yx_im = new Float64Array(len)
+    const xx = new Float64Array(len)
+    const yy = new Float64Array(len)
+    let count = 0
+    for (const piece of pieces) {
+        const x = piece[x_key]
+        const y = piece[y_key]
+        for (const s of piece.starts) {
+            for (let i = 0; i < N; i++) {
+                xw[i] = x[s + i] * w[i]
+                yw[i] = y[s + i] * w[i]
+            }
+            fft.realTransform(X, xw)
+            fft.realTransform(Y, yw)
+            for (let k = k0; k <= k1; k++) {
+                const xr = X[2 * k]
+                const xi = X[2 * k + 1]
+                const yr = Y[2 * k]
+                const yi = Y[2 * k + 1]
+                yx_re[k - k0] += yr * xr + yi * xi
+                yx_im[k - k0] += yi * xr - yr * xi
+                xx[k - k0] += xr * xr + xi * xi
+                yy[k - k0] += yr * yr + yi * yi
+            }
+            count++
+        }
+    }
+    return { yx_re: yx_re, yx_im: yx_im, xx: xx, yy: yy, count: count }
+}
+
 // Подпись углового контура: наибольшее |T_H1| = |S_ar / S_rr| (усреднённые по отобранным окнам спектры, окно Ханна
 // rules.window) на частотах quality.outer_band_hz. → { value, freq_hz } | null (нет окон или полоса пуста)
 function pidtune_outer_peak(segments, rate_hz, rules = pidtune_rules) {
@@ -326,51 +409,39 @@ function pidtune_outer_peak(segments, rate_hz, rules = pidtune_rules) {
     if (k1 < k0) {
         return null
     }
-    const fft = new FFTJS(N)
-    const w = hanning(N)
-    const xr = new Float64Array(N)
-    const xa = new Float64Array(N)
-    const Fr = fft.createComplexArray()
-    const Fa = fft.createComplexArray()
-    const len = k1 - k0 + 1
-    const s_ar_re = new Float64Array(len)
-    const s_ar_im = new Float64Array(len)
-    const s_rr = new Float64Array(len)
-    let count = 0
-    for (const seg of segments) {
-        for (const s of seg.starts) {
-            for (let i = 0; i < N; i++) {
-                xr[i] = seg.tar[s + i] * w[i]
-                xa[i] = seg.act[s + i] * w[i]
-            }
-            fft.realTransform(Fr, xr)
-            fft.realTransform(Fa, xa)
-            for (let k = k0; k <= k1; k++) {
-                const rr = Fr[2 * k]
-                const ri = Fr[2 * k + 1]
-                const ar = Fa[2 * k]
-                const ai = Fa[2 * k + 1]
-                // A·conj(R)
-                s_ar_re[k - k0] += ar * rr + ai * ri
-                s_ar_im[k - k0] += ai * rr - ar * ri
-                s_rr[k - k0] += rr * rr + ri * ri
-            }
-            count++
-        }
-    }
-    if (count == 0) {
+    const S = pidtune_spectra(segments, "tar", "act", N, k0, k1)
+    if (S.count == 0) {
         return null
     }
     let value = -Infinity
     let freq_hz = null
     for (let k = k0; k <= k1; k++) {
-        const t = Math.hypot(s_ar_re[k - k0], s_ar_im[k - k0]) / s_rr[k - k0]
+        const t = Math.hypot(S.yx_re[k - k0], S.yx_im[k - k0]) / S.xx[k - k0]
         if (t > value) {
             value = t
             freq_hz = k * rate_hz / N
         }
     }
     return { value: value, freq_hz: freq_hz }
+}
+
+// Когерентность «цель → факт» γ² = |S_ar|² / (S_rr·S_aa) на частоте freq_hz по отобранным окнам отрезков (окно Ханна
+// rules.window, как у pidtune_outer_peak), линейная интерполяция между соседними бинами.
+// → γ² | null — нет окон, частота не число или вне 0…rate_hz/2
+function pidtune_coherence(segments, rate_hz, freq_hz, rules = pidtune_rules) {
+    const N = rules.window
+    const pos = freq_hz * N / rate_hz
+    if ((segments == null) || !Number.isFinite(freq_hz) || !(pos >= 0) || !(pos <= N / 2)) {
+        return null
+    }
+    const k0 = Math.min(Math.floor(pos), N / 2 - 1)
+    const S = pidtune_spectra(segments, "tar", "act", N, k0, k0 + 1)
+    if (S.count == 0) {
+        return null
+    }
+    const coh = (i) => (S.yx_re[i] ** 2 + S.yx_im[i] ** 2) / (S.xx[i] * S.yy[i])
+    const a = pos - k0
+    return (1 - a) * coh(0) + a * coh(1)
 }
 
 // Проверки качества измерения оси (решение пользователя 25.10.2026: не прошла любая — «измерение ненадёжно»):
@@ -762,12 +833,18 @@ function pidtune_log_mode(log, params, version, range, axis_name, rate_hz, rules
     }
 }
 
+// Предлагаемое значение коэффициента: round_digits значащих цифр (0.12793000000000002 → 0.1279). 0 и нечисловое — как есть
+function pidtune_round(value, rules = pidtune_rules) {
+    return (Number.isFinite(value) && (value != 0)) ? Number(value.toPrecision(rules.round_digits)) : value
+}
+
 // Изменение P на sign·gain_step с пределами AutoTune; I по правилу: крен и тангаж — I = P [wiki, Manual tuning:
 // «Each time the P term is changed set the I term equal to the P term»], рыскание — I = yaw_i_ratio·P [код].
+// P округляется (pidtune_round) до пределов, I считается от округлённого P и тоже округляется.
 // Предел, не давший сдвинуть P в нужную сторону (P уже на пределе) или развернувший изменение (P 2.5 и «P +10 %» →
 // 2.0, P 0.005 и «P −10 %» → 0.01), — без изменений, limited true
 function pidtune_change_p(gains, axis, sign, reason, rules) {
-    const target = gains.P * (1 + sign * rules.gain_step)
+    const target = pidtune_round(gains.P * (1 + sign * rules.gain_step), rules)
     const P = Math.min(rules.p_max, Math.max(rules.p_min, target))
     const limited = (P != target)
     const limit_text = "предел AutoTune P " + rules.p_min + "…" + rules.p_max
@@ -776,7 +853,7 @@ function pidtune_change_p(gains, axis, sign, reason, rules) {
             : "P = " + gains.P + " вне пределов: ограничение " + ((sign > 0) ? "уменьшило бы P вместо увеличения" : "увеличило бы P вместо уменьшения")
         return { change: null, reason: reason + "; " + why + " (" + limit_text + ") — без изменений", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true }
     }
-    const I = (axis == "yaw") ? rules.yaw_i_ratio * P : P
+    const I = (axis == "yaw") ? pidtune_round(rules.yaw_i_ratio * P, rules) : P
     return { change: (sign > 0) ? "P+" : "P-", reason: reason + (limited ? " (ограничено: " + limit_text + ")" : ""),
              values: { P: P, I: I, D: gains.D }, limited: limited }
 }
@@ -793,7 +870,7 @@ function pidtune_change_p(gains, axis, sign, reason, rules) {
 //   4. иначе — менять нечего.
 // gains = { P, I, D } лога, axis — "roll", "pitch", "yaw", metrics — pidtune_step_metrics, data_s — секунды отобранных
 // данных (pidtune_segments), quality — pidtune_quality. Пределы AutoTune: P в p_min…p_max, D ≤ d_max
-// (pidtune_change_p).
+// (pidtune_change_p). Изменённые значения — round_digits значащих цифр (pidtune_round), I — от округлённого P.
 // → { change: "P-" | "P+" | "D-" | null, reason, values: { P, I, D }, limited } (change null — values как в логе)
 function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rules) {
     const keep = (reason, limited = false) => ({ change: null, reason: reason, values: { P: gains.P, I: gains.I, D: gains.D }, limited: limited })
@@ -825,7 +902,7 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         const band_text = rules.osc_band_ratio + " полос отклика (" + limit.toFixed(1) + " Гц)"
         if (osc.freq_hz > limit) {
             if (Number.isFinite(gains.D) && (gains.D > 0)) {
-                const target = gains.D * (1 - rules.gain_step)
+                const target = pidtune_round(gains.D * (1 - rules.gain_step), rules)
                 const D = Math.min(rules.d_max, target)
                 const limited = (D != target)
                 return { change: "D-", reason: "высокие " + osc_text + " — выше " + band_text + " → D −" + Math.round(rules.gain_step * 100) + " %" +
@@ -850,4 +927,529 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
                                 Math.round(rules.gain_step * 100) + " %", rules)
     }
     return keep(os_text + " — от " + rules.overshoot_low_pct + " до " + rules.overshoot_high_pct + " %, колебаний нет — менять нечего")
+}
+
+// ---------- Модель регулятора, прогноз, варианты и отметки (раздел 4 дизайна) ----------
+
+// Регулятор C(f) — модель AC_PID::update_all (libraries/AC_PID/AC_PID.cpp) на частоте контура loop_rate
+// (SCHED_LOOP_RATE); вход — ошибка «цель − факт», рад/с (как у AC_PID), выход — нормированный (как P + I + D в PIDx) [код]:
+//   C = H_FLTE·(Kp + Ki·i_scale·dt / (1 − z⁻¹) + Kd·(1 − z⁻¹) / dt·H_FLTD),  z = e^(j·2π·f / loop_rate),  dt = 1 / loop_rate.
+// FLTE — на ошибке (действует на P, I и D); производная — (_error − error_last) / dt, на ней FLTD; интегратор
+// _integrator += _error·Ki·i_scale·dt обновляется в том же такте, что и выход (update_i), — без задержки z⁻¹.
+// Фильтры первого порядка — pid_lowpass_response (core/lowpass.js), как на шаге 3. i_scale — множитель I (update_all):
+// ATC_ANG_*_P в Acro «Rate Loop Only» с Copter 4.7 (pidtune_log_mode), иначе 1.
+// FF — прямая связь с цели вне контура (get_ff = _pid_info.FF + DFF): FF = Kff + Kdff·(1 − z⁻¹) / dt от цели после
+// FLTT (поле Tar в PIDx); прогноз вычитает её из измеренной T (раздел 7 дизайна: FF ≠ 0 учитывается в T).
+// Не моделируются: notch ошибки и цели (NEF, NTF), ограничитель SMAX (Dmod), PDMX, pd_scale, IMAX и остановка
+// интегратора при насыщении моторов (limit).
+// gains = { P, I, D, FF, DFF }: P, I, D не числа — NaN в C; FF и DFF необязательны (null, undefined — 0).
+// filters = { flte, fltd } — Гц (0 — без фильтра, нечисловые — NaN в C); freq — частоты, Гц. На 0 Гц при ki ≠ 0
+// интегратор бесконечен — C = [Infinity, 0]: предел отношения двух регуляторов — отношение ki (берёт pidtune_predict).
+// → { freq, C: [re[], im[]], FF: [re[], im[]], ki: Ki·i_scale, loop_rate } (комплексные массивы как в Libraries/Array_Math.js)
+function pidtune_controller(gains, filters, loop_rate, freq, i_scale = 1) {
+    const num = (v) => (typeof v === "number") ? v : NaN
+    const dt = 1 / loop_rate
+    const kp = num(gains.P)
+    const ki = num(gains.I) * i_scale
+    const kd = num(gains.D)
+    const kff = gains.FF ?? 0
+    const kdff = gains.DFF ?? 0
+    const n = freq.length
+    const C = [new Array(n), new Array(n)]
+    const FF = [new Array(n), new Array(n)]
+    for (let k = 0; k < n; k++) {
+        const f = freq[k]
+        const w = 2 * Math.PI * f / loop_rate
+        // 1 − z⁻¹ = 2·sin²(w/2) + j·sin w (не 1 − cos w: на низких частотах вычитание теряет точность)
+        const ar = 2 * Math.sin(w / 2) ** 2
+        const ai = Math.sin(w)
+        FF[0][k] = kff + kdff / dt * ar
+        FF[1][k] = kdff / dt * ai
+        // Kp + Kd·(1 − z⁻¹) / dt·H_FLTD
+        const hd = pid_lowpass_response(filters.fltd, loop_rate, f)
+        let sr = kp + kd / dt * (ar * hd[0] - ai * hd[1])
+        let si = kd / dt * (ar * hd[1] + ai * hd[0])
+        // + ki·dt / (1 − z⁻¹); при ki = 0 интегратора нет (update_i обнуляет его)
+        if (ki != 0) {
+            const ad = ar * ar + ai * ai
+            if (ad == 0) {
+                C[0][k] = Infinity
+                C[1][k] = 0
+                continue
+            }
+            sr += ki * dt * ar / ad
+            si -= ki * dt * ai / ad
+        }
+        const he = pid_lowpass_response(filters.flte, loop_rate, f)
+        C[0][k] = sr * he[0] - si * he[1]
+        C[1][k] = sr * he[1] + si * he[0]
+    }
+    return { freq: freq, C: C, FF: FF, ki: ki, loop_rate: loop_rate }
+}
+
+// Сверка модели регулятора с данными лога (достоверность прогноза, раздел 4 дизайна): C_изм = S_oe / S_ee — выход
+// регулятора по ошибке, суммы взаимных спектров (pidtune_spectra) окон controller_check.window с шагом window_step,
+// отобранных как отрезки КИХ (pidtune_segments: центр окна в range, max |цель·Ханн| ≥ target_min_dps). Ошибка
+// e = Tar − Act (до FLTE: он в модели) — в рад/с, выход o = P + I + D (FF и DFF — с цели, вне контура); у оси RATE
+// компонент нет — o = ROut (в нём и FF: при FF ≠ 0 сверка смещена). Модель — pidtune_controller(gains, filters,
+// loop_rate, частоты бинов, i_scale). На бинах band_hz отношение r = C_изм / C_мод: ошибка модуля ||r| − 1|, фазы |∠r|;
+// проходит, если наибольшие не больше mag_err_max и phase_err_max_deg [наше]. Нечисловое отношение — не проходит.
+// → { ok, max_mag_err, max_phase_err_deg, worst_hz (бин наибольшей ошибки относительно порогов), min_coherence
+// (наименьшая γ² «ошибка → выход» на полосе), windows } — нет данных, окон или бинов полосы: ok false, числа null
+function pidtune_controller_check(axis, set_index, range, gains, filters, loop_rate, i_scale = 1, rules = pidtune_rules) {
+    const cc = rules.controller_check
+    const fail = (windows) => ({ ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: windows })
+    const seg = pidtune_segments(axis, set_index, range, { ...rules, window: cc.window, window_step: cc.window_step })
+    if ((seg == null) || (seg.windows == 0)) {
+        return fail(0)
+    }
+    const N = cc.window
+    const k0 = Math.max(1, Math.ceil(cc.band_hz[0] * N / seg.rate_hz))
+    const k1 = Math.min(N / 2, Math.floor(cc.band_hz[1] * N / seg.rate_hz))
+    if (k1 < k0) {
+        return fail(seg.windows)
+    }
+
+    // Ошибка (рад/с) и выход регулятора на отсчётах отрезков
+    const batches = axis.sets[set_index]
+    const pieces = seg.segments.map((s) => {
+        const batch = batches[s.batch]
+        const components = (batch.P != null) && (batch.I != null) && (batch.D != null)
+        const n = s.tar.length
+        const e = new Float64Array(n)
+        const o = new Float64Array(n)
+        for (let i = 0; i < n; i++) {
+            const j = s.begin + i
+            e[i] = (s.tar[i] - s.act[i]) * Math.PI / 180
+            o[i] = components ? batch.P[j] + batch.I[j] + batch.D[j] : batch.Out[j]
+        }
+        return { e: e, o: o, starts: s.starts }
+    })
+    const S = pidtune_spectra(pieces, "e", "o", N, k0, k1)
+
+    const freq = []
+    for (let k = k0; k <= k1; k++) {
+        freq.push(k * seg.rate_hz / N)
+    }
+    const model = pidtune_controller(gains, filters, loop_rate, freq, i_scale).C
+    let max_mag_err = 0
+    let max_phase_err_deg = 0
+    let min_coherence = Infinity
+    let worst = -1
+    let worst_hz = null
+    for (let i = 0; i < freq.length; i++) {
+        // C_изм = S_oe / S_ee, r = C_изм / C_мод
+        const mr = S.yx_re[i] / S.xx[i]
+        const mi = S.yx_im[i] / S.xx[i]
+        const cr = model[0][i]
+        const ci = model[1][i]
+        const d = cr * cr + ci * ci
+        const rr = (mr * cr + mi * ci) / d
+        const ri = (mi * cr - mr * ci) / d
+        const mag_err = Math.abs(Math.hypot(rr, ri) - 1)
+        const phase_err = Math.abs(Math.atan2(ri, rr)) * 180 / Math.PI
+        // Math.max и Math.min сохраняют NaN — нечисловое отношение не проходит
+        max_mag_err = Math.max(max_mag_err, mag_err)
+        max_phase_err_deg = Math.max(max_phase_err_deg, phase_err)
+        min_coherence = Math.min(min_coherence, (S.yx_re[i] ** 2 + S.yx_im[i] ** 2) / (S.xx[i] * S.yy[i]))
+        const relative = Math.max(mag_err / cc.mag_err_max, phase_err / cc.phase_err_max_deg)
+        if (!(relative <= worst)) {
+            worst = relative
+            worst_hz = freq[i]
+        }
+    }
+    return {
+        ok: (max_mag_err <= cc.mag_err_max) && (max_phase_err_deg <= cc.phase_err_max_deg),
+        max_mag_err: max_mag_err,
+        max_phase_err_deg: max_phase_err_deg,
+        worst_hz: worst_hz,
+        min_coherence: min_coherence,
+        windows: seg.windows,
+    }
+}
+
+// Поправка фильтров гироскопа (раздел 4 дизайна): G_new / G_log — отношение передаточных функций цепочки фильтров
+// new_values и old_values (значения load_filters: INS_GYRO_FILTER, INS_HNTCH_*, INS_HNTC2_*; новые — принятые на шагах
+// 2–3, старые — лога) на частотах freq. Act — отфильтрованный гироскоп, по нему и работает регулятор, поэтому объект
+// «выход → факт» меняется ровно в это отношение. gyro_ctx = { gyro, env, tracking, range, sensor } (как base шага 3:
+// sensor — индекс экземпляра, трекинг интерполирован к окнам FFT). H — filter_transfer на exp_jw(freq,
+// FFT.average_sample_rate) по окнам FFT экземпляра до конца интервала (с первого окна: индексы окон — те же, что
+// у трекинга, как в lowpass_bode); отношение H_new / H_old усредняется по окнам интервала комплексно: у статических
+// фильтров оно во всех окнах одно, у динамических notch окна различаются только около частот notch, где |L| мало.
+// Одинаковые наборы (candidate_key) — ровно 1 без расчёта (и без данных гироскопа).
+// → [re[], im[]] | null — нет экземпляра, FFT или окон гироскопа: прогноз без поправки
+function pidtune_gyro_ratio(old_values, new_values, gyro_ctx, freq) {
+    const n = freq.length
+    if (candidate_key(old_values) == candidate_key(new_values)) {
+        return [new Array(n).fill(1), new Array(n).fill(0)]
+    }
+    const gyro = gyro_ctx?.gyro
+    const index = gyro_ctx?.sensor
+    if ((gyro == null) || (gyro[index] == null) || (gyro[index].FFT == null) || (gyro[index].FFT.time == null) ||
+        (gyro[index].FFT.time.length == 0)) {
+        return null
+    }
+    const FFT = gyro[index].FFT
+    const start = find_start_index(FFT.time, gyro_ctx.range)
+    const end = find_end_index(FFT.time, gyro_ctx.range) + 1
+    if (end <= start) {
+        return null
+    }
+    const Z = exp_jw(freq, FFT.average_sample_rate)
+    const Z1 = complex_inverse(Z)
+    const Z2 = complex_inverse(complex_square(Z))
+    const time = FFT.time.slice(0, end)
+    const rate = FFT.average_sample_rate
+    const H_old = filter_transfer(load_filters(old_values, gyro_ctx.env, gyro_ctx.tracking), index, time, rate, Z1, Z2)
+    const H_new = filter_transfer(load_filters(new_values, gyro_ctx.env, gyro_ctx.tracking), index, time, rate, Z1, Z2)
+    const re = new Array(n).fill(0)
+    const im = new Array(n).fill(0)
+    for (let j = start; j < end; j++) {
+        const a = H_new[j]
+        const b = H_old[j]
+        for (let k = 0; k < n; k++) {
+            const d = b[0][k] * b[0][k] + b[1][k] * b[1][k]
+            re[k] += (a[0][k] * b[0][k] + a[1][k] * b[1][k]) / d
+            im[k] += (a[1][k] * b[0][k] - a[0][k] * b[1][k]) / d
+        }
+    }
+    const count = end - start
+    return [re.map((v) => v / count), im.map((v) => v / count)]
+}
+
+// Сетка частот прогноза: n — степень двойки не меньше rate_hz / predict_resolution_hz и длины КИХ (FFT импульсной
+// характеристики, дополненной нулями), freq — k·rate_hz / n, k = 0…n/2. На ней же считаются регуляторы
+// (pidtune_controller) и поправка фильтров (pidtune_gyro_ratio) для pidtune_predict. → { n, freq }
+function pidtune_predict_grid(rate_hz, rules = pidtune_rules) {
+    const n = 2 ** Math.ceil(Math.log2(Math.max(rate_hz / rules.predict_resolution_hz, rules.fir_length_s * rate_hz)))
+    const freq = new Array(n / 2 + 1)
+    for (let k = 0; k <= n / 2; k++) {
+        freq[k] = k * rate_hz / n
+    }
+    return { n: n, freq: freq }
+}
+
+// Частота среза, запас фазы и запас по амплитуде разомкнутого контура L ([re[], im[]]) на сетке freq:
+//   частота среза — первый переход |L| через 1 сверху вниз (|L| ≥ 1 на бине и < 1 на следующем) не ниже
+//   crossover_min_hz, частота — линейная интерполяция |L| между бинами;
+//   запас фазы — 180° + ∠L на частоте среза: фаза интерполирована между бинами и приведена к (−360°, 0°], поэтому
+//   запас — в (−180°, 180°] (отрицательный — контур неустойчив);
+//   запас по амплитуде — −20·log10 |L| там, где фаза, развёрнутая от частоты среза вверх, впервые переходит −180°
+//   (|L| в дБ интерполирован); только при запасе фазы больше 0, перехода до конца сетки нет — null.
+// → { crossover_hz, pm_deg, gm_db } — нет частоты среза (или нечисловые L) — все null
+function pidtune_margins(freq, L, rules = pidtune_rules) {
+    const none = { crossover_hz: null, pm_deg: null, gm_db: null }
+    const mag = (k) => Math.hypot(L[0][k], L[1][k])
+    const phase = (k) => Math.atan2(L[1][k], L[0][k]) * 180 / Math.PI
+    // Разность фаз соседних бинов — в (−180°, 180°]
+    const step = (d) => d - 360 * Math.ceil((d - 180) / 360)
+    let kc = -1
+    for (let k = 1; k < freq.length; k++) {
+        if ((freq[k - 1] >= rules.crossover_min_hz) && (mag(k - 1) >= 1) && (mag(k) < 1)) {
+            kc = k
+            break
+        }
+    }
+    if (kc < 0) {
+        return none
+    }
+    const m0 = mag(kc - 1)
+    const m1 = mag(kc)
+    const a = (m0 - 1) / (m0 - m1)
+    const crossover_hz = freq[kc - 1] + a * (freq[kc] - freq[kc - 1])
+    const p0 = phase(kc - 1)
+    const p1 = p0 + step(phase(kc) - p0)
+    const raw = p0 + a * (p1 - p0)
+    // Фаза среза — к (−360°, 0°]
+    const shift = -360 * Math.ceil(raw / 360)
+    const pm_deg = 180 + raw + shift
+    if (!Number.isFinite(pm_deg)) {
+        return none
+    }
+
+    // Запас по амплитуде: фаза, развёрнутая от бина kc − 1 на той же ветви, что и фаза среза
+    let gm_db = null
+    if (pm_deg > 0) {
+        let prev = p0 + shift
+        for (let k = kc; k < freq.length; k++) {
+            const next = prev + step(phase(k) - phase(k - 1))
+            if ((prev > -180) && (next <= -180)) {
+                const b = (prev + 180) / (prev - next)
+                const db0 = 20 * Math.log10(mag(k - 1))
+                const db1 = 20 * Math.log10(mag(k))
+                gm_db = -(db0 + b * (db1 - db0))
+                break
+            }
+            prev = next
+        }
+    }
+    return { crossover_hz: crossover_hz, pm_deg: pm_deg, gm_db: gm_db }
+}
+
+// Прогноз варианта по измеренной T (раздел 4 дизайна). T — FFT импульсной характеристики КИХ fir.h, дополненной нулями
+// до сетки pidtune_predict_grid(rate_hz). Объект вместе с фильтрами гироскопа лога G_log выражается через T и регулятор
+// лога: T = G_log·(C_log + FF_log) / (1 + G_log·C_log), откуда L_log = G_log·C_log = T / (1 + φ_log − T), φ = FF / C
+// (при FF = 0 — привычное L = T / (1 − T)). Вариант: R = (C_new / C_log)·ratio (ratio = G_new / G_log —
+// pidtune_gyro_ratio; null — 1), L_new = R·L_log, T_new = L_new·(1 + φ_new) / (1 + L_new) =
+// R·T·(1 + φ_new) / (1 + φ_log − T + R·T) — без деления на 1 − T, близкое к нулю на низких частотах. При c_new = c_log
+// и ratio = 1 T_new = T: прогноз для коэффициентов лога совпадает с измеренным по построению.
+// На 0 Гц (интегратор: C = Infinity): I у обоих — R = ki_new / ki_log; I только у варианта — T_new = 1 (интегратор
+// убирает статическую ошибку); I только у лога — T_new = T (предел по данным не определить). На частоте Найквиста —
+// действительная часть (отклик действительный).
+// Отклик — обратное FFT T_new и накопленная сумма на 0…step_length_s (сетка — как у fir.step); метрики —
+// pidtune_step_metrics; частота среза и запасы — pidtune_margins(L_new). Нечисловые коэффициенты дают NaN в L и T,
+// метрики и запасы null — pidtune_flags отметят вариант.
+// fir — pidtune_fir; c_log, c_new — pidtune_controller на частотах сетки (другая сетка — исключение); rate_hz — частота
+// лога (pidtune_segments).
+// → { freq, T (T_new), L (L_new) — [re[], im[]] на 0…rate_hz/2, crossover_hz, pm_deg, gm_db, step: { time, y }, metrics }
+// | null — нет КИХ или регулятора
+function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rules) {
+    if ((fir == null) || (c_log == null) || (c_new == null)) {
+        return null
+    }
+    const grid = pidtune_predict_grid(rate_hz, rules)
+    const n = grid.n
+    const half = n / 2
+    for (const arr of [c_log.C, c_log.FF, c_new.C, c_new.FF, ratio]) {
+        if ((arr != null) && ((arr[0].length != half + 1) || (arr[1].length != half + 1))) {
+            throw new Error("pidtune_predict: регуляторы и поправка фильтров — на сетке pidtune_predict_grid (" + (half + 1) + " частот)")
+        }
+    }
+
+    // T = FFT h (дополнение нулями до n)
+    const fft = new FFTJS(n)
+    const x = new Float64Array(n)
+    for (let i = 0; i < Math.min(fir.h.length, n); i++) {
+        x[i] = fir.h[i]
+    }
+    const spectrum = fft.createComplexArray()
+    fft.realTransform(spectrum, x)
+
+    const cdiv = (ar, ai, br, bi) => {
+        const d = br * br + bi * bi
+        return [(ar * br + ai * bi) / d, (ai * br - ar * bi) / d]
+    }
+    const T_new = [new Array(half + 1), new Array(half + 1)]
+    const L = [new Array(half + 1), new Array(half + 1)]
+    for (let k = 0; k <= half; k++) {
+        const tr = spectrum[2 * k]
+        const ti = ((k == 0) || (k == half)) ? 0 : spectrum[2 * k + 1]
+        const cl = [c_log.C[0][k], c_log.C[1][k]]
+        const cn = [c_new.C[0][k], c_new.C[1][k]]
+        const g = (ratio != null) ? [ratio[0][k], ratio[1][k]] : [1, 0]
+        let R
+        let phi_log
+        let phi_new
+        if ((cl[0] === Infinity) || (cn[0] === Infinity)) {
+            // 0 Гц с интегратором
+            if (cl[0] !== Infinity) {
+                T_new[0][k] = 1
+                T_new[1][k] = 0
+                L[0][k] = Infinity
+                L[1][k] = 0
+                continue
+            }
+            if (cn[0] !== Infinity) {
+                T_new[0][k] = tr
+                T_new[1][k] = 0
+                L[0][k] = NaN
+                L[1][k] = NaN
+                continue
+            }
+            const q = c_new.ki / c_log.ki
+            R = [q * g[0], q * g[1]]
+            phi_log = [0, 0]
+            phi_new = [0, 0]
+        } else {
+            const c = cdiv(cn[0], cn[1], cl[0], cl[1])
+            R = [c[0] * g[0] - c[1] * g[1], c[0] * g[1] + c[1] * g[0]]
+            phi_log = cdiv(c_log.FF[0][k], c_log.FF[1][k], cl[0], cl[1])
+            phi_new = cdiv(c_new.FF[0][k], c_new.FF[1][k], cn[0], cn[1])
+        }
+        // R·T и 1 + φ_log − T
+        const rt = [R[0] * tr - R[1] * ti, R[0] * ti + R[1] * tr]
+        const den = [1 + phi_log[0] - tr, phi_log[1] - ti]
+        const l = cdiv(rt[0], rt[1], den[0], den[1])
+        L[0][k] = l[0]
+        L[1][k] = l[1]
+        const num = [rt[0] * (1 + phi_new[0]) - rt[1] * phi_new[1], rt[0] * phi_new[1] + rt[1] * (1 + phi_new[0])]
+        const t = cdiv(num[0], num[1], den[0] + rt[0], den[1] + rt[1])
+        T_new[0][k] = t[0]
+        T_new[1][k] = ((k == 0) || (k == half)) ? 0 : t[1]
+    }
+
+    // Отклик: обратное FFT полного (сопряжённо-симметричного) спектра и накопленная сумма
+    const full = fft.createComplexArray()
+    for (let k = 0; k <= half; k++) {
+        full[2 * k] = T_new[0][k]
+        full[2 * k + 1] = T_new[1][k]
+        if ((k > 0) && (k < half)) {
+            full[2 * (n - k)] = T_new[0][k]
+            full[2 * (n - k) + 1] = -T_new[1][k]
+        }
+    }
+    const impulse = fft.createComplexArray()
+    fft.inverseTransform(impulse, full)
+    const n_out = Math.min(n, Math.round(rules.step_length_s * rate_hz) + 1)
+    const time = new Array(n_out)
+    const y = new Array(n_out)
+    let sum = 0
+    for (let i = 0; i < n_out; i++) {
+        sum += impulse[2 * i]
+        time[i] = i / rate_hz
+        y[i] = sum
+    }
+
+    const margins = pidtune_margins(grid.freq, L, rules)
+    return {
+        freq: grid.freq,
+        T: T_new,
+        L: L,
+        crossover_hz: margins.crossover_hz,
+        pm_deg: margins.pm_deg,
+        gm_db: margins.gm_db,
+        step: { time: time, y: y },
+        metrics: pidtune_step_metrics(time, y, rules),
+    }
+}
+
+// Достоверность прогноза оси (раздел 4 дизайна). Для коэффициентов лога прогноз совпадает с измеренным по построению,
+// поэтому проверяется, можно ли доверять T и модели регулятора:
+//   измерение надёжно — quality.ok (pidtune_quality: (а)–(в), в Acro «Rate Loop Only» — (а) и (б));
+//   модель регулятора сходится с данными — controller_check.ok (pidtune_controller_check);
+//   когерентность γ² «цель → факт» на частоте среза лога (pidtune_coherence) не меньше coherence_min [наше].
+// Нет значения (null, нечисловое) — проверка не пройдена (отказ при сомнении).
+// → { valid, reasons: [текст по каждой непройденной проверке] }
+function pidtune_validity(quality, controller_check, coherence_at_crossover, rules = pidtune_rules) {
+    const reasons = []
+    if (quality == null) {
+        reasons.push("нет проверки качества измерения")
+    } else if (!quality.ok) {
+        reasons.push("измерение ненадёжно" + ((quality.reasons.length > 0) ? ": " + quality.reasons.join("; ") : ""))
+    }
+
+    const cc = rules.controller_check
+    const mag = controller_check?.max_mag_err
+    const phase = controller_check?.max_phase_err_deg
+    if (!Number.isFinite(mag) || !Number.isFinite(phase)) {
+        reasons.push("сверка модели регулятора с данными не посчиталась: нет окон " + cc.window + " отсчётов с целью больше " +
+                     rules.target_min_dps + " °/с или коэффициенты регулятора не числа")
+    } else if (!controller_check.ok) {
+        reasons.push("модель регулятора не сходится с данными: модуль C_изм / C_мод отличается от 1 до " + (mag * 100).toFixed(1) +
+                     " %, фаза — до " + phase.toFixed(1) + "° (худшее — на " + controller_check.worst_hz.toFixed(1) + " Гц; порог " +
+                     cc.mag_err_max * 100 + " % и " + cc.phase_err_max_deg + "° на " + cc.band_hz[0] + "–" + cc.band_hz[1] + " Гц)")
+    }
+
+    if (!Number.isFinite(coherence_at_crossover)) {
+        reasons.push("когерентность «цель → факт» на частоте среза не посчиталась: частота среза не найдена или нет окон")
+    } else if (!(coherence_at_crossover >= rules.coherence_min)) {
+        reasons.push("когерентность «цель → факт» на частоте среза γ² = " + coherence_at_crossover.toFixed(2) + " ниже " + rules.coherence_min +
+                     " — отклик на этой частоте плохо связан с целью (возмущения, шум)")
+    }
+    return { valid: reasons.length == 0, reasons: reasons }
+}
+
+// Варианты оси (раздел 4 дизайна), по порядку:
+//   «Как в логе» (log) — значения лога как есть;
+//   «По правилам» (rule) — rule.values (pidtune_rule; без изменений — значения лога);
+//   «P −10 %», «P +10 %» (p_minus, p_plus) — I по правилу, пределы AutoTune (pidtune_change_p); варианта нет, если
+//   предел не даёт сдвинуть P в нужную сторону или P и I лога не числа;
+//   «D −10 %», «D +10 %» (d_minus, d_plus) — только при D лога — положительном числе (D = 0 — «D выключен»); D ≤ d_max,
+//   варианта нет, если предел не даёт сдвинуть D.
+// Изменённые значения — round_digits значащих цифр (pidtune_round), I — от округлённого P. Одинаковые наборы
+// (candidate_key) остаются один раз — первый по порядку, в его same_as — id совпавших (так «По правилам» без изменений —
+// это «Как в логе» с same_as ["rule"]). «Свой» (правка формы) добавляет страница.
+// log_gains = { P, I, D } лога, rule — pidtune_rule (null — без «По правилам»), axis — "roll" | "pitch" | "yaw".
+// → [{ id, title, values: { P, I, D }, same_as: [id] }]
+function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) {
+    const log = { P: log_gains.P, I: log_gains.I, D: log_gains.D }
+    const percent = Math.round(rules.gain_step * 100) + " %"
+    const list = [{ id: "log", title: "Как в логе", values: log }]
+    if (rule != null) {
+        list.push({ id: "rule", title: "По правилам", values: { P: rule.values.P, I: rule.values.I, D: rule.values.D } })
+    }
+    if (Number.isFinite(log.P) && Number.isFinite(log.I)) {
+        for (const sign of [-1, 1]) {
+            const changed = pidtune_change_p(log, axis, sign, "", rules)
+            if (changed.change != null) {
+                list.push({ id: (sign < 0) ? "p_minus" : "p_plus", title: "P " + ((sign < 0) ? "−" : "+") + percent, values: changed.values })
+            }
+        }
+    }
+    if (Number.isFinite(log.D) && (log.D > 0)) {
+        for (const sign of [-1, 1]) {
+            const D = Math.min(rules.d_max, pidtune_round(log.D * (1 + sign * rules.gain_step), rules))
+            if ((D - log.D) * sign > 0) {
+                list.push({ id: (sign < 0) ? "d_minus" : "d_plus", title: "D " + ((sign < 0) ? "−" : "+") + percent, values: { P: log.P, I: log.I, D: D } })
+            }
+        }
+    }
+
+    // Одинаковые наборы — один раз (первый), остальные — в его same_as
+    const kept = []
+    const by_key = new Map()
+    for (const candidate of list) {
+        const key = candidate_key(candidate.values)
+        const first = by_key.get(key)
+        if (first != null) {
+            first.same_as.push(candidate.id)
+            continue
+        }
+        const item = { ...candidate, same_as: [] }
+        by_key.set(key, item)
+        kept.push(item)
+    }
+    return kept
+}
+
+// Отметки прогноза варианта pred против прогноза для коэффициентов лога pred_log (оба — pidtune_predict, могут быть
+// null) — решение пользователя 25.10.2026:
+//   low_pm — запас фазы ниже pm_min_deg;
+//   pm_drop — запас фазы хуже лога больше чем на pm_max_drop_deg;
+//   overshoot — перерегулирование в прогнозе выше overshoot_pred_max_pct;
+//   incomplete — нет прогноза, запаса фазы (частота среза не найдена) или метрик у варианта, нет запаса фазы у лога.
+// Отметки отказывают при сомнении: !(значение в пределах порога), поэтому NaN и null отмечаются; ровно на пороге —
+// без отметки [наше]. Выбор они не блокируют.
+// → { low_pm, pm_drop, overshoot, incomplete, flagged (хотя бы одна), reasons: [текст] }
+function pidtune_flags(pred, pred_log, rules = pidtune_rules) {
+    const value = (v) => (typeof v === "number") ? v : NaN
+    const pm = value(pred?.pm_deg)
+    const pm_log = value(pred_log?.pm_deg)
+    const os = value(pred?.metrics?.overshoot_pct)
+    const flags = {
+        low_pm: !(pm >= rules.pm_min_deg),
+        pm_drop: !(pm_log - pm <= rules.pm_max_drop_deg),
+        overshoot: !(os <= rules.overshoot_pred_max_pct),
+        incomplete: !Number.isFinite(pm) || !Number.isFinite(pm_log) || !Number.isFinite(os),
+    }
+    const reasons = []
+    if (flags.incomplete) {
+        const missing = []
+        if (pred == null) {
+            missing.push("нет прогноза")
+        } else {
+            if (!Number.isFinite(pm)) {
+                missing.push("частота среза не найдена")
+            }
+            if (!Number.isFinite(os)) {
+                missing.push("нет метрик отклика")
+            }
+        }
+        if (!Number.isFinite(pm_log)) {
+            missing.push("у прогноза лога нет запаса фазы")
+        }
+        reasons.push("прогноз неполный: " + missing.join(", "))
+    }
+    if (flags.low_pm && Number.isFinite(pm)) {
+        reasons.push("запас фазы " + pm.toFixed(1) + "° ниже " + rules.pm_min_deg + "°")
+    }
+    if (flags.pm_drop && Number.isFinite(pm) && Number.isFinite(pm_log)) {
+        reasons.push("запас фазы хуже лога на " + (pm_log - pm).toFixed(1) + "° (больше " + rules.pm_max_drop_deg + "°)")
+    }
+    if (flags.overshoot && Number.isFinite(os)) {
+        reasons.push("перерегулирование в прогнозе " + os.toFixed(1) + " % выше " + rules.overshoot_pred_max_pct + " %")
+    }
+    flags.flagged = flags.low_pm || flags.pm_drop || flags.overshoot || flags.incomplete
+    flags.reasons = reasons
+    return flags
 }

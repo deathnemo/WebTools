@@ -1,6 +1,7 @@
 // Тесты шага 4 мастера настройки (TuneWizard/core/pidtune.js): метрики отклика на известных системах, КИХ МНК
 // на синтетическом замкнутом контуре против правды, проверки качества измерения (и их отказ с угловым контуром и при
-// смене объекта), шум D, режим лога и правила PID.
+// смене объекта), шум D, режим лога и правила PID; модель регулятора AC_PID против разностных уравнений, прогноз
+// вариантов против прямой симуляции, сверка регулятора, поправка фильтров, достоверность, варианты и отметки.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pid.test.cjs).
 const test = require('node:test')
@@ -867,6 +868,32 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.equal(back.limited, true)
 })
 
+test('pidtune_rule: предлагаемые значения — 4 значащие цифры, I — от округлённого P (0.1163·1.1 → 0.1279, а не 0.12793000000000002)', () => {
+    assert.equal(pidtune_round(0.12793000000000002), 0.1279)
+    assert.equal(pidtune_round(0.002637), 0.002637)
+    assert.equal(pidtune_round(0.0026374), 0.002637)
+    assert.equal(pidtune_round(2.00004), 2)
+    assert.equal(pidtune_round(0), 0)
+    assert.ok(Number.isNaN(pidtune_round(NaN)))
+    // Крен и тангаж: I = P — то же округлённое число
+    const roll = pidtune_rule({ P: 0.1163, I: 0.1163, D: 0.00293 }, 'roll', metrics_of(2), 10, QUALITY_OK)
+    assert.equal(roll.change, 'P+')
+    assert.equal(roll.values.P, 0.1279)
+    assert.equal(roll.values.I, 0.1279)
+    assert.equal(pidtune_rule({ P: 0.1163, I: 0.1163, D: 0.00293 }, 'roll', metrics_of(30), 10, QUALITY_OK).values.P, 0.1047, '0.10467')
+    // Рыскание: I = 0.1·P от округлённого P и тоже округлено (0.1·0.2528 = 0.025280000000000004)
+    const yaw = pidtune_rule({ P: 0.2298, I: 0.02298, D: 0 }, 'yaw', metrics_of(2), 10, QUALITY_OK)
+    assert.equal(yaw.values.P, 0.2528)
+    assert.equal(yaw.values.I, 0.02528)
+    // D −10 %: 0.00293·0.9 = 0.002637 (без хвоста двоичного округления)
+    const d = pidtune_rule({ P: 0.1163, I: 0.1163, D: 0.00293 }, 'roll', metrics_of(10, { freq_hz: 40, amplitude_pp: 0.1 }), 10, QUALITY_OK)
+    assert.equal(d.change, 'D-')
+    assert.equal(d.values.D, 0.002637)
+    // Без изменений — значения лога как есть, не округляются
+    assert.deepEqual(pidtune_rule({ P: 0.116286, I: 0.116286, D: 0.0029292 }, 'roll', metrics_of(10), 10, QUALITY_OK).values,
+                     { P: 0.116286, I: 0.116286, D: 0.0029292 })
+})
+
 test('pidtune_rule: коэффициента нет в логе (не число) — без изменений', () => {
     for (const [gains, axis, name] of [[{ P: null, I: 0.1, D: 0.003 }, 'roll', 'ATC_RAT_RLL_P'], [{ P: 0.2, I: NaN, D: 0 }, 'yaw', 'ATC_RAT_YAW_I'],
                                        [{ P: undefined, I: 0.1, D: 0 }, 'pitch', 'ATC_RAT_PIT_P']]) {
@@ -903,4 +930,503 @@ test('pidtune_rule: ненадёжное измерение и мало данн
     assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), 5, bad).reason.startsWith('мало манёвров'), 'мало данных важнее качества')
     assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), null, bad).reason.startsWith('мало манёвров'))
     assert.equal(pidtune_rule(ROLL, 'roll', null, 100, QUALITY_OK).change, null)
+})
+
+// ---------------------------------------------------------------- модель регулятора и прогноз (задача 6)
+
+// Фильтры регулятора синтетики (как у крена лога пользователя): FLTE 0, FLTD 30 Гц
+const FILTERS0 = { flte: 0, fltd: 30 }
+const LOG_GAINS = { P: G0.kp, I: G0.ki, D: G0.kd }
+
+// Комплексные помощники для массивов [re[], im[]]
+function cmul(a, b) {
+    return [a[0].map((v, k) => v * b[0][k] - a[1][k] * b[1][k]), a[0].map((v, k) => v * b[1][k] + a[1][k] * b[0][k])]
+}
+
+// Импульсная характеристика объекта «выход → факт» синтетики: выход 1 на один такт, факт после каждого такта (как
+// в simulate: факт такта k + 1 — после выхода такта k) → g[1…n]
+function plant_pulse(p, n = 16 * RATE_HZ) {
+    const plant = make_plant(p)
+    const g = new Float64Array(n + 1)
+    for (let k = 1; k <= n; k++) {
+        g[k] = plant((k == 1) ? 1 : 0, () => 0, () => 0).meas
+    }
+    return g
+}
+
+// G(f) = Σ g[n]·e^(−j·2π·f·n / RATE_HZ) на частотах freq → [re[], im[]]
+function plant_response(g, freq) {
+    const re = []
+    const im = []
+    for (const f of freq) {
+        const w = 2 * Math.PI * f / RATE_HZ
+        let a = 0
+        let b = 0
+        for (let n = 1; n < g.length; n++) {
+            a += g[n] * Math.cos(w * n)
+            b -= g[n] * Math.sin(w * n)
+        }
+        re.push(a)
+        im.push(b)
+    }
+    return [re, im]
+}
+
+// Полёт rate-only с регулятором G0 и его измерение (качество — с { rate_only: true }) — один раз на объект
+const flights = new Map()
+function rate_only_flight(plant) {
+    if (!flights.has(plant)) {
+        const m = measure(simulate(G0, { dur_s: 150, seed: 3, plant }), G0)
+        m.quality = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true })
+        flights.set(plant, m)
+    }
+    return flights.get(plant)
+}
+
+test('pidtune_controller: только P — C = Kp, с FLTE — Kp·H_FLTE; фаза I на низкой частоте −90° + 180°·f / loop_rate', () => {
+    const freq = [0.5, 3, 20, 150]
+    const p = pidtune_controller({ P: 0.2, I: 0, D: 0 }, { flte: 0, fltd: 30 }, RATE_HZ, freq)
+    for (let k = 0; k < freq.length; k++) {
+        close_to(p.C[0][k], 0.2, 1e-15, 'Re C на ' + freq[k] + ' Гц')
+        close_to(p.C[1][k], 0, 1e-15, 'Im C на ' + freq[k] + ' Гц')
+    }
+    const e = pidtune_controller({ P: 0.2, I: 0, D: 0 }, { flte: 10, fltd: 0 }, RATE_HZ, freq)
+    for (let k = 0; k < freq.length; k++) {
+        const h = pid_lowpass_response(10, RATE_HZ, freq[k])
+        close_to(e.C[0][k], 0.2 * h[0], 1e-15, 'P·H_FLTE, Re')
+        close_to(e.C[1][k], 0.2 * h[1], 1e-15, 'P·H_FLTE, Im')
+    }
+    // Интегратор ki·dt / (1 − z⁻¹) = ki·dt·e^(jω/2) / (2j·sin(ω/2)): фаза −90° + ω/2, модуль ki·dt / (2·sin(ω/2))
+    const i = pidtune_controller({ P: 0, I: 0.3, D: 0 }, { flte: 0, fltd: 0 }, RATE_HZ, [0.1, 1])
+    for (const [k, f] of [[0, 0.1], [1, 1]]) {
+        close_to(Math.atan2(i.C[1][k], i.C[0][k]) * R2D, -90 + 180 * f / RATE_HZ, 1e-9, 'фаза I на ' + f + ' Гц')
+        close_to(Math.hypot(i.C[0][k], i.C[1][k]), 0.3 * DT / (2 * Math.sin(Math.PI * f / RATE_HZ)), 1e-9, 'модуль I на ' + f + ' Гц')
+    }
+    // На 0 Гц: с интегратором — бесконечность (предел берёт pidtune_predict), без него — Kp; ki = Ki·i_scale
+    const dc = pidtune_controller({ P: 0.2, I: 0.3, D: 0.004 }, FILTERS0, RATE_HZ, [0], 2.5)
+    assert.deepEqual([dc.C[0][0], dc.C[1][0], dc.ki], [Infinity, 0, 0.75])
+    assert.deepEqual([pidtune_controller({ P: 0.2, I: 0, D: 0.004 }, FILTERS0, RATE_HZ, [0]).C[0][0]], [0.2])
+    // Нечисловые коэффициенты и фильтры — NaN (отказ при сомнении дальше по цепочке)
+    assert.ok(Number.isNaN(pidtune_controller({ P: null, I: 0.1, D: 0 }, FILTERS0, RATE_HZ, [5]).C[0][0]), 'P null')
+    assert.ok(Number.isNaN(pidtune_controller({ P: 0.1, I: 0.1, D: 0.003 }, { flte: 0, fltd: NaN }, RATE_HZ, [5]).C[0][0]), 'FLTD NaN')
+})
+
+test('pidtune_controller: совпадает с разностными уравнениями update_all (первая разность импульсной характеристики), i_scale множит Ki, FF и DFF — отдельно', () => {
+    // Регулятор во времени (make_pid — AC_PID::update_all) на импульс цели при факте 0: c[n]. Интегратор не затухает,
+    // поэтому сравнивается первая разность: Σ (c[n] − c[n − 1])·z⁻ⁿ = (1 − z⁻¹)·C(z)
+    for (const g of [{ kp: 0.12, ki: 0.3, kd: 0.004, fltd: 25, flte: 12, i_scale: 2.5 }, { kp: 0.2298, ki: 0.02298, kd: 0.0017, fltd: 0, flte: 1, i_scale: 1 }]) {
+        const pid = make_pid({ ...g, imax: 1e9 })
+        pid(0, 0)
+        const n = 4000
+        const d = new Float64Array(n)
+        let last = 0
+        for (let k = 0; k < n; k++) {
+            const c = pid((k == 0) ? 1 : 0, 0).out
+            d[k] = c - last
+            last = c
+        }
+        const freq = [0.3, 2, 7.5, 31, 120, 199]
+        const model = pidtune_controller({ P: g.kp, I: g.ki, D: g.kd }, { flte: g.flte, fltd: g.fltd }, RATE_HZ, freq, g.i_scale)
+        for (let j = 0; j < freq.length; j++) {
+            const w = 2 * Math.PI * freq[j] / RATE_HZ
+            let re = 0
+            let im = 0
+            for (let k = 0; k < n; k++) {
+                re += d[k] * Math.cos(w * k)
+                im -= d[k] * Math.sin(w * k)
+            }
+            // (1 − e^(−jω))·C
+            const ar = 1 - Math.cos(w)
+            const ai = Math.sin(w)
+            const er = ar * model.C[0][j] - ai * model.C[1][j]
+            const ei = ar * model.C[1][j] + ai * model.C[0][j]
+            const scale = Math.hypot(er, ei)
+            assert.ok(Math.hypot(re - er, im - ei) <= 1e-9 * scale, 'FLTE ' + g.flte + ', ' + freq[j] + ' Гц: ' + [re, im] + ' против ' + [er, ei])
+        }
+        // i_scale — то же, что Ki·i_scale
+        const scaled = pidtune_controller({ P: g.kp, I: g.ki * g.i_scale, D: g.kd }, { flte: g.flte, fltd: g.fltd }, RATE_HZ, freq)
+        for (let j = 0; j < freq.length; j++) {
+            close_to(scaled.C[0][j], model.C[0][j], 1e-12 * Math.abs(model.C[0][j]) + 1e-15, 'i_scale, Re')
+            close_to(scaled.C[1][j], model.C[1][j], 1e-12 * Math.abs(model.C[1][j]) + 1e-15, 'i_scale, Im')
+        }
+    }
+    // FF = Kff + Kdff·(1 − z⁻¹)/dt — не входит в C
+    const f = 10
+    const w = 2 * Math.PI * f / RATE_HZ
+    const with_ff = pidtune_controller({ P: 0.1, I: 0.1, D: 0.002, FF: 0.05, DFF: 0.001 }, FILTERS0, RATE_HZ, [f])
+    const without = pidtune_controller({ P: 0.1, I: 0.1, D: 0.002 }, FILTERS0, RATE_HZ, [f])
+    assert.deepEqual(with_ff.C, without.C)
+    close_to(with_ff.FF[0][0], 0.05 + 0.001 * RATE_HZ * (1 - Math.cos(w)), 1e-12, 'Re FF')
+    close_to(with_ff.FF[1][0], 0.001 * RATE_HZ * Math.sin(w), 1e-12, 'Im FF')
+    assert.deepEqual([without.FF[0][0], without.FF[1][0]], [0, 0], 'FF и DFF нет — 0')
+})
+
+test('pidtune_margins: L = (fc/f)·e^(−j(90° + 360°·f·τ)) — срез fc, запас 90° − 360°·fc·τ, по амплитуде 20·log10(f₁₈₀/fc); нет среза — null', () => {
+    const freq = Array.from({ length: 2001 }, (_, k) => k * 0.1)
+    const loop = (fc, tau) => [freq.map((f) => (f > 0) ? fc / f * Math.cos(-Math.PI / 2 - 2 * Math.PI * f * tau) : Infinity),
+                               freq.map((f) => (f > 0) ? fc / f * Math.sin(-Math.PI / 2 - 2 * Math.PI * f * tau) : 0)]
+    const m = pidtune_margins(freq, loop(5.03, 0.021))
+    close_to(m.crossover_hz, 5.03, 1e-3, 'частота среза')
+    close_to(m.pm_deg, 90 - 360 * 5.03 * 0.021, 0.05, 'запас фазы')
+    // −180° при 90° + 360°·f·τ = 180°: f₁₈₀ = 0.25/τ
+    close_to(m.gm_db, 20 * Math.log10(0.25 / 0.021 / 5.03), 0.01, 'запас по амплитуде')
+    // Фаза среза ниже −180° — запас отрицательный (неустойчив), запаса по амплитуде нет
+    const unstable = pidtune_margins(freq, loop(5.03, 0.06))
+    close_to(unstable.pm_deg, 90 - 360 * 5.03 * 0.06, 0.1, 'отрицательный запас')
+    assert.equal(unstable.gm_db, null)
+    // Срез ниже crossover_min_hz (0.5 Гц) и |L| меньше 1 везде — частоты среза нет
+    assert.deepEqual(pidtune_margins(freq, loop(0.3, 0.02)), { crossover_hz: null, pm_deg: null, gm_db: null })
+    // Нечисловое L — нет
+    const bad = loop(5.03, 0.021)
+    bad[0] = bad[0].map(() => NaN)
+    assert.deepEqual(pidtune_margins(freq, bad), { crossover_hz: null, pm_deg: null, gm_db: null })
+})
+
+test('pidtune_predict: на известном контуре — T_new = G·g·(C_new + FF) / (1 + G·g·C_new) точно, с FF ≠ 0 и поправкой фильтров', () => {
+    const grid = pidtune_predict_grid(RATE_HZ)
+    assert.equal(grid.n, 4096)
+    assert.equal(grid.freq.length, 2049)
+    close_to(grid.freq[1], 400 / 4096, 1e-15, 'шаг сетки')
+    const Gp = plant_response(plant_pulse(PLANT_NORMAL), grid.freq)
+    // T замкнутого контура: G·g·(C + FF) / (1 + G·g·C); на 0 Гц с интегратором — 1
+    const closed = (c, g) => {
+        const Gg = (g != null) ? cmul(Gp, g) : Gp
+        const T = [[], []]
+        for (let k = 0; k < grid.freq.length; k++) {
+            if (c.C[0][k] === Infinity) {
+                T[0].push(1)
+                T[1].push(0)
+                continue
+            }
+            const lr = Gg[0][k] * c.C[0][k] - Gg[1][k] * c.C[1][k]
+            const li = Gg[0][k] * c.C[1][k] + Gg[1][k] * c.C[0][k]
+            const sr = c.C[0][k] + c.FF[0][k]
+            const si = c.C[1][k] + c.FF[1][k]
+            const nr = Gg[0][k] * sr - Gg[1][k] * si
+            const ni = Gg[0][k] * si + Gg[1][k] * sr
+            const dr = 1 + lr
+            const di = li
+            const d = dr * dr + di * di
+            T[0].push((nr * dr + ni * di) / d)
+            T[1].push((ni * dr - nr * di) / d)
+        }
+        return T
+    }
+    // КИХ — обратное FFT T на сетке (импульсная характеристика, свёрнутая по периоду, FFT которой — ровно T на сетке)
+    const as_fir = (T) => {
+        const n = grid.n
+        const fft = new FFTJS(n)
+        const full = fft.createComplexArray()
+        for (let k = 0; k <= n / 2; k++) {
+            full[2 * k] = T[0][k]
+            full[2 * k + 1] = ((k == 0) || (k == n / 2)) ? 0 : T[1][k]
+            if ((k > 0) && (k < n / 2)) {
+                full[2 * (n - k)] = T[0][k]
+                full[2 * (n - k) + 1] = -T[1][k]
+            }
+        }
+        const out = fft.createComplexArray()
+        fft.inverseTransform(out, full)
+        return { h: Float64Array.from({ length: n }, (_, i) => out[2 * i]) }
+    }
+    // Поправка фильтров — отношение двух фильтров первого порядка (60 Гц вместо 90 Гц)
+    const ratio = [[], []]
+    for (const f of grid.freq) {
+        const a = pid_lowpass_response(60, RATE_HZ, f)
+        const b = pid_lowpass_response(90, RATE_HZ, f)
+        const d = b[0] * b[0] + b[1] * b[1]
+        ratio[0].push((a[0] * b[0] + a[1] * b[1]) / d)
+        ratio[1].push((a[1] * b[0] - a[0] * b[1]) / d)
+    }
+    const check = (log_gains, new_gains, g, skip_dc) => {
+        const c_log = pidtune_controller(log_gains, FILTERS0, RATE_HZ, grid.freq)
+        const c_new = pidtune_controller(new_gains, FILTERS0, RATE_HZ, grid.freq)
+        const pred = pidtune_predict(as_fir(closed(c_log, null)), c_log, c_new, g, RATE_HZ)
+        const expected = closed(c_new, g)
+        const L_expected = cmul((g != null) ? cmul(Gp, g) : Gp, c_new.C)
+        const what = JSON.stringify(new_gains) + ((g != null) ? ' с поправкой' : '')
+        for (let k = skip_dc ? 1 : 0; k < grid.freq.length; k++) {
+            const err = Math.hypot(pred.T[0][k] - expected[0][k], pred.T[1][k] - expected[1][k])
+            assert.ok(err <= 1e-9, what + ': T_new на ' + grid.freq[k] + ' Гц, ошибка ' + err)
+            if (k > 0) {
+                const l_err = Math.hypot(pred.L[0][k] - L_expected[0][k], pred.L[1][k] - L_expected[1][k])
+                assert.ok(l_err <= 1e-9 * Math.hypot(L_expected[0][k], L_expected[1][k]), what + ': L_new на ' + grid.freq[k] + ' Гц, ошибка ' + l_err)
+            }
+        }
+        return pred
+    }
+    const base = { P: 0.1163, I: 0.1163, D: 0.00293, FF: 0.05, DFF: 0.0005 }
+    check(base, { ...base, P: 0.15, I: 0.15 }, null)
+    check(base, { ...base, D: 0.0035 }, ratio)
+    check(base, { ...base, FF: 0.1 }, null)
+    // I только у варианта — на 0 Гц T_new = 1, как у контура с интегратором
+    const p = check({ ...base, I: 0 }, base, ratio)
+    assert.equal(p.T[0][0], 1)
+    // I только у лога — предел на 0 Гц по данным не определить: T_new(0) = T(0) (= 1 у контура лога), остальное точно
+    const q = check(base, { ...base, I: 0 }, null, true)
+    close_to(q.T[0][0], 1, 1e-12, 'T_new(0) = T(0)')
+})
+
+test('pidtune_predict: rate-only синтетика — прогноз P ±10 %, D ±10 %, P +30 % против прямой симуляции: перерегулирование ±3 пункта, запас фазы ±5°', () => {
+    const grid = pidtune_predict_grid(RATE_HZ)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const p30 = pidtune_round(G0.kp * 1.3)
+    for (const plant of [PLANT_NORMAL, PLANT_FAST, PLANT_SLOW]) {
+        const { seg, fir, quality } = rate_only_flight(plant)
+        assert.equal(quality.ok, true, 'K ' + plant.K + ': ' + quality.reasons.join('; '))
+        const Gp = plant_response(plant_pulse(plant), grid.freq)
+        const variants = pidtune_candidates(LOG_GAINS, null, 'roll').map((c) => [c.title, c.values])
+        assert.deepEqual(variants.map((v) => v[0]), ['Как в логе', 'P −10 %', 'P +10 %', 'D −10 %', 'D +10 %'])
+        variants.push(['P +30 %', { P: p30, I: p30, D: G0.kd }])
+        for (const [title, v] of variants) {
+            const c_new = pidtune_controller(v, FILTERS0, RATE_HZ, grid.freq)
+            const pred = pidtune_predict(fir, c_log, c_new, null, seg.rate_hz)
+            // Правда: прямая симуляция новых коэффициентов (ступенька без шума) и запас фазы по L = C·G объекта
+            const truth = pidtune_step_metrics(...Object.values(truth_step({ kp: v.P, ki: v.I, kd: v.D, fltd: FILTERS0.fltd }, plant)))
+            const truth_pm = pidtune_margins(grid.freq, cmul(c_new.C, Gp)).pm_deg
+            const what = 'K ' + plant.K + ', ' + title
+            close_to(pred.metrics.overshoot_pct, truth.overshoot_pct, 3, what + ': перерегулирование, %')
+            close_to(pred.pm_deg, truth_pm, 5, what + ': запас фазы, °')
+        }
+    }
+})
+
+test('pidtune_predict: для коэффициентов лога прогноз равен измеренному; другая сетка — исключение; нечисловые коэффициенты — метрик и запасов нет', () => {
+    const { seg, fir, metrics } = rate_only_flight(PLANT_NORMAL)
+    const grid = pidtune_predict_grid(seg.rate_hz)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const pred = pidtune_predict(fir, c_log, c_log, null, seg.rate_hz)
+    assert.equal(pred.step.y.length, fir.step.length)
+    for (let i = 0; i < fir.step.length; i++) {
+        close_to(pred.step.time[i], fir.time[i], 1e-12, 'время ' + i)
+        close_to(pred.step.y[i], fir.step[i], 1e-9, 'отклик ' + i)
+    }
+    close_to(pred.metrics.overshoot_pct, metrics.overshoot_pct, 1e-6, 'перерегулирование')
+    close_to(pred.metrics.rise_s, metrics.rise_s, 1e-9, 'нарастание')
+    // То же с поправкой фильтров «одинаковые фильтры» (ровно 1) и FF лога
+    const ones = pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 40 }, null, grid.freq)
+    const c_ff = pidtune_controller({ ...LOG_GAINS, FF: 0.05 }, FILTERS0, RATE_HZ, grid.freq)
+    const with_ff = pidtune_predict(fir, c_ff, c_ff, ones, seg.rate_hz)
+    for (let i = 0; i < fir.step.length; i++) {
+        close_to(with_ff.step.y[i], fir.step[i], 1e-9, 'отклик с FF и поправкой 1, ' + i)
+    }
+    assert.equal(pidtune_predict(null, c_log, c_log, null, seg.rate_hz), null)
+    const short = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq.slice(0, 100))
+    assert.throws(() => pidtune_predict(fir, c_log, short, null, seg.rate_hz), /сетке/)
+    // Пустое поле формы (NaN) — прогноз есть, но без метрик и запасов: отметки — «неполный»
+    const broken = pidtune_predict(fir, c_log, pidtune_controller({ ...LOG_GAINS, D: NaN }, FILTERS0, RATE_HZ, grid.freq), null, seg.rate_hz)
+    assert.equal(broken.metrics, null)
+    assert.equal(broken.pm_deg, null)
+    const flags = pidtune_flags(broken, pred)
+    assert.equal(flags.incomplete, true)
+    assert.equal(flags.flagged, true)
+})
+
+test('pidtune_controller_check: верная модель на синтетике проходит, Kd ×2 — нет; i_scale учитывается; без окон — ok false', () => {
+    const { axis } = rate_only_flight(PLANT_NORMAL)
+    const right = pidtune_controller_check(axis, 0, [0, 1e9], LOG_GAINS, FILTERS0, RATE_HZ, 1)
+    assert.equal(right.ok, true, JSON.stringify(right))
+    assert.ok(right.max_mag_err < 0.03, 'модуль ' + right.max_mag_err)
+    assert.ok(right.max_phase_err_deg < 2, 'фаза ' + right.max_phase_err_deg)
+    assert.ok(right.min_coherence > 0.95, 'γ² ' + right.min_coherence)
+    assert.ok(right.windows > 0)
+    const wrong_d = pidtune_controller_check(axis, 0, [0, 1e9], { ...LOG_GAINS, D: 2 * LOG_GAINS.D }, FILTERS0, RATE_HZ, 1)
+    assert.equal(wrong_d.ok, false)
+    assert.ok(wrong_d.max_mag_err > pidtune_rules.controller_check.mag_err_max, 'Kd ×2: модуль ' + wrong_d.max_mag_err)
+    assert.ok((wrong_d.worst_hz >= 2) && (wrong_d.worst_hz <= 20), 'худшая частота ' + wrong_d.worst_hz)
+    // Масштаб I (Rate Loop Only в 4.7: × ATC_ANG_*_P, например 4.5): модель с масштабом при данных без него не сходится
+    // по фазе на низких частотах; Ki / 4.5 × 4.5 — та же модель
+    const scaled = pidtune_controller_check(axis, 0, [0, 1e9], LOG_GAINS, FILTERS0, RATE_HZ, 4.5)
+    assert.equal(scaled.ok, false, 'i_scale 4.5 при данных с 1')
+    assert.ok(scaled.max_phase_err_deg > pidtune_rules.controller_check.phase_err_max_deg, 'фаза ' + scaled.max_phase_err_deg)
+    assert.equal(pidtune_controller_check(axis, 0, [0, 1e9], { ...LOG_GAINS, I: LOG_GAINS.I / 4.5 }, FILTERS0, RATE_HZ, 4.5).ok, true, 'Ki / 4.5 × i_scale 4.5')
+    // Интервал вне данных — окон нет; нечисловые коэффициенты — не проходит
+    assert.deepEqual(pidtune_controller_check(axis, 0, [500, 600], LOG_GAINS, FILTERS0, RATE_HZ, 1),
+                     { ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: 0 })
+    assert.equal(pidtune_controller_check(axis, 0, [0, 1e9], { ...LOG_GAINS, P: NaN }, FILTERS0, RATE_HZ, 1).ok, false)
+})
+
+test('pidtune_coherence: факт = g·цель — γ² = 1; цель + независимый шум той же мощности — около 0.5; без окон — null', () => {
+    const exact = noise_segment(40000, 31, (tar, k) => 1.7 * tar[k])
+    exact.starts = Array.from({ length: 155 }, (_, i) => i * 256)
+    close_to(pidtune_coherence([exact], RATE_HZ, 4.6), 1, 1e-9, 'γ² без шума')
+    const g = gauss(lcg(77))
+    const noisy = noise_segment(40000, 32, (tar, k) => tar[k] + 50 * g())
+    noisy.starts = exact.starts
+    const coh = pidtune_coherence([noisy], RATE_HZ, 4.6)
+    assert.ok((coh > 0.35) && (coh < 0.65), 'γ² с шумом ' + coh)
+    assert.equal(pidtune_coherence([{ ...exact, starts: [] }], RATE_HZ, 4.6), null, 'нет окон')
+    assert.equal(pidtune_coherence([exact], RATE_HZ, null), null, 'частоты среза нет')
+    assert.equal(pidtune_coherence([exact], RATE_HZ, 300), null, 'выше Найквиста')
+})
+
+test('pidtune_gyro_ratio: одинаковые фильтры — ровно 1; INS_GYRO_FILTER 40 → 80 — H₈₀/H₄₀; статический notch — ослабление на центре; нет гироскопа — null', () => {
+    const freq = [0, 2, 5, 37, 100, 199]
+    // Одинаковые наборы — ровно 1 и без данных гироскопа
+    assert.deepEqual(pidtune_gyro_ratio({ INS_GYRO_FILTER: 40, INS_HNTCH_ENABLE: 0 }, { INS_HNTCH_ENABLE: 0, INS_GYRO_FILTER: 40 }, null, freq),
+                     [freq.map(() => 1), freq.map(() => 0)])
+    // Поддельный гироскоп 1000 Гц: окна FFT в 1…5 с
+    const gyro = [{ FFT: { time: [1, 2, 3, 4, 5], average_sample_rate: 1000, x: [[0], [0], [0], [0], [0]] } }]
+    gyro.start_time = 0
+    gyro.end_time = 6
+    const env = { filter_version: 2 }
+    const ctx = { gyro, env, tracking: [new StaticTarget(gyro, env)], range: [2, 4], sensor: 0 }
+    // Наборы различаются, но фильтры те же (лишний ключ) — считается, отношение 1 с точностью округления
+    const same = pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 40, ATC_RAT_RLL_P: 0.1 }, ctx, freq)
+    for (let k = 0; k < freq.length; k++) {
+        close_to(same[0][k], 1, 1e-12, 'Re на ' + freq[k] + ' Гц')
+        close_to(same[1][k], 0, 1e-12, 'Im на ' + freq[k] + ' Гц')
+    }
+    // LowPassFilter2p (DigitalBiquadFilter::compute_params) на 1000 Гц — своя формула
+    const biquad = (fc, f) => {
+        const ohm = Math.tan(Math.PI * fc / 1000)
+        const c = 1 + 2 * Math.cos(Math.PI / 4) * ohm + ohm * ohm
+        const b0 = ohm * ohm / c
+        const a1 = 2 * (ohm * ohm - 1) / c
+        const a2 = (1 - 2 * Math.cos(Math.PI / 4) * ohm + ohm * ohm) / c
+        const w = 2 * Math.PI * f / 1000
+        const nr = b0 * (1 + 2 * Math.cos(w) + Math.cos(2 * w))
+        const ni = -b0 * (2 * Math.sin(w) + Math.sin(2 * w))
+        const dr = 1 + a1 * Math.cos(w) + a2 * Math.cos(2 * w)
+        const di = -(a1 * Math.sin(w) + a2 * Math.sin(2 * w))
+        const d = dr * dr + di * di
+        return [(nr * dr + ni * di) / d, (ni * dr - nr * di) / d]
+    }
+    const lpf = pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 80 }, ctx, freq)
+    for (let k = 0; k < freq.length; k++) {
+        const a = biquad(80, freq[k])
+        const b = biquad(40, freq[k])
+        const d = b[0] * b[0] + b[1] * b[1]
+        close_to(lpf[0][k], (a[0] * b[0] + a[1] * b[1]) / d, 1e-9, 'Re H80/H40 на ' + freq[k] + ' Гц')
+        close_to(lpf[1][k], (a[1] * b[0] - a[0] * b[1]) / d, 1e-9, 'Im H80/H40 на ' + freq[k] + ' Гц')
+    }
+    // Статический notch 100 Гц, ослабление 30 дБ: на центре |H| = 10^(−30/20), далеко внизу — около 1
+    const notch = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 0, INS_HNTCH_FREQ: 100, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 30, INS_HNTCH_HMNCS: 1 }
+    const with_notch = pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 40, ...notch }, ctx, freq)
+    close_to(Math.hypot(with_notch[0][4], with_notch[1][4]), 10 ** (-30 / 20), 1e-9, '|notch| на 100 Гц')
+    close_to(Math.hypot(with_notch[0][1], with_notch[1][1]), 1, 1e-3, '|notch| на 2 Гц')
+    // Нет гироскопа, экземпляра или окон — без поправки
+    assert.equal(pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 80 }, null, freq), null)
+    assert.equal(pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 80 }, { ...ctx, sensor: 3 }, freq), null)
+    assert.equal(pidtune_gyro_ratio({ INS_GYRO_FILTER: 40 }, { INS_GYRO_FILTER: 80 }, { ...ctx, gyro: [{ FFT: { time: [], average_sample_rate: 1000 } }] }, freq), null)
+})
+
+test('pidtune_validity: всё пройдено — достоверен; каждая причина отказа по отдельности', () => {
+    const q_ok = { ok: true, checks: {}, reasons: [] }
+    const q_bad = { ok: false, checks: {}, reasons: ['половины данных дают разный отклик: RMS 0.073'] }
+    const cc_ok = { ok: true, max_mag_err: 0.03, max_phase_err_deg: 1.2, worst_hz: 2.3, min_coherence: 0.99, windows: 500 }
+    const cc_bad = { ok: false, max_mag_err: 0.43, max_phase_err_deg: 4, worst_hz: 18.4, min_coherence: 0.99, windows: 500 }
+    const cc_none = { ok: false, max_mag_err: null, max_phase_err_deg: null, worst_hz: null, min_coherence: null, windows: 0 }
+    assert.deepEqual(pidtune_validity(q_ok, cc_ok, 0.9), { valid: true, reasons: [] })
+    // Ровно на пороге когерентности — достоверен
+    assert.equal(pidtune_validity(q_ok, cc_ok, pidtune_rules.coherence_min).valid, true)
+    const cases = [
+        [q_bad, cc_ok, 0.9, 'измерение ненадёжно: половины данных'],
+        [null, cc_ok, 0.9, 'нет проверки качества'],
+        [q_ok, cc_bad, 0.9, 'модель регулятора не сходится с данными: модуль C_изм / C_мод отличается от 1 до 43.0 %'],
+        [q_ok, cc_none, 0.9, 'сверка модели регулятора с данными не посчиталась'],
+        [q_ok, null, 0.9, 'сверка модели регулятора с данными не посчиталась'],
+        [q_ok, cc_ok, 0.49, 'когерентность «цель → факт» на частоте среза γ² = 0.49 ниже 0.5'],
+        [q_ok, cc_ok, null, 'когерентность «цель → факт» на частоте среза не посчиталась'],
+        [q_ok, cc_ok, NaN, 'когерентность «цель → факт» на частоте среза не посчиталась'],
+    ]
+    for (const [q, cc, coh, text] of cases) {
+        const v = pidtune_validity(q, cc, coh)
+        assert.equal(v.valid, false, text)
+        assert.equal(v.reasons.length, 1, text + ': ' + v.reasons.join('; '))
+        assert.ok(v.reasons[0].startsWith(text), v.reasons[0])
+    }
+    assert.equal(pidtune_validity(q_bad, cc_bad, 0.2).reasons.length, 3, 'все три')
+    // Синтетика rate-only: прогноз достоверен
+    const { axis, seg, fir, quality } = rate_only_flight(PLANT_NORMAL)
+    const grid = pidtune_predict_grid(seg.rate_hz)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const pred_log = pidtune_predict(fir, c_log, c_log, null, seg.rate_hz)
+    const coh = pidtune_coherence(seg.segments, seg.rate_hz, pred_log.crossover_hz)
+    const cc = pidtune_controller_check(axis, 0, [0, 1e9], LOG_GAINS, FILTERS0, RATE_HZ, 1)
+    assert.deepEqual(pidtune_validity(quality, cc, coh), { valid: true, reasons: [] }, 'γ² ' + coh)
+})
+
+test('pidtune_candidates: порядок, округление, I по правилу, дедупликация (same_as); D = 0 — без D ±10 %; пределы', () => {
+    const log = { P: 0.1163, I: 0.1163, D: 0.00293 }
+    // Правило «P +10 %» совпадает с вариантом P +10 % — остаётся «По правилам» с same_as
+    const up = pidtune_rule(log, 'roll', metrics_of(2), 10, QUALITY_OK)
+    const list = pidtune_candidates(log, up, 'roll')
+    assert.deepEqual(list.map((c) => c.id), ['log', 'rule', 'p_minus', 'd_minus', 'd_plus'])
+    assert.deepEqual(list.map((c) => c.title), ['Как в логе', 'По правилам', 'P −10 %', 'D −10 %', 'D +10 %'])
+    assert.deepEqual(list[1].same_as, ['p_plus'])
+    assert.deepEqual(list[0].same_as, [])
+    assert.deepEqual(list.map((c) => c.values), [log, { P: 0.1279, I: 0.1279, D: 0.00293 }, { P: 0.1047, I: 0.1047, D: 0.00293 },
+                                                 { P: 0.1163, I: 0.1163, D: 0.002637 }, { P: 0.1163, I: 0.1163, D: 0.003223 }])
+    // Правило «менять нечего» — это «Как в логе»
+    const keep = pidtune_rule(log, 'roll', metrics_of(10), 10, QUALITY_OK)
+    const same = pidtune_candidates(log, keep, 'roll')
+    assert.deepEqual(same.map((c) => c.id), ['log', 'p_minus', 'p_plus', 'd_minus', 'd_plus'])
+    assert.deepEqual(same[0].same_as, ['rule'])
+    // Без правила — без «По правилам»
+    assert.deepEqual(pidtune_candidates(log, null, 'roll').map((c) => c.id), ['log', 'p_minus', 'p_plus', 'd_minus', 'd_plus'])
+    // Рыскание с D = 0: без D ±10 %, I = 0.1·P от округлённого P
+    const yaw = pidtune_candidates({ P: 0.2298, I: 0.02298, D: 0 }, null, 'yaw')
+    assert.deepEqual(yaw.map((c) => c.id), ['log', 'p_minus', 'p_plus'])
+    assert.deepEqual(yaw.map((c) => c.values), [{ P: 0.2298, I: 0.02298, D: 0 }, { P: 0.2068, I: 0.02068, D: 0 }, { P: 0.2528, I: 0.02528, D: 0 }])
+    // D нет в логе — тоже без D ±10 %; P или I не числа — только «Как в логе»
+    assert.deepEqual(pidtune_candidates({ P: 0.1, I: 0.1, D: null }, null, 'roll').map((c) => c.id), ['log', 'p_minus', 'p_plus'])
+    assert.deepEqual(pidtune_candidates({ P: NaN, I: 0.1, D: 0.003 }, null, 'roll').map((c) => c.id), ['log', 'd_minus', 'd_plus'])
+    // Пределы AutoTune: P на p_max — без P +10 %; D на d_max — без D +10 %; D 0.19 → D +10 % ограничен 0.2
+    assert.deepEqual(pidtune_candidates({ P: 2.0, I: 2.0, D: 0.2 }, null, 'pitch').map((c) => c.id), ['log', 'p_minus', 'd_minus'])
+    const near = pidtune_candidates({ P: 1.9, I: 1.9, D: 0.19 }, null, 'pitch')
+    assert.deepEqual(near.find((c) => c.id == 'p_plus').values, { P: 2, I: 2, D: 0.19 })
+    assert.deepEqual(near.find((c) => c.id == 'd_plus').values, { P: 1.9, I: 1.9, D: 0.2 })
+})
+
+test('pidtune_flags: отметки на порогах — запас фазы 30°, ухудшение на 5°, перерегулирование 20 %; неполный прогноз — отметка', () => {
+    const pred = (pm, os) => ({ pm_deg: pm, metrics: (os == null) ? null : { overshoot_pct: os } })
+    const log = pred(50, 10)
+    // Ровно на порогах — без отметок
+    const at = pidtune_flags(pred(45, 20), log)
+    assert.deepEqual([at.low_pm, at.pm_drop, at.overshoot, at.incomplete, at.flagged], [false, false, false, false, false])
+    assert.deepEqual(at.reasons, [])
+    assert.equal(pidtune_flags(pred(30, 5), pred(35, 5)).flagged, false, 'запас ровно 30° и ухудшение ровно 5°')
+    // Чуть за порогом — по одной отметке
+    const low = pidtune_flags(pred(29.99, 5), pred(33, 5))
+    assert.deepEqual([low.low_pm, low.pm_drop, low.overshoot, low.flagged], [true, false, false, true])
+    assert.equal(low.reasons[0], 'запас фазы 30.0° ниже 30°')
+    const drop = pidtune_flags(pred(44.99, 10), log)
+    assert.deepEqual([drop.low_pm, drop.pm_drop, drop.overshoot], [false, true, false])
+    assert.equal(drop.reasons[0], 'запас фазы хуже лога на 5.0° (больше 5°)')
+    const os = pidtune_flags(pred(50, 20.01), log)
+    assert.deepEqual([os.low_pm, os.pm_drop, os.overshoot], [false, false, true])
+    assert.equal(os.reasons[0], 'перерегулирование в прогнозе 20.0 % выше 20 %')
+    // Лучше лога — без отметки ухудшения
+    assert.equal(pidtune_flags(pred(60, 5), log).flagged, false)
+    // Неполный прогноз: нет прогноза, частоты среза, метрик или запаса у лога — отметка (отказ при сомнении)
+    for (const [p, l, text] of [[null, log, 'нет прогноза'], [pred(null, 10), log, 'частота среза не найдена'],
+                                [pred(50, null), log, 'нет метрик отклика'], [pred(50, 10), pred(null, 10), 'у прогноза лога нет запаса фазы'],
+                                [pred(NaN, 10), log, 'частота среза не найдена']]) {
+        const f = pidtune_flags(p, l)
+        assert.equal(f.incomplete, true, text)
+        assert.equal(f.flagged, true, text)
+        assert.ok(f.reasons[0].startsWith('прогноз неполный') && f.reasons[0].includes(text), f.reasons[0])
+    }
+    // Каждая отметка по отдельности отказывает при сомнении: нет запаса — low_pm и pm_drop, нет метрик — overshoot
+    const no_pm = pidtune_flags(pred(null, 10), log)
+    assert.deepEqual([no_pm.low_pm, no_pm.pm_drop, no_pm.overshoot], [true, true, false])
+    const no_os = pidtune_flags(pred(50, null), log)
+    assert.deepEqual([no_os.low_pm, no_os.pm_drop, no_os.overshoot], [false, false, true])
+    const no_log = pidtune_flags(pred(50, 10), null)
+    assert.deepEqual([no_log.low_pm, no_log.pm_drop, no_log.overshoot, no_log.incomplete], [false, true, false, true])
+})
+
+test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I только у варианта — 1; только у лога — T(0)', () => {
+    // КИХ «чистая задержка на отсчёт с усилением 0.9»: T = 0.9·e^(−jω), T(0) = 0.9 (у настоящего КИХ сумма h не ровно 1)
+    const grid = pidtune_predict_grid(RATE_HZ)
+    const fir = { h: Float64Array.from([0, 0.9]) }
+    const ctrl = (I) => pidtune_controller({ P: 0.1, I: I, D: 0.002 }, FILTERS0, RATE_HZ, grid.freq)
+    // R(0) = 0.2 / 0.1 = 2: T_new(0) = 2·0.9 / (1 − 0.9 + 2·0.9)
+    close_to(pidtune_predict(fir, ctrl(0.1), ctrl(0.2), null, RATE_HZ).T[0][0], 1.8 / 1.9, 1e-12, 'I у обоих')
+    assert.equal(pidtune_predict(fir, ctrl(0), ctrl(0.2), null, RATE_HZ).T[0][0], 1, 'I только у варианта')
+    assert.equal(pidtune_predict(fir, ctrl(0.1), ctrl(0), null, RATE_HZ).T[0][0], 0.9, 'I только у лога')
+    // Без интеграторов — обычная формула: R(0) = Kp_new / Kp_log
+    const p = (P) => pidtune_controller({ P: P, I: 0, D: 0.002 }, FILTERS0, RATE_HZ, grid.freq)
+    close_to(pidtune_predict(fir, p(0.1), p(0.3), null, RATE_HZ).T[0][0], 3 * 0.9 / (0.1 + 3 * 0.9), 1e-12, 'без I')
 })
