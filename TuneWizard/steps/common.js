@@ -7,7 +7,9 @@
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
 // core/spectrum.js (find_instance), plots.js (plot, render_plot), Libraries/LoadingOverlay.js (loading_call),
 // Libraries/Param_Helpers.js (param_to_string). Все они нужны только при вызове, поэтому модуль подключается перед
-// steps/step1.js; обработчики указателя ставятся при первой подписке (step_on_pointer_release), не при загрузке.
+// steps/step1.js. Обработчики указателя ставятся при первой подписке (step_on_pointer_release), а не при загрузке этого
+// модуля; шаги 3 и 4 подписываются при загрузке своих скриптов (step3_edits, step4_edits), поэтому на странице
+// обработчики фактически стоят с её загрузки, а тест модуля под Node обходится без них.
 
 // ---------- Подписи ----------
 

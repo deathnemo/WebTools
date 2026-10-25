@@ -701,20 +701,28 @@ function step3_show() {
 }
 
 // «Применить вариант»: значения выбранной строки в форму. Сначала досчитать правки полей (щелчок мог прийти раньше
-// их пересчёта): step3_compute сохраняет выбор пользователя, а выбор по умолчанию переводит на новую рекомендацию,
-// поэтому строка берётся уже после пересчёта — «По размеру винта» даёт значения для актуального размера
+// их пересчёта). Строка — та, что была выбрана до досчёта: досчёт правки формы выбирает строку формы («Свой»), а щелчок
+// шёл по строке, выбранной до него (ревью задачи 7 этапа 4: «По размеру винта», правка FLTT и сразу «Применить» давали
+// «Свой»). Если до досчёта был выбор по умолчанию (рекомендованная или «Как в логе»), — выбор по умолчанию после него:
+// step3_compute переводит его на новую рекомендацию (пустой размер → 10″ и сразу «Применить» — «По размеру винта»).
+// Значения строки берутся после досчёта, по её id: «По размеру винта» — для актуального размера
 function step3_apply() {
     if (!step3.filled) {
         return
     }
+    const ready = step3_ready() && (step3.candidates != null)
+    const previous = ready ? (step3_selected_row()?.id ?? null) : null
+    const was_default = previous === (step3_recommended_id() ?? "log")
     step3_flush_edits(true)
     if (!step3_ready() || (step3.candidates == null)) {
         return
     }
-    const row = step3_selected_row()
+    const id = ((previous == null) || was_default) ? (step3_recommended_id() ?? "log") : previous
+    const row = step3_rows().find((r) => r.id === id) ?? step3_selected_row()
     if (row == null) {
         return
     }
+    step3.selected_id = row.id
     step3_set_form_values(row.values)
     step3_flush_edits(true)
 }

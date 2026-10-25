@@ -22,7 +22,7 @@
 // core/spectrum.js (find_instance), Libraries/Param_Helpers.js (param_to_string), wizard.js (state, set_step,
 // html_escape), steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
-// step_edit_controller) и steps/step1.js (values_from_log). Принятое шагами 2–3 читается из state.steps[2] и state.steps[3].
+// step_edit_controller, step_pointer) и steps/step1.js (values_from_log). Принятое шагами 2–3 читается из state.steps[2] и state.steps[3].
 
 // Внутреннее состояние шага
 const step4 = {
@@ -287,6 +287,12 @@ function step4_window_change() {
 // и расчёт устарел; «Принять» передаёт false — оно считает само
 function step4_flush_window(recalc = true) {
     if (!step4.window_pending) {
+        return
+    }
+    // Кнопка мыши нажата — после её отпускания, как step4_flush_edits; «Принять» (recalc false) идёт к click, когда
+    // кнопка уже отпущена, — как force у правок
+    if (recalc && step_pointer.down) {
+        step4.edit_postponed = true
         return
     }
     step4.window_pending = false
