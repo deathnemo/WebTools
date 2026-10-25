@@ -206,6 +206,52 @@ test('log_info: без полёта и без ATT', () => {
     assert.equal(info.time_end, 2)
 })
 
+// Лог с сообщениями names (по умолчанию PIDR/PIDP/PIDY) с частотой hz на участках segments [начало, конец) в секундах
+function pid_rate_log(hz, names = ['PIDR', 'PIDP', 'PIDY'], segments = [[0, 60]]) {
+    const TimeUS = []
+    for (const [t0, t1] of segments) {
+        for (let i = 0; i < Math.round((t1 - t0) * hz); i++) {
+            TimeUS.push(Math.round((t0 + i / hz) * 1e6))
+        }
+    }
+    return fake_log({ messages: Object.fromEntries(names.map((name) => [name, { TimeUS }])) })
+}
+
+test('log_info: частоты PIDR и RATE; пропуски не мешают', () => {
+    const rates_of = (log) => core_log.log_info(log, copter_version).pid_log_rates
+    assert.deepEqual(rates_of(pid_rate_log(400)), { PIDR: 400, RATE: null })
+    // Пропуск 30 с (лог на земле не пишется) — частота та же
+    assert.deepEqual(rates_of(pid_rate_log(400, ['PIDR', 'PIDP', 'PIDY'], [[0, 20], [50, 80]])), { PIDR: 400, RATE: null })
+    assert.deepEqual(rates_of(pid_rate_log(10, ['RATE'])), { PIDR: null, RATE: 10 })
+    // Без отсчётов (объявлено без строк) и без PID/RATE — null
+    assert.deepEqual(rates_of(fake_log({ messages: { PIDR: {}, ATT: { TimeUS: [0, 1e6] } } })), { PIDR: null, RATE: null })
+})
+
+test('log_message_rate: дрожание меток усредняется, частые выпадения по 2–3 интервала снижают частоту, сообщение с экземплярами — null', () => {
+    // Метки 400 Гц с дрожанием ±300 мкс (детерминированно, среднее — 2500 мкс): медиана здесь дала бы не 400 Гц
+    const jitter = [0]
+    for (let i = 1; i < 4000; i++) {
+        jitter.push(i * 2500 + ((i * 7919) % 601) - 300)
+    }
+    const jittered = core_log.log_message_rate(fake_log({ messages: { PIDR: { TimeUS: jitter } } }), 'PIDR')
+    assert.ok(Math.abs(jittered - 400) < 0.05, 'дрожание: ' + jittered)
+    // Выпадения: интервалы по кругу 2500, 2500, 2500, 5000 мкс (выпал каждый пятый отсчёт) — 320 отсчётов в секунду;
+    // 2500, 2500, 7500 — 240. Интервалы не длиннее 5 медиан — не пропуски: так же режет пакеты шаг 4 (порог разрыва ×5)
+    const with_drops = (pattern) => {
+        const t = [0]
+        for (let i = 0; i < 3600; i++) {
+            t.push(t[t.length - 1] + pattern[i % pattern.length])
+        }
+        return core_log.log_message_rate(fake_log({ messages: { PIDR: { TimeUS: t } } }), 'PIDR')
+    }
+    assert.ok(Math.abs(with_drops([2500, 2500, 2500, 5000]) - 320) < 1e-9)
+    assert.ok(Math.abs(with_drops([2500, 2500, 7500]) - 240) < 1e-9)
+    // Сообщение с экземплярами — null без исключения (get() на нём падает)
+    const vibe = fake_log({ messages: { VIBE: { instances: { 0: { TimeUS: [0, 1e5, 2e5] } } } } })
+    assert.equal(core_log.log_message_rate(vibe, 'VIBE'), null)
+    assert.equal(core_log.log_message_rate(vibe, 'NOPE'), null)
+})
+
 test('log_info: ATT объявлен, но без строк (нет полей) — длительность из RATE, без исключения', () => {
     // Парсер отдаёт undefined для поля сообщения без строк; поддельный лог ведёт себя так же
     const log = fake_log({ messages: { ATT: {}, RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0, 0, 0] } } })
@@ -255,9 +301,49 @@ test('run_checks: не Copter — fail, итог fail', () => {
 
 test('run_checks: PID — ok / warn (только RATE) / fail', () => {
     const only_rate = good_info({ messages: { ...good_info().messages, pid: false, rate: true } })
-    assert.equal(by_id(checks.run_checks(only_rate, good_params, good_vibe), 'pid_log').status, 'warn')
+    const rate_check = by_id(checks.run_checks(only_rate, good_params, good_vibe), 'pid_log')
+    assert.equal(rate_check.status, 'warn')
+    // Что по RATE остаётся на шаге 4: только отклик и правила
+    assert.equal(rate_check.text, 'Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила')
     const none = good_info({ messages: { ...good_info().messages, pid: false, rate: false } })
     assert.equal(by_id(checks.run_checks(none, good_params, good_vibe), 'pid_log').status, 'fail')
+})
+
+test('run_checks: PID с частотой ниже 100 Гц — warn с советом включить ATTITUDE_FAST (бит 0); 400 Гц — ok', () => {
+    // Поддельный лог → log_info → run_checks: частоту проверка берёт из сведений о логе
+    const pid_check = (log) => by_id(checks.run_checks(core_log.log_info(log, copter_version), good_params, good_vibe), 'pid_log')
+    const slow = pid_check(pid_rate_log(10))
+    assert.equal(slow.status, 'warn')
+    assert.match(slow.text, /PIDR .*10 Гц/)
+    assert.match(slow.text, /шаге 4/)
+    assert.match(slow.fix, /ATTITUDE_FAST \(0\)/)
+    assert.match(slow.fix, /LOG_BITMASK/)
+    const fast = pid_check(pid_rate_log(400))
+    assert.equal(fast.status, 'ok')
+    assert.match(fast.text, /400 Гц/)
+    // Только RATE с частотой 10 Гц: warn, в тексте — и нехватка компонент, и частота; совет — оба бита
+    const rate_only = pid_check(pid_rate_log(10, ['RATE']))
+    assert.equal(rate_only.status, 'warn')
+    assert.match(rate_only.text, /только RATE: по нему на шаге 4 нет компонент P\/I\/D, шума D и прогноза — только отклик и правила/)
+    assert.match(rate_only.text, /RATE .*10 Гц/)
+    assert.match(rate_only.fix, /PID \(12\)/)
+    assert.match(rate_only.fix, /ATTITUDE_FAST \(0\)/)
+    // Без сведений о частоте (например, старые сведения) — как раньше
+    assert.equal(by_id(checks.run_checks(good_info(), good_params, good_vibe), 'pid_log').status, 'ok')
+    // Порог с запасом: около 100 Гц (дрожание меток) — ok; 98.97 Гц — warn, в тексте «98.9» (без округления вверх)
+    const at_rate = (PIDR) => by_id(checks.run_checks(good_info({ pid_log_rates: { PIDR, RATE: null } }), good_params, good_vibe), 'pid_log')
+    assert.equal(at_rate(99.95).status, 'ok')
+    assert.match(at_rate(99.95).text, /99\.9 Гц/)
+    assert.equal(at_rate(100.05).status, 'ok')
+    assert.equal(pid_check(pid_rate_log(99.95)).status, 'ok')
+    assert.equal(pid_check(pid_rate_log(100.05)).status, 'ok')
+    assert.equal(at_rate(98.97).status, 'warn')
+    assert.match(at_rate(98.97).text, /PIDR пишется с частотой 98\.9 Гц — ниже 100 Гц/)
+    // PIDR/PIDP/PIDY объявлены без отсчётов, RATE с частотой 10 Гц: ветка PID, частота PIDR неизвестна — о RATE ни слова
+    const empty_pid = fake_log({ messages: { PIDR: {}, PIDP: {}, PIDY: {}, RATE: { TimeUS: Array.from({ length: 600 }, (_, i) => i * 1e5) } } })
+    const empty = pid_check(empty_pid)
+    assert.equal(empty.status, 'ok')
+    assert.doesNotMatch(empty.text, /RATE|Гц/)
 })
 
 test('run_checks: нет данных гироскопа — fail с подсказкой', () => {

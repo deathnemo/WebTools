@@ -37,12 +37,16 @@
 <script type="text/javascript" src="core/autofit.js"></script>
 <script type="text/javascript" src="core/candidates.js"></script>
 <script type="text/javascript" src="core/lowpass.js"></script>
+<script type="text/javascript" src="core/pid.js"></script>
+<script type="text/javascript" src="core/pidtune.js"></script>
 <script type="text/javascript" src="core/params.js"></script>
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
+<script type="text/javascript" src="steps/common.js"></script>
 <script type="text/javascript" src="steps/step1.js"></script>
 <script type="text/javascript" src="steps/step2.js"></script>
 <script type="text/javascript" src="steps/step3.js"></script>
+<script type="text/javascript" src="steps/step4.js"></script>
 
 <style>
 /* Токены оформления: только тёмная тема «Графит» (общие правила проектов; решение пользователя 24.10.2026) */
@@ -154,64 +158,82 @@ tr:last-child td{border-bottom:0}
 .check__b .fix{color:var(--ink-3); font-size:12.5px}
 .check__b .fix b{color:var(--ink-2); font-weight:600}
 
-/* Плитки с пояснением и таблицы вариантов шагов 2 и 3 */
+/* Плитки метрик (.metrics) и таблицы (.cands) шагов 2–4: варианты, на шаге 4 ещё и качество измерения */
 .stat__s{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); overflow-wrap:anywhere}
 .stat--bad .stat__v{color:var(--high)}
 .stat--good .stat__v{color:var(--ok)}
-#candidates2 td,#candidates3 td{vertical-align:top}
-#candidates2 td small,#candidates3 td small{display:block; font-size:11px; opacity:.8}
-#candidates2 th small,#candidates3 th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
-#candidates2 th.group,#candidates3 th.group{text-align:center; border-bottom:1px solid var(--line)}
+.cands td{vertical-align:top}
+.cands td small{display:block; font-size:11px; opacity:.8}
+.cands th small{display:block; text-transform:none; letter-spacing:0; font-size:10.5px}
+.cands th.group{text-align:center; border-bottom:1px solid var(--line)}
 #metrics2{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
 /* Восемь плиток шага 3 — по четыре в ряд: значения и шум, затем задержки путей */
 #metrics3{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))}
-#metrics2 .stat__v,#metrics3 .stat__v{font-size:16px}
-#candidates2 td.better,#candidates3 td.better{color:var(--ok)}
-#candidates2 td.worse,#candidates3 td.worse{color:var(--high)}
-#candidates2 tr.recommended td,#candidates3 tr.recommended td{background:var(--accent-soft)}
-#candidates2 tr.recommended td:first-child,#candidates3 tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
-#candidates2 input[type=radio],#candidates3 input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
-#candidates2 label,#candidates3 label{cursor:pointer}
+.metrics .stat__v{font-size:16px}
+.cands td.better{color:var(--ok)}
+.cands td.worse{color:var(--high)}
+.cands tr.recommended td{background:var(--accent-soft)}
+.cands tr.recommended td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.cands input[type=radio]{accent-color:var(--accent); margin:2px 0 0}
+.cands label{cursor:pointer}
 /* Числа таблицы шага 3 не переносятся: длинная оценка забирает ширину у столбцов «30 / 20» и «D выкл.» */
 #candidates3 td.num{white-space:nowrap}
+/* Шаг 4: числа вариантов не переносятся; плитки метрик — по пять в ряд на широком экране */
+#candidates4 td.num{white-space:nowrap}
+#metrics4{grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr))}
+/* Вкладки осей шага 4: выбранная — как текущий шаг в полосе шагов; вторая строка — короткое состояние оси, третья —
+   что в форме, если не значения лога. Место третьей строки занято всегда: пометка после правки не сдвигает разметку */
+.tabs{display:flex; flex-wrap:wrap; border:1px solid var(--line); background:var(--surface)}
+.tabs button{border:0; border-right:1px solid var(--line); border-radius:0; background:var(--surface); padding:9px 16px; min-width:170px;
+  display:flex; flex-direction:column; gap:2px; text-align:left; color:var(--ink-2)}
+.tabs button .t{font-family:Archivo,"IBM Plex Sans",sans-serif; font-size:13px; font-weight:600; color:var(--ink)}
+.tabs button .s{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)}
+.tabs button .s--bad{color:var(--high)}
+.tabs button .s--warn{color:var(--accent)}
+.tabs button .s--ok{color:var(--ok)}
+.tabs button .f{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; line-height:1.5; min-height:1.5em; color:var(--accent)}
+.tabs button[aria-selected="true"]{background:var(--accent-soft); box-shadow:inset 0 -2px 0 var(--accent)}
+.tabpanel{display:flex; flex-direction:column; gap:14px}
+#pidf_form input[type=number]{width:112px}
 /* Предупреждение у поля размера винта шага 3 */
 #prop_warn{border-left-color:var(--accent); color:var(--accent)}
 .tag{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
   color:var(--accent); border:1px solid var(--accent); padding:1px 5px; white-space:nowrap}
 
-/* Формы параметров шагов 2 и 3. На шаге 2 подписи, описания, списки и флажки масок строит
+/* Формы параметров шагов 2 и 3 (.pform). На шаге 2 подписи, описания, списки и флажки масок строит
    Libraries/ParameterMetadata.js (load_param_inputs): у подписи-имени он ставит inline width:165px и margin — здесь
    они перебиваются. Флажки маски остаются прямыми детьми абзаца (их обработчик ищет поле через parentElement),
    строки флажков разбиты его <br>; отступ строк флажков — висячий отступ абзаца. Форму шага 3 (#lpf_form) строит
-   steps/step3.js той же разметкой: подпись, поле, единицы, «в логе» */
+   steps/step3.js той же разметкой: подпись, поле, единицы, «в логе»; форму шага 4 (#pidf_form) — steps/step4.js так же,
+   без единиц. Списки, флажки масок и подпись из data-name есть только у формы шага 2 (#notch_form) */
 .pgroups{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr)); gap:18px 32px}
 .pgroup{display:flex; flex-direction:column; gap:2px; min-width:0}
 .pgroup h3{font-size:13px; margin-bottom:4px}
 .pgroup--wide{grid-column:1/-1; flex-direction:row; flex-wrap:wrap; align-items:center; column-gap:40px}
 .pgroup--wide h3{flex-basis:100%}
-#notch_form p,#lpf_form p{padding-left:144px; text-indent:-144px; line-height:30px; color:var(--ink-3); font-size:12px}
-#notch_form p > *,#lpf_form p > *{text-indent:0}
-#notch_form p > label:not([for^="bit_"]),#lpf_form p > label{display:inline-block!important; width:136px!important; margin:0 8px 0 0!important; vertical-align:middle;
+.pform p{padding-left:144px; text-indent:-144px; line-height:30px; color:var(--ink-3); font-size:12px}
+.pform p > *{text-indent:0}
+.pform p > label:not([for^="bit_"]){display:inline-block!important; width:136px!important; margin:0 8px 0 0!important; vertical-align:middle;
   font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; line-height:1.3; color:var(--ink-2); overflow-wrap:anywhere; cursor:help}
 /* Описания из params.json не загрузились — имя параметра из data-name, чтобы поле не осталось без подписи */
 #notch_form p:not(:has(> label))::before{content:attr(data-name); display:inline-block; width:136px; margin-right:8px; text-indent:0;
   font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)}
-#notch_form input[type=number],#notch_form select,#lpf_form input[type=number]{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
+.pform input[type=number],.pform select{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:3px 8px; margin-right:6px;
   vertical-align:middle; border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
 #notch_form input[type=number]{width:96px}
 /* Шире, чем на шаге 2: пределы ускорения из лога бывают вида 50045.707 */
 #lpf_form input[type=number]{width:112px}
 #notch_form select{max-width:220px}
-#notch_form input:disabled,#notch_form select:disabled,#lpf_form input:disabled{opacity:.45}
+.pform input:disabled,.pform select:disabled{opacity:.45}
 #notch_form select:focus-visible{outline:2px solid var(--low); outline-offset:2px}
-#notch_form .inlog,#lpf_form .inlog{margin-left:10px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); white-space:nowrap}
+.pform .inlog{margin-left:10px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-3); white-space:nowrap}
 #notch_form input[type=checkbox]{accent-color:var(--accent); margin:0 4px 0 0; vertical-align:middle}
 #notch_form p > label[for^="bit_"]{margin-right:10px; font-size:12px; line-height:24px; color:var(--ink-2); white-space:nowrap; cursor:pointer}
 #notch_form input[type=checkbox]:disabled + label{opacity:.45}
-#notch_form p.changed > input[type=number],#notch_form p.changed > select,#lpf_form p.changed > input[type=number]{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
-#notch_form p.changed > label:not([for^="bit_"]),#notch_form p.changed .inlog,#lpf_form p.changed > label,#lpf_form p.changed .inlog{color:var(--accent)}
+.pform p.changed > input[type=number],.pform p.changed > select{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+.pform p.changed > label:not([for^="bit_"]),.pform p.changed .inlog{color:var(--accent)}
 @media (max-width:600px){
-  #notch_form p,#lpf_form p{padding-left:0; text-indent:0}
+  .pform p{padding-left:0; text-indent:0}
 }
 
 /* Графики */
@@ -392,7 +414,7 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов notch</h2></div>
   <p class="note" id="candidates2_stale" hidden></p>
-  <div class="tablewrap" id="candidates2" hidden>
+  <div class="tablewrap cands" id="candidates2" hidden>
     <table>
       <thead></thead>
       <tbody></tbody>
@@ -415,7 +437,7 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров</h2></div>
   <div class="lab">
-    <div class="pgroups" id="notch_form">
+    <div class="pgroups pform" id="notch_form">
       <div class="pgroup pgroup--wide">
         <h3>Общие</h3>
         <p class="param" data-name="INS_GYRO_FILTER"><input type="number" id="INS_GYRO_FILTER" name="INS_GYRO_FILTER" step="0.1"><span class="inlog" data-for="INS_GYRO_FILTER"></span></p>
@@ -461,7 +483,7 @@ tr:last-child td{border-bottom:0}
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Посчитанные значения формы против лога</h2></div>
-  <div class="stats" id="metrics2" hidden></div>
+  <div class="stats metrics" id="metrics2" hidden></div>
   <div class="row">
     <button type="button" id="notch_accept" disabled>Принять</button>
   </div>
@@ -539,7 +561,7 @@ tr:last-child td{border-bottom:0}
   <p class="note" id="warnings3" hidden></p>
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов фильтров</h2></div>
-  <div class="tablewrap" id="candidates3" hidden>
+  <div class="tablewrap cands" id="candidates3" hidden>
     <table>
       <thead></thead>
       <tbody></tbody>
@@ -552,12 +574,12 @@ tr:last-child td{border-bottom:0}
 
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
-    <div class="pgroups" id="lpf_form"></div>
+    <div class="pgroups pform" id="lpf_form"></div>
     <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле и отрицательную частоту принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>
-  <div class="stats" id="metrics3" hidden></div>
+  <div class="stats metrics" id="metrics3" hidden></div>
   <div class="row">
     <button type="button" id="lpf_accept" disabled>Принять</button>
   </div>
@@ -586,7 +608,92 @@ tr:last-child td{border-bottom:0}
   <p class="note">Ось частот логарифмическая, от 1 Гц. Путь P — фильтр гироскопа, notch-база и FLTE; путь D — ещё и FLTD (производная ошибки одинакова у всех вариантов и не показана). Амплитуда и фаза — средние по окнам интервала: notch следует за оборотами; гироскоп первичный. Пунктир — как в логе, сплошная — выбранный вариант; вертикали — <span data-rule3="lag_freqs">10 и 30 Гц</span>, частоты задержки в таблице.</p>
 </section>
 <section data-step="4" hidden>
-  <div class="head"><span class="eyebrow">04 · PID по осям</span><h2>Шаг появится на этапе 4</h2></div>
+  <div class="head"><span class="eyebrow">04 · PID по осям</span><h2>Регулятор скорости: отклик, правила и прогноз</h2></div>
+  <p class="lede">Мастер измеряет отклик контура скорости по каждой оси — импульсную характеристику «цель → факт» методом наименьших квадратов по данным лога PID — и проверяет, можно ли этому измерению верить. По надёжному измерению он предлагает ATC_RAT_*_P/I/D по правилам (шаг <span data-rule4="step">10 %</span>, I = P, у рыскания I = 0.1·P) и прогнозирует запас фазы и отклик каждого варианта. Вариант отмечается, если запас фазы в прогнозе ниже <span data-rule4="pm_min">30°</span> или хуже лога больше чем на <span data-rule4="pm_drop">5°</span>, или перерегулирование выше <span data-rule4="overshoot">20 %</span>; отметки выбор не блокируют.</p>
+
+  <div class="lab">
+    <div class="row">
+      <div class="fld">
+        <label for="step4_window">Окно FFT, <span class="unit">отсчётов</span></label>
+        <input id="step4_window" type="number" min="64" step="1" value="512">
+      </div>
+      <div class="fld">
+        <button type="button" id="step4_open_pidreview" disabled>Открыть в PIDReview</button>
+      </div>
+    </div>
+    <p class="note">Окно FFT — степень двойки, как в PIDReview; от него зависят спектр D-составляющей (шум D) и отклик PIDReview на графике. Измеренный отклик, проверки качества и прогноз от окна не зависят: данные отбираются окнами по 512 отсчётов с шагом 32 — на них откалиброваны пороги проверок. Интервал анализа — общий, с шага 0. Спектрограмма и спектры P, I, FF — в PIDReview.</p>
+  </div>
+
+  <div class="verdict" id="verdict4" hidden></div>
+
+  <div class="tabs" id="step4_tabs" role="tablist" aria-label="Оси" hidden>
+    <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span><span class="f"></span></button>
+    <button type="button" role="tab" id="step4_tab_pitch" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Тангаж</span><span class="s"></span><span class="f"></span></button>
+    <button type="button" role="tab" id="step4_tab_yaw" aria-selected="false" aria-controls="step4_panel" tabindex="-1"><span class="t">Рыскание</span><span class="s"></span><span class="f"></span></button>
+  </div>
+
+  <div class="tabpanel" id="step4_panel" role="tabpanel" aria-labelledby="step4_tab_roll" hidden>
+    <div class="row" id="step4_sets_row" hidden>
+      <fieldset class="fld">
+        <legend>Набор параметров оси (PID менялись в интервале)</legend>
+        <div class="opts" id="step4_sets"></div>
+      </fieldset>
+    </div>
+    <div class="verdict" id="axis_verdict4" hidden></div>
+    <p class="note" id="warnings4" hidden></p>
+
+    <div class="head"><span class="eyebrow">Отклик</span><h2>Метрики измеренного отклика</h2></div>
+    <div class="stats metrics" id="metrics4" hidden></div>
+
+    <div class="head"><span class="eyebrow">Качество измерения</span><h2>Проверки (а)–(в)</h2></div>
+    <div class="tablewrap cands" id="quality4" hidden>
+      <table>
+        <thead><tr><th>Проверка</th><th>Значение</th><th>Порог</th><th>Итог</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="head"><span class="eyebrow">Варианты</span><h2>Варианты PID и прогноз</h2></div>
+    <div class="tablewrap cands" id="candidates4" hidden>
+      <table>
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="note" id="candidates4_note" hidden></p>
+    <div class="row">
+      <button type="button" id="cand4_apply" disabled>Применить вариант</button>
+    </div>
+
+    <div class="head"><span class="eyebrow">Отклик</span><h2>Отклик на ступеньку: измеренный и прогноз выбранного варианта</h2></div>
+    <div id="StepResp4" class="plot"></div>
+    <p class="note" id="stepresp4_note" hidden></p>
+    <p class="note">Измеренный — накопленная сумма импульсной характеристики «цель → факт» (КИХ МНК), по нему считаются метрики выше. Прогноз — выбранной строки таблицы (после правки формы — «Свой»), из той же измеренной характеристики и модели регулятора; у неустойчивого варианта линии нет. Горизонтали — 1 (ступенька цели) и ±5 % от плато измеренного. Если на шагах 2–3 приняты другие фильтры, в легенде есть прогноз «как в логе» с ними (пунктир): коэффициенты лога, отличие от измеренного — влияние одних фильтров. Отклик PIDReview (окна и среднее) включается в легенде: он посчитан методом PIDReview с окном FFT шага, а метод занижает плато (≈ 0.56 при идеальном слежении) и сжимает перерегулирование — он только для сравнения с PIDReview, не для оценки. Окон на графике не больше <span data-rule4="pidreview_windows">200</span> (равномерная выборка), среднее — по всем.</p>
+
+    <div class="head"><span class="eyebrow">Данные</span><h2>Цель и факт во времени</h2></div>
+    <div id="TarAct4" class="plot"></div>
+    <p class="note" id="tarac4_note" hidden></p>
+    <p class="note">Скорость оси, °/с: цель регулятора скорости и факт (отфильтрованный гироскоп) набора параметров оси за интервал анализа — из этих данных отбираются окна для измерения. Цель нарисована поверх факта. Разрывы — между пакетами лога.</p>
+
+    <div class="head"><span class="eyebrow">Спектр</span><h2>Спектр D-составляющей и выхода регулятора</h2></div>
+    <div id="DSpec4" class="plot"></div>
+    <p class="note" id="dspec4_note" hidden></p>
+    <p class="note">Запись лога, а не модель: средний спектр окон FFT за интервал (окно — поле вверху шага), дБ от полного выхода регулятора (1). Вертикаль — <span data-rule4="d_noise_hz">50 Гц</span>: шум D считается выше неё. Плитка «Шум D» — суммарная мощность D-составляющей во всех бинах выше этой частоты, поэтому её число выше любой точки спектра.</p>
+
+    <div class="head"><span class="eyebrow">Бодэ</span><h2>Разомкнутый контур L: лог и выбранный вариант</h2></div>
+    <div id="LBode4" class="plot plot--tall"></div>
+    <p class="note" id="lbode4_note" hidden></p>
+    <p class="note">L = G·C — из измеренной характеристики «цель → факт» и модели регулятора, только при достоверном прогнозе. Ось частот логарифмическая, от <span data-rule4="crossover_min">0.5 Гц</span> — ниже частота среза не ищется. Фаза — от −360° до 0° (разрыв линии — переход через границу): выше частоты среза измеренная характеристика шумит, и развёрнутая фаза копила бы лишние обороты. Пунктир — лог, сплошная — выбранный вариант; вертикали — частоты среза (|L| = 0 дБ), толстый отрезок на фазе от −180° — запас фазы. Частота среза и запас — в легенде.</p>
+  </div>
+
+  <div class="head"><span class="eyebrow">Параметры</span><h2>Коэффициенты регулятора скорости</h2></div>
+  <div class="lab">
+    <div class="pgroups pform" id="pidf_form"></div>
+    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
+  </div>
+  <div class="row">
+    <button type="button" id="pidf_accept" disabled>Принять</button>
+  </div>
 </section>
 <section data-step="5" hidden>
   <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Шаг появится на этапе 5</h2></div>

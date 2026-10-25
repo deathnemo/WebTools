@@ -30,7 +30,7 @@ const state = {
     env: null,
     // Предупреждения загрузки, которые показывают шаги (например, неподдерживаемая версия фильтра)
     load_warnings: [],
-    // Файл лога: нужен для «Открыть в FilterReview»
+    // Файл лога: нужен для «Открыть в FilterReview» и «Открыть в PIDReview»
     file: null,
 }
 
@@ -206,6 +206,9 @@ function on_show_step(n) {
     if ((n === 3) && (typeof step3_show === "function")) {
         step3_show()
     }
+    if ((n === 4) && (typeof step4_show === "function")) {
+        step4_show()
+    }
 }
 
 function set_step(n) {
@@ -252,6 +255,9 @@ function init_wizard() {
     }
     if (typeof step3_init === "function") {
         step3_init()
+    }
+    if (typeof step4_init === "function") {
+        step4_init()
     }
     set_step(0)
 }
@@ -327,6 +333,9 @@ function reset() {
     if (typeof step3_reset === "function") {
         step3_reset()
     }
+    if (typeof step4_reset === "function") {
+        step4_reset()
+    }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
@@ -353,7 +362,7 @@ function reset() {
     update_wizbar()
 }
 
-// buffer — содержимое лога, file — исходный File (для «Открыть в FilterReview»; может быть null)
+// buffer — содержимое лога, file — исходный File (для «Открыть в FilterReview» и «Открыть в PIDReview»; может быть null)
 async function load(buffer, file = null) {
     await import_done
     const start = performance.now()

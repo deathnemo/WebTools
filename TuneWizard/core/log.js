@@ -52,6 +52,41 @@ function log_messages(log) {
     }
 }
 
+// Частота сообщения name, Гц — отсчётов в секунду без пропусков: средний интервал TimeUS, где интервалы длиннее 5 медиан
+// (на земле лог может не писаться; порог — как у разрыва пакетов PIDReview) не учитываются. Дрожание меток усредняется,
+// а частые выпадения по 2–3 интервала частоту снижают — как и частоты пакетов шага 4 (пакеты режутся по тому же порогу).
+// null, если сообщения нет, в нём меньше двух отсчётов или оно пишется по экземплярам (как VIBE: get() на нём падает,
+// а частота по экземплярам здесь не нужна — PIDR/PIDP/PIDY и RATE экземпляров не имеют)
+function log_message_rate(log, name) {
+    if (!(name in log.messageTypes) || (log.messageTypes[name].instances != null)) {
+        return null
+    }
+    const t = log.get(name, "TimeUS")
+    if ((t == null) || (t.length < 2)) {
+        return null
+    }
+    const dt = new Float64Array(t.length - 1)
+    for (let i = 1; i < t.length; i++) {
+        dt[i - 1] = t[i] - t[i - 1]
+    }
+    const sorted = dt.slice().sort()
+    const mid = sorted.length >> 1
+    const median = (sorted.length % 2) ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+    if (!(median > 0)) {
+        return null
+    }
+    let sum = 0
+    let count = 0
+    for (const d of dt) {
+        if (d <= 5 * median) {
+            sum += d
+            count++
+        }
+    }
+    // TimeUS — микросекунды
+    return 1e6 / (sum / count)
+}
+
 // Ряд «газ» 0–1 для окна полёта: CTUN.ThO (выход газа), иначе RATE.AOut
 function throttle_series(log) {
     if ("CTUN" in log.messageTypes) {
@@ -203,6 +238,10 @@ function log_info(log, version = {}) {
     const throttle = throttle_series(log)
     const window = throttle ? throttle_window(throttle.time, throttle.throttle) : null
 
+    // Частоты сообщений PIDR и RATE, Гц или null — для проверки pid_log (ниже порога отклик шага 4 не считается);
+    // какую брать, решает проверка по той же ветке, что и наличие сообщений (messages.pid или messages.rate)
+    const pid_log_rates = { PIDR: log_message_rate(log, "PIDR"), RATE: log_message_rate(log, "RATE") }
+
     return {
         vehicle: BUILD_NAMES[version.build_type] ?? null,
         build_type: version.build_type ?? null,
@@ -213,6 +252,7 @@ function log_info(log, version = {}) {
         time_end,
         duration_s,
         messages,
+        pid_log_rates,
         throttle_source: throttle?.source ?? null,
         flight: window ? {
             start: window.start,
@@ -224,5 +264,5 @@ function log_info(log, version = {}) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { US2S, us_to_s, log_params, log_messages, throttle_series, throttle_window, mean_throttle, percentile, vibe_summary, log_info }
+    module.exports = { US2S, us_to_s, log_params, log_messages, log_message_rate, throttle_series, throttle_window, mean_throttle, percentile, vibe_summary, log_info }
 }

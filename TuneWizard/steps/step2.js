@@ -3,6 +3,7 @@
 // и спектрограмма для значений формы, метрики против лога, файл .param (core/params.js) и «Принять».
 // Состояние шага 1 не меняется: state.filters и FFT.H остаются от параметров лога (их рисует шаг 1), а
 // передаточная функция значений формы считается отдельно (filter_transfer) и подставляется в копию-взгляд gyro.
+// Общие помощники шагов (step_…, plot_…) — steps/common.js.
 
 // Внутреннее состояние шага
 const step2 = {
@@ -40,19 +41,6 @@ function step2_param_names() {
 
 // ---------- Подписи ----------
 
-function step2_verdict(status, text) {
-    const verdict = document.getElementById("verdict2")
-    verdict.className = "verdict verdict--" + status
-    verdict.textContent = text
-    verdict.hidden = false
-}
-
-// Число со знаком; округлённый ноль — без минуса
-function step2_signed(value, digits) {
-    const rounded = Number(value.toFixed(digits))
-    return ((rounded > 0) ? "+" : "") + ((rounded == 0) ? (0).toFixed(digits) : rounded.toFixed(digits))
-}
-
 // Короткие имена битов INS_*_OPTS (Libraries/ParameterMetadata — английские подписи из params.json)
 const STEP2_OPTS_NAMES = ["2×", "multi", "loop", "all IMU", "3×", "min freq", "5×"]
 
@@ -85,12 +73,6 @@ function step2_short_values(values) {
         parts.push((i == 0) ? text : "+ notch 2: " + text)
     }
     return parts
-}
-
-// Плитка с пояснением третьей строкой
-function step2_tile(key, value, sub, mod) {
-    return '<div class="stat' + (mod ? " stat--" + mod : "") + '"><span class="stat__k">' + html_escape(key) + '</span><span class="stat__v">' +
-        html_escape(value) + '</span>' + (sub ? '<span class="stat__s">' + html_escape(sub) + '</span>' : "") + '</div>'
 }
 
 // ---------- Графики ----------
@@ -153,8 +135,8 @@ function setup_step2_plots() {
         }
     }
     const layout = {
-        xaxis: { title: { text: "Частота, Гц" }, type: "linear", zeroline: false, showline: true, mirror: true },
-        yaxis: { title: { text: "Амплитуда, дБ" }, zeroline: false, showline: true, mirror: true },
+        xaxis: plot_axis("Частота, Гц"),
+        yaxis: plot_axis("Амплитуда, дБ"),
         showlegend: true,
         legend: { groupclick: "toggleitem" },
         shapes: [],
@@ -171,10 +153,10 @@ function setup_step2_plots() {
         { mode: "lines", line: { width: 1.5 }, showlegend: false, xaxis: "x2", yaxis: "y2", x: [], y: [] },
     ]
     const bode_layout = {
-        xaxis: { type: "linear", zeroline: false, showline: true, mirror: true },
-        xaxis2: { title: { text: "Частота, Гц" }, type: "linear", zeroline: false, showline: true, mirror: true },
-        yaxis: { title: { text: "Амплитуда, дБ" }, zeroline: false, showline: true, mirror: true, domain: [0.52, 1] },
-        yaxis2: { title: { text: "Фаза, °" }, zeroline: false, showline: true, mirror: true, domain: [0, 0.48] },
+        xaxis: plot_axis(null),
+        xaxis2: plot_axis("Частота, Гц"),
+        yaxis: { ...plot_axis("Амплитуда, дБ"), domain: [0.52, 1] },
+        yaxis2: { ...plot_axis("Фаза, °"), domain: [0, 0.48] },
         showlegend: false,
         grid: { rows: 2, columns: 1, pattern: "independent" },
         margin: { b: 50, l: 60, r: 20, t: 20 },
@@ -195,8 +177,8 @@ function setup_step2_plots() {
         z: [],
     }]
     const sg_layout = {
-        xaxis: { title: { text: "Время, с" }, zeroline: false, showline: true, mirror: true },
-        yaxis: { title: { text: "Частота, Гц" }, type: "linear", zeroline: false, showline: true, mirror: true },
+        xaxis: plot_axis("Время, с"),
+        yaxis: plot_axis("Частота, Гц"),
         showlegend: true,
         legend: { groupclick: "toggleitem" },
         margin: { b: 50, l: 60, r: 20, t: 20 },
@@ -204,26 +186,11 @@ function setup_step2_plots() {
     register_plot("Spectrogram2", sg_data, sg_layout, { on_theme: spectrogram2_theme })
 }
 
-// Пустые графики шага
+// Пустые графики шага. Линии notch спектра скрываются, redraw_spectrum2 строит их заново; трассы бодэ не
+// скрываются — redraw_bode2 видимость не возвращает
 function clear_step2_plots() {
-    const spectrum = plot("Spectrum2")
-    if (spectrum != null) {
-        for (const trace of spectrum.data) {
-            trace.x = []
-            trace.y = []
-            trace.visible = false
-        }
-        spectrum.layout.shapes = []
-        render_plot("Spectrum2")
-    }
-    const bode = plot("Bode2")
-    if (bode != null) {
-        for (const trace of bode.data) {
-            trace.x = []
-            trace.y = []
-        }
-        render_plot("Bode2")
-    }
+    plot_clear("Spectrum2")
+    plot_clear("Bode2", false)
     const spectrogram = plot("Spectrogram2")
     if (spectrogram != null) {
         spectrogram.data.length = 1
@@ -274,7 +241,7 @@ function step2_init() {
         if (!step1_ready() || (step2.error != null) || (step2.current == null)) {
             return
         }
-        step2_run(redraw)
+        step_run(redraw, "verdict2", "шага 2")
     }
     for (const id of ["bode2_inst0", "bode2_inst1", "bode2_inst2", "bode2_wrap"]) {
         document.getElementById(id).addEventListener("change", plot_handler(redraw_bode2))
@@ -492,19 +459,10 @@ function step2_stale() {
     return (step2.candidates != null) && ((step2.key !== step2_calc_key()) || (step2.gyro_ref !== state.gyro))
 }
 
-// Экземпляр gyro до фильтров первичного гироскопа — по нему оцениваются варианты; null без данных «до»
-function step2_sensor() {
-    const gyro = state.gyro
-    if (!gyro.have_pre) {
-        return null
-    }
-    return find_instance(gyro, gyro.primary ?? gyro.first_gyro, false) ?? null
-}
-
 // Контекст evaluate_candidate для текущего интервала: главные пики шага 1 (первые candidate_rules.main_peaks)
-// и экземпляр до фильтров первичного гироскопа. null — нет данных «до» или пиков
+// и экземпляр до фильтров первичного гироскопа (step_gyro_sensor). null — нет данных «до» или пиков
 function step2_make_ctx(analysis) {
-    const sensor = step2_sensor()
+    const sensor = step_gyro_sensor()
     if ((sensor == null) || (analysis == null)) {
         return null
     }
@@ -649,28 +607,8 @@ function step2_metrics(values) {
 }
 
 // ---------- Действия ----------
-
-// Выполнить fn под оверлеем загрузки; неожиданная ошибка — в консоль и вердикт, оверлей не зависает
-function step2_run(fn) {
-    loading_call(async () => {
-        try {
-            fn()
-        } catch (e) {
-            console.error(e)
-            step2_verdict("fail", "Ошибка шага 2: " + e.message)
-        }
-    })
-}
-
-// Расчёт шага 1 актуален или досчитан; иначе текст ошибки в step2.error
-function step2_ensure_step1() {
-    if (step1_ready() || step1_prepare()) {
-        step2.error = null
-        return true
-    }
-    step2.error = step1.error ?? "Расчёт спектра шага 1 не готов"
-    return false
-}
+// Действия идут под оверлеем загрузки (step_run): неожиданная ошибка — в консоль и вердикт «Ошибка шага 2: …».
+// Расчёт шага 1 досчитывается step_ensure_step1, его ошибка — в step2.error
 
 // Показ шага: форма из лога (один раз на лог), варианты при первом показе; смена интервала или расчёта шага 1
 // только помечает варианты устаревшими — пересчёт кнопкой «Подобрать заново»
@@ -679,28 +617,30 @@ function step2_show() {
         return
     }
     step2_build_form()
-    step2_run(() => {
+    step_run(() => {
         if (!step2.filled) {
             step2_fill_form(values_from_log())
             step2.filled = true
         } else {
             step2_param_read()
         }
-        if (step2_ensure_step1() && (step2.candidates == null)) {
+        step2.error = step_ensure_step1()
+        if ((step2.error == null) && (step2.candidates == null)) {
             step2_fit()
         }
         step2_redraw_all()
-    })
+    }, "verdict2", "шага 2")
 }
 
 // «Подобрать заново»: автоподбор и сравнение для текущего интервала
 function step2_refit() {
-    step2_run(() => {
-        if (step2_ensure_step1()) {
+    step_run(() => {
+        step2.error = step_ensure_step1()
+        if (step2.error == null) {
             step2_fit()
         }
         step2_redraw_all()
-    })
+    }, "verdict2", "шага 2")
 }
 
 // «Применить вариант»: все значения выбранного варианта в форму (и выключенных полей), пересчёт графиков и метрик
@@ -712,20 +652,22 @@ function step2_apply() {
     }
     step2_set_form_values(row.values)
     step2_param_read()
-    step2_run(() => {
-        if (step2_ensure_step1()) {
+    step_run(() => {
+        step2.error = step_ensure_step1()
+        if (step2.error == null) {
             step2_set_current(values_from_form())
         }
         step2_redraw_all()
-    })
+    }, "verdict2", "шага 2")
 }
 
 // «Пересчитать фильтры» после правки формы: строка «Текущий (из формы)» в таблице вариантов (заменяет прежнюю),
 // графики и метрики по значениям формы. Устаревшие варианты сначала подбираются заново, чтобы строки сравнивались
 // на одном интервале
 function step2_recalc() {
-    step2_run(() => {
-        if (!step2_ensure_step1()) {
+    step_run(() => {
+        step2.error = step_ensure_step1()
+        if (step2.error != null) {
             step2_redraw_all()
             return
         }
@@ -744,7 +686,7 @@ function step2_recalc() {
         }
         step2_param_read()
         step2_redraw_all()
-    })
+    }, "verdict2", "шага 2")
 }
 
 // Подсказка про второй notch: в логе он выключен, а в значениях включён — на аппарате остальные INS_HNTC2_*
@@ -815,7 +757,7 @@ async function step2_load_param(input) {
 // «Принять»: значения формы, их метрики и отметки сравнения с логом (rank_candidates для пары «лог — принятое»)
 // — в итог мастера, открыть шаг 3
 function step2_accept() {
-    step2_run(() => {
+    step_run(() => {
         if (!step1_ready() || (step2.error != null)) {
             return
         }
@@ -835,7 +777,7 @@ function step2_accept() {
         }
         step2_render_verdict()
         set_step(3)
-    })
+    }, "verdict2", "шага 2")
 }
 
 // Отметки rank_candidates словами: пики хуже лога (с разницей), неоценённые пики, задержка сверх допуска;
@@ -856,7 +798,7 @@ function step2_flags_text(flags, evaluation, log) {
         const log_peak = (peak != null) ? step2_peak(log, peak) : null
         const delta = (log_peak != null) ? peak.post_dB - log_peak.post_dB : NaN
         if (Number.isFinite(delta)) {
-            worse.push(freq.toFixed(1) + " Гц " + step2_signed(delta, 1) + " дБ")
+            worse.push(freq.toFixed(1) + " Гц " + step_signed(delta, 1) + " дБ")
         } else {
             unrated.push(freq.toFixed(1) + " Гц")
         }
@@ -870,7 +812,7 @@ function step2_flags_text(flags, evaluation, log) {
     }
     if (flags.lag_over) {
         const delta = (evaluation != null) ? evaluation.lag_ms[lag_hz] - log.lag_ms[lag_hz] : NaN
-        parts.push("задержка на " + lag_hz + " Гц " + (Number.isFinite(delta) ? step2_signed(delta, 2) + " мс" : "не оценена") +
+        parts.push("задержка на " + lag_hz + " Гц " + (Number.isFinite(delta) ? step_signed(delta, 2) + " мс" : "не оценена") +
                    " (допустимо +" + rules.max_lag_increase_ms + ")")
     }
     return parts.join("; ")
@@ -955,7 +897,7 @@ function step2_redraw_all() {
             document.getElementById(id).hidden = true
         }
         document.getElementById("cand2_apply").disabled = true
-        step2_verdict("fail", step2.error ?? "Расчёт спектра шага 1 не готов")
+        step_verdict("verdict2", "fail", step2.error ?? "Расчёт спектра шага 1 не готов")
         clear_step2_plots()
         return
     }
@@ -984,7 +926,7 @@ function step2_delta_cell(value, delta, digits, worse, better) {
     } else if ((delta != null) && (delta < -better)) {
         cls += " better"
     }
-    return '<td class="' + cls + '">' + value.toFixed(digits) + ((delta != null) ? '<small>' + step2_signed(delta, digits) + '</small>' : "") + '</td>'
+    return '<td class="' + cls + '">' + value.toFixed(digits) + ((delta != null) ? '<small>' + step_signed(delta, digits) + '</small>' : "") + '</td>'
 }
 
 // Пик варианта, соответствующий столбцу (частота и признак пика оценки «после»)
@@ -1016,8 +958,8 @@ function step2_reason(row, log) {
         return flags_text
     }
     const best = step2.evaluations[step2.ranking.best_id]
-    return "полоса " + step2_signed(row.evaluation.band_dB - log.band_dB, 2) + " дБ к логу — не лучше рекомендованного (" +
-        step2_signed(row.evaluation.band_dB - best.band_dB, 2) + " дБ)"
+    return "полоса " + step_signed(row.evaluation.band_dB - log.band_dB, 2) + " дБ к логу — не лучше рекомендованного (" +
+        step_signed(row.evaluation.band_dB - best.band_dB, 2) + " дБ)"
 }
 
 // Таблица вариантов: значения, уровни на пиках, полосы и задержки с разницей к логу, оценка
@@ -1190,7 +1132,7 @@ function step2_render_metrics() {
     const log = metrics.log
     const lag_hz = rules.lag_freqs_hz[rules.lag_freqs_hz.length - 1]
     const match = step2_match(current.values)
-    const tiles = [step2_tile("Значения", (match != null) ? match.title : "правка вручную", step2_short_values(current.values).join(" "), null)]
+    const tiles = [step_tile("Значения", (match != null) ? match.title : "правка вручную", step2_short_values(current.values).join(" "), null)]
     for (const peak of cur.peaks) {
         if (peak.source === "post") {
             continue
@@ -1198,19 +1140,19 @@ function step2_render_metrics() {
         const log_peak = step2_peak(log, peak)
         const delta = (log_peak != null) ? peak.post_dB - log_peak.post_dB : 0
         const mod = (delta > rules.max_peak_worsening_dB) ? "bad" : ((delta < -0.05) ? "good" : null)
-        tiles.push(step2_tile("Пик " + peak.freq.toFixed(1) + " Гц · " + peak.axes.join(", "), peak.pre_dB.toFixed(1) + " → " + peak.post_dB.toFixed(1) + " дБ",
-                              "ослабление " + (peak.pre_dB - peak.post_dB).toFixed(1) + " дБ, к логу " + step2_signed(delta, 1) + " дБ", mod))
+        tiles.push(step_tile("Пик " + peak.freq.toFixed(1) + " Гц · " + peak.axes.join(", "), peak.pre_dB.toFixed(1) + " → " + peak.post_dB.toFixed(1) + " дБ",
+                             "ослабление " + (peak.pre_dB - peak.post_dB).toFixed(1) + " дБ, к логу " + step_signed(delta, 1) + " дБ", mod))
     }
     const band_delta = cur.band_dB - log.band_dB
-    tiles.push(step2_tile("Полоса " + rules.band_hz[0] + "–" + rules.band_hz[1] + " Гц", cur.band_dB.toFixed(2) + " дБ", "к логу " + step2_signed(band_delta, 2) + " дБ",
-                          (band_delta > 0.005) ? "bad" : ((band_delta < -0.005) ? "good" : null)))
+    tiles.push(step_tile("Полоса " + rules.band_hz[0] + "–" + rules.band_hz[1] + " Гц", cur.band_dB.toFixed(2) + " дБ", "к логу " + step_signed(band_delta, 2) + " дБ",
+                         (band_delta > 0.005) ? "bad" : ((band_delta < -0.005) ? "good" : null)))
     if ((cur.band_f2_dB != null) && (log.band_f2_dB != null)) {
-        tiles.push(step2_tile("Полоса с весом f²", cur.band_f2_dB.toFixed(2) + " дБ", "к логу " + step2_signed(cur.band_f2_dB - log.band_f2_dB, 2) + " дБ", null))
+        tiles.push(step_tile("Полоса с весом f²", cur.band_f2_dB.toFixed(2) + " дБ", "к логу " + step_signed(cur.band_f2_dB - log.band_f2_dB, 2) + " дБ", null))
     }
     for (const freq of rules.lag_freqs_hz) {
         const delta = cur.lag_ms[freq] - log.lag_ms[freq]
         const mod = ((freq === lag_hz) && (delta > rules.max_lag_increase_ms)) ? "bad" : null
-        tiles.push(step2_tile("Задержка на " + freq + " Гц", cur.lag_ms[freq].toFixed(2) + " мс", "к логу " + step2_signed(delta, 2) + " мс", mod))
+        tiles.push(step_tile("Задержка на " + freq + " Гц", cur.lag_ms[freq].toFixed(2) + " мс", "к логу " + step_signed(delta, 2) + " мс", mod))
     }
     box.innerHTML = tiles.join("")
     box.hidden = false
@@ -1231,32 +1173,32 @@ function step2_render_verdict() {
         let tail = ""
         if (metrics != null) {
             const lag_hz = candidate_rules.lag_freqs_hz[candidate_rules.lag_freqs_hz.length - 1]
-            tail = " — полоса " + metrics.current.band_dB.toFixed(2) + " дБ (к логу " + step2_signed(metrics.current.band_dB - metrics.log.band_dB, 2) +
+            tail = " — полоса " + metrics.current.band_dB.toFixed(2) + " дБ (к логу " + step_signed(metrics.current.band_dB - metrics.log.band_dB, 2) +
                    "), задержка на " + lag_hz + " Гц " + metrics.current.lag_ms[lag_hz].toFixed(2) + " мс (к логу " +
-                   step2_signed(metrics.current.lag_ms[lag_hz] - metrics.log.lag_ms[lag_hz], 2) + ")"
+                   step_signed(metrics.current.lag_ms[lag_hz] - metrics.log.lag_ms[lag_hz], 2) + ")"
         }
         const flags = accepted.flags
         const flagged = (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
         if (flagged) {
-            step2_verdict("warn", "Принято, но хуже лога: " + step2_accepted_flags_text(accepted) + ". " + name + tail + ".")
+            step_verdict("verdict2", "warn", "Принято, но хуже лога: " + step2_accepted_flags_text(accepted) + ". " + name + tail + ".")
         } else {
-            step2_verdict("ok", "Принято: " + name + tail + ".")
+            step_verdict("verdict2", "ok", "Принято: " + name + tail + ".")
         }
         return
     }
     if (!state.gyro.have_pre) {
-        step2_verdict("warn", "Для сравнения вариантов нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT/INS_RAW_LOG_OPT). Форма, файл .param и графики работают с записанным «после».")
+        step_verdict("verdict2", "warn", "Для сравнения вариантов нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT/INS_RAW_LOG_OPT). Форма, файл .param и графики работают с записанным «после».")
         return
     }
     if (step2.ranking == null) {
-        step2_verdict("warn", "Варианты не оценены: у первичного гироскопа нет окон FFT до фильтров или пиков в интервале.")
+        step_verdict("verdict2", "warn", "Варианты не оценены: у первичного гироскопа нет окон FFT до фильтров или пиков в интервале.")
         return
     }
     const stale = step2_stale() ? " Варианты посчитаны для прежнего интервала — «Подобрать заново»." : ""
     const best_id = step2.ranking.best_id
     if (best_id == null) {
         // Защитная ветка: в оценках всегда есть ключ «log», и rank_candidates возвращает хотя бы его
-        step2_verdict("fail", "Сравнение вариантов не выбрало ни одного варианта." + stale)
+        step_verdict("verdict2", "fail", "Сравнение вариантов не выбрало ни одного варианта." + stale)
         return
     }
     // Оценка лога неполная — rank_candidates отмечает все остальные варианты incomplete, рекомендуется лог
@@ -1264,20 +1206,20 @@ function step2_render_verdict() {
     if ((others.length > 0) && others.every((r) => r.flags?.incomplete)) {
         const reason = (step2.evaluations.log == null) ? "нет оценки варианта «Как в логе» (у первичного гироскопа нет окон FFT до фильтров в интервале)"
                                                        : "оценка варианта «Как в логе» неполная (нет пиков или спектра, мощность в полосе не число)"
-        step2_verdict("warn", "Оценить варианты не удалось: " + reason + ". Остаются настройки из лога." + stale)
+        step_verdict("verdict2", "warn", "Оценить варианты не удалось: " + reason + ". Остаются настройки из лога." + stale)
         return
     }
     // Автоподбор не удался: без других вариантов сравнивать не с чем, иначе (второй notch) — приставка к обычному тексту
     const fit_failed = step2.fit.result == null
     const fit_prefix = fit_failed ? "Автоподбор не удался: " + step2.fit.errors.join("; ") + ". " : ""
     if (fit_failed && (others.length == 0)) {
-        step2_verdict("warn", fit_prefix + "Сравнивать не с чем — ниже оценка текущих настроек." + stale)
+        step_verdict("verdict2", "warn", fit_prefix + "Сравнивать не с чем — ниже оценка текущих настроек." + stale)
         return
     }
     const log = step2.evaluations.log
     if (best_id === "log") {
         const reasons = others.filter((r) => r.evaluation != null).map((r) => r.title + ": " + step2_reason(r, log))
-        step2_verdict(fit_failed ? "warn" : "ok", fit_prefix + "Текущие настройки лучше " + (fit_failed ? "других вариантов" : "вариантов автоподбора") +
+        step_verdict("verdict2", fit_failed ? "warn" : "ok", fit_prefix + "Текущие настройки лучше " + (fit_failed ? "других вариантов" : "вариантов автоподбора") +
             " с учётом задержки; менять notch не нужно." + ((reasons.length > 0) ? " " + reasons.join(". ") + "." : "") + stale)
         return
     }
@@ -1294,10 +1236,10 @@ function step2_render_verdict() {
         }
     }
     const selected = radio_value("cand2") === best_id
-    step2_verdict(fit_failed ? "warn" : "ok", fit_prefix + "Рекомендуется «" + best.title + "»: " +
-        ((biggest != null) ? biggest.freq.toFixed(1) + " Гц " + step2_signed(biggest.delta, 1) + " дБ, " : "") +
-        "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step2_signed(e.band_dB - log.band_dB, 2) +
-        " дБ к логу, задержка на " + lag_hz + " Гц " + step2_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс. " +
+    step_verdict("verdict2", fit_failed ? "warn" : "ok", fit_prefix + "Рекомендуется «" + best.title + "»: " +
+        ((biggest != null) ? biggest.freq.toFixed(1) + " Гц " + step_signed(biggest.delta, 1) + " дБ, " : "") +
+        "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step_signed(e.band_dB - log.band_dB, 2) +
+        " дБ к логу, задержка на " + lag_hz + " Гц " + step_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс. " +
         (selected ? "Он выбран — нажмите «Применить вариант», затем «Принять»." : "Выберите его в таблице и нажмите «Применить вариант», затем «Принять».") + stale)
 }
 
@@ -1359,13 +1301,10 @@ function redraw_spectrum2() {
         const alias = alias_obj(gyro[post].FFT, { mode: state.spectrum.aliasing, loop_rate: loop_rate })
         fill(2, post, mean_spectrum(gyro[post].FFT, amp, range, alias), alias)
     }
-    // Трассы без данных — вне легенды; с данными — видимость, выбранная пользователем
+    // Трассы без данных — вне легенды; с данными — видимость, выбранная пользователем (после очистки — только
+    // в легенде, на графике скрыта)
     for (const trace of p.data) {
-        if (trace.x.length == 0) {
-            trace.visible = false
-        } else if (trace.visible === false) {
-            trace.visible = "legendonly"
-        }
+        plot_trace_visibility(trace, "legendonly")
     }
 
     // Линии notch: на логарифмической оси неположительные частоты не рисуются

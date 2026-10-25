@@ -772,6 +772,7 @@ if (require.main === module) {
         process.exit(1)
     })
 } else {
-    // Для tests/tunewizard-compare-rules.test.cjs: правила сверки без браузера
-    module.exports = { upstream_plan, check_upstream, compare_arrays, fixed_rate, bode_points, wizard_trace_name, time_tolerance, tolerance }
+    // Для tests/tunewizard-compare-rules.test.cjs: правила сверки без браузера; допуски и deviation — ещё и для
+    // tests/tunewizard-pid-compare.cjs
+    module.exports = { upstream_plan, check_upstream, compare_arrays, fixed_rate, bode_points, wizard_trace_name, deviation, time_tolerance, tolerance }
 }
