@@ -151,9 +151,35 @@ function make_biquad(sample_hz, cutoff_hz) {
     }
 }
 
+// Notch ArduPilot (NotchFilter в core/filters.js: полоса → Q, ослабление → A) на частоте sample_hz — фильтр гироскопа
+function make_notch(sample_hz, center_hz, bandwidth_hz, attenuation_dB) {
+    const A = 10 ** (-attenuation_dB / 40)
+    const octaves = Math.log2(center_hz / (center_hz - bandwidth_hz / 2)) * 2
+    const Q = Math.sqrt(2 ** octaves) / (2 ** octaves - 1)
+    const omega = 2 * Math.PI * center_hz / sample_hz
+    const alpha = Math.sin(omega) / (2 * Q)
+    const b0 = 1 + alpha * A * A
+    const b1 = -2 * Math.cos(omega)
+    const b2 = 1 - alpha * A * A
+    const a0 = 1 + alpha
+    const a2 = 1 - alpha
+    let x1 = 0
+    let x2 = 0
+    let y1 = 0
+    let y2 = 0
+    return (x) => {
+        const y = (b0 * x + b1 * x1 + b2 * x2 - b1 * y1 - a2 * y2) / a0
+        x2 = x1
+        x1 = x
+        y2 = y1
+        y1 = y
+        return y
+    }
+}
+
 // Объект «выход регулятора → факт» на SUB подшагах периода контура: транспортная задержка, мотор первого порядка,
 // момент K·m (рад/с² на единицу выхода) с возмущением, интегратор со слабым демпфированием (скорость), шум датчика,
-// фильтр гироскопа 40 Гц
+// фильтры гироскопа на частоте подшагов: p.gyro_chain — [{ lpf: Гц } | { notch: Гц, bw, att }], по умолчанию ФНЧ 40 Гц
 const SUB = 4
 function make_plant(p) {
     const h = DT / SUB
@@ -163,7 +189,9 @@ function make_plant(p) {
     let m = 0
     let w = 0
     let meas = 0
-    const gyro = make_biquad(RATE_HZ * SUB, 40)
+    const chain = (p.gyro_chain ?? [{ lpf: 40 }]).map((f) => (f.lpf != null) ? make_biquad(RATE_HZ * SUB, f.lpf)
+        : make_notch(RATE_HZ * SUB, f.notch, f.bw, f.att))
+    const gyro = (x) => chain.reduce((y, filter) => filter(y), x)
     // step(u, dist, noise) → { meas, w }: dist() — возмущение рад/с², noise() — шум датчика рад/с
     return (u, dist, noise) => {
         for (let s = 0; s < SUB; s++) {
@@ -1206,10 +1234,12 @@ test('pidtune_predict: на известном контуре — T_new = G·g·
         ratio[0].push((a[0] * b[0] + a[1] * b[1]) / d)
         ratio[1].push((a[1] * b[0] - a[0] * b[1]) / d)
     }
+    // Точная формула — без сглаживания поправки фильтров (gyro_ratio_full_x: Infinity); со сглаживанием — ниже
+    const exact = { ...pidtune_rules, gyro_ratio_full_x: Infinity }
     const check = (log_gains, new_gains, g, skip_dc) => {
         const c_log = pidtune_controller(log_gains, FILTERS0, RATE_HZ, grid.freq)
         const c_new = pidtune_controller(new_gains, FILTERS0, RATE_HZ, grid.freq)
-        const pred = pidtune_predict(as_fir(closed(c_log, null)), c_log, c_new, g, RATE_HZ)
+        const pred = pidtune_predict(as_fir(closed(c_log, null)), c_log, c_new, g, RATE_HZ, exact)
         const expected = closed(c_new, g)
         const L_expected = cmul((g != null) ? cmul(Gp, g) : Gp, c_new.C)
         const what = JSON.stringify(new_gains) + ((g != null) ? ' с поправкой' : '')
@@ -1233,6 +1263,23 @@ test('pidtune_predict: на известном контуре — T_new = G·g·
     // I только у лога — предел на 0 Гц по данным не определить: T_new(0) по непрерывности (Re на 0.1 Гц), остальное точно
     const q = check(base, { ...base, I: 0 }, null, true)
     assert.equal(q.T[0][0], q.T[0][1], 'T_new(0) = Re T_new(0.1 Гц)')
+    // Со сглаживанием (по умолчанию): до 5× частоты среза лога — та же точная T_new, на частоте Найквиста поправки нет
+    const c_log = pidtune_controller(base, FILTERS0, RATE_HZ, grid.freq)
+    const c_new = pidtune_controller({ ...base, D: 0.0035 }, FILTERS0, RATE_HZ, grid.freq)
+    const fir = as_fir(closed(c_log, null))
+    const smooth = pidtune_predict(fir, c_log, c_new, ratio, RATE_HZ)
+    const full = pidtune_predict(fir, c_log, c_new, ratio, RATE_HZ, exact)
+    const fc_log = pidtune_predict(fir, c_log, c_log, null, RATE_HZ).crossover_hz
+    close_to(smooth.ratio_full_hz, 5 * fc_log, 1e-9, 'полная поправка до 5× частоты среза лога')
+    assert.equal(full.ratio_full_hz, Infinity)
+    for (let k = 0; grid.freq[k] <= smooth.ratio_full_hz; k++) {
+        assert.equal(smooth.T[0][k], full.T[0][k], 'Re на ' + grid.freq[k] + ' Гц')
+        assert.equal(smooth.T[1][k], full.T[1][k], 'Im на ' + grid.freq[k] + ' Гц')
+    }
+    const top = grid.freq.length - 1
+    const no_ratio = pidtune_predict(fir, c_log, c_new, null, RATE_HZ)
+    close_to(smooth.T[0][top], no_ratio.T[0][top], 1e-12, 'на частоте Найквиста — как без поправки')
+    assert.equal(no_ratio.ratio_full_hz, null)
 })
 
 test('pidtune_predict: rate-only синтетика — прогноз P ±10 %, D ±10 %, P +30 % против прямой симуляции: перерегулирование ±3 пункта, запас фазы ±5°', () => {
@@ -1501,8 +1548,8 @@ test('pidtune_flags: отметки на порогах — запас фазы 
     // Неустойчив при положительном запасе (непричинный отклик)
     const noncausal = pidtune_flags({ pm_deg: 12, metrics: null, unstable: true }, log)
     assert.equal(noncausal.unstable, true)
-    assert.equal(noncausal.reasons[0], 'прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D, ' +
-                 'мало возбуждения на высоких частотах)')
+    assert.equal(noncausal.reasons[0], 'прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D или ' +
+                 'фильтров гироскопа, мало возбуждения на высоких частотах)')
     assert.ok(noncausal.reasons[1].startsWith('запас фазы 12.0° ниже 30°'), noncausal.reasons[1])
     assert.equal(pidtune_flags(pred(50, 10), log).unstable, false)
 })
@@ -1666,4 +1713,73 @@ test('pidtune_predict: рыскание с I = 0 (I только у лога) �
     assert.ok(pred.noncausal < 1e-4, 'доля энергии до нуля времени ' + pred.noncausal)
     const truth = pidtune_step_metrics(...Object.values(truth_step({ ...yaw, ki: 0 }, plant)))
     close_to(pred.metrics.overshoot_pct, truth.overshoot_pct, 3, 'перерегулирование, %')
+})
+
+// Гироскоп-заглушка для pidtune_gyro_ratio: окна FFT в 1…5 с на частоте подшагов объекта (фильтры — как в make_plant)
+// и источник трекинга «notch на каждом моторе»: статический (режим 0), частота f1 у motors моторов
+function motors_gyro_ctx(f1, motors) {
+    const gyro = [{ FFT: { time: [1, 2, 3, 4, 5], average_sample_rate: RATE_HZ * SUB, x: [[0], [0], [0], [0], [0]] } }]
+    const tracking = [{ mode_value: 0, warnings: [], have_data: () => true, no_data_error: () => null,
+                        get_interpolated_target_freq: () => new Array(motors).fill(f1) }]
+    return { gyro, env: { filter_version: 2 }, tracking, range: [0, 10], sensor: 0 }
+}
+
+test('pidtune_predict: снятие notch третьей гармоники выше частоты Найквиста контура — без ложной непричинности, запас и перерегулирование как у прямой симуляции', () => {
+    // Как на логе пользователя (задача 8): notch на каждом из 4 моторов, гармоники 1 и 3 (75 и 225 Гц, полоса 18·n, 15 дБ);
+    // шаг 2 снимает третью (HMNCS 5 → 1). Третья гармоника — выше частоты Найквиста контура (200 Гц), отношение фильтров
+    // там большое и комплексное (≈ 3.5∠137°), и при редких манёврах с турбулентностью (T у 200 Гц — шум ≈ 0.02) прогноз
+    // всех вариантов выходил непричинным. Ещё — INS_GYRO_FILTER 40 → 20 (заметный сдвиг фазы у частоты среза)
+    const f1 = 75
+    const motors = 4
+    const notch1 = new Array(motors).fill({ notch: f1, bw: 18, att: 15 })
+    const notch3 = new Array(motors).fill({ notch: 3 * f1, bw: 54, att: 15 })
+    const plant_log = { ...PLANT_NORMAL, gyro_chain: [{ lpf: 40 }, ...notch1, ...notch3] }
+    const values_log = { INS_GYRO_FILTER: 40, INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 0, INS_HNTCH_FREQ: f1, INS_HNTCH_BW: 18, INS_HNTCH_ATT: 15,
+                         INS_HNTCH_HMNCS: 5 }
+    const m = measure(simulate(G0, { dur_s: 150, seed: 3, plant: plant_log, pause: 0.9, turb_dps2: 2000, noise_dps: 3 }), G0)
+    const quality = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true })
+    assert.equal(quality.ok, true, quality.reasons.join('; '))
+    const grid = pidtune_predict_grid(m.seg.rate_hz)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const pred_log = pidtune_predict(m.fir, c_log, c_log, null, m.seg.rate_hz)
+    const ctx = motors_gyro_ctx(f1, motors)
+    // Отклик объекта — один раз на объект (прямое ДПФ импульсной характеристики)
+    const responses = new Map()
+    const response = (plant) => {
+        if (!responses.has(plant)) {
+            responses.set(plant, plant_response(plant_pulse(plant), grid.freq))
+        }
+        return responses.get(plant)
+    }
+    const truth_pm = (c, plant) => pidtune_margins(grid.freq, cmul(c.C, response(plant)), pidtune_rules, { min_over_crossings: true }).pm_deg
+    const truth_log_pm = truth_pm(c_log, plant_log)
+    const changes = [
+        ['HMNCS 5 → 1', { ...values_log, INS_HNTCH_HMNCS: 1 }, [{ lpf: 40 }, ...notch1]],
+        ['INS_GYRO_FILTER 40 → 20', { ...values_log, INS_GYRO_FILTER: 20 }, [{ lpf: 20 }, ...notch1, ...notch3]],
+    ]
+    const p10 = pidtune_round(G0.kp * 1.1)
+    for (const [title, values_new, chain_new] of changes) {
+        const ratio = pidtune_gyro_ratio(values_log, values_new, ctx, grid.freq)
+        const plant_new = { ...PLANT_NORMAL, gyro_chain: chain_new }
+        if (title.startsWith('HMNCS')) {
+            // Без сглаживания — ложная непричинность (так было до исправления)
+            const raw = pidtune_predict(m.fir, c_log, c_log, ratio, m.seg.rate_hz, { ...pidtune_rules, gyro_ratio_full_x: Infinity })
+            assert.ok(raw.noncausal > pidtune_rules.noncausal_max, title + ': без сглаживания доля ' + raw.noncausal)
+        }
+        for (const [vn, v] of [['как в логе', LOG_GAINS], ['P +10 %', { P: p10, I: p10, D: G0.kd }]]) {
+            const c_new = pidtune_controller(v, FILTERS0, RATE_HZ, grid.freq)
+            const pred = pidtune_predict(m.fir, c_log, c_new, ratio, m.seg.rate_hz)
+            const what = title + ', ' + vn
+            assert.equal(pred.unstable, false, what + ': доля ' + pred.noncausal)
+            assert.ok(pred.noncausal < 1e-4, what + ': доля энергии до нуля времени ' + pred.noncausal)
+            // Правда — прямая симуляция контура с новыми фильтрами гироскопа и коэффициентами
+            const truth = pidtune_step_metrics(...Object.values(truth_step({ kp: v.P, ki: v.I, kd: v.D, fltd: FILTERS0.fltd }, plant_new)))
+            close_to(pred.metrics.overshoot_pct, truth.overshoot_pct, 3, what + ': перерегулирование, %')
+            close_to(pred.pm_deg, truth_pm(c_new, plant_new), 5, what + ': запас фазы, °')
+            if (vn == 'как в логе') {
+                // Изменение запаса фазы от фильтров — как у правды
+                close_to(pred.pm_deg - pred_log.pm_deg, truth_pm(c_new, plant_new) - truth_log_pm, 1.5, what + ': изменение запаса фазы')
+            }
+        }
+    }
 })

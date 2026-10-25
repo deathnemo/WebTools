@@ -116,6 +116,10 @@ const pidtune_rules = {
     // турбулентности, P ×2.5…×3 на грани устойчивости (0.003–0.34): отказ при сомнении. Устойчивый, но звенящий дольше
     // 3/4 буфера (7.7 с при 400 Гц) контур тоже отмечается — на практике то же самое
     noncausal_max: 1e-3,
+    // Поправка фильтров гироскопа в прогнозе — полностью до gyro_ratio_full_x × частоты среза лога (не выше половины
+    // частоты Найквиста), выше — плавно (приподнятый косинус) к 1 к частоте Найквиста лога [наше, задача 8: замер на
+    // логе пользователя — pidtune_predict]. Infinity — без сглаживания
+    gyro_ratio_full_x: 5,
 }
 
 // Оси шага: префикс параметров регулятора скорости и P углового контура (масштаб I в Rate Loop Only)
@@ -1283,6 +1287,19 @@ function pidtune_margins(freq, L, rules = pidtune_rules, options = {}) {
 // Отклик — обратное FFT T_new и накопленная сумма на 0…step_length_s (сетка — как у fir.step); метрики —
 // pidtune_step_metrics; частота среза и запасы — pidtune_margins(L_new). Нечисловые коэффициенты дают NaN в L и T,
 // метрики и запасы null — pidtune_flags отметят вариант.
+// Поправка фильтров гироскопа ratio применяется полностью до ratio_full_hz = gyro_ratio_full_x (5) × частоты среза лога
+// (L_log, не выше половины частоты Найквиста; нет частоты среза — половина частоты Найквиста), выше — плавно
+// (приподнятый косинус) сходит к 1 к частоте Найквиста лога. Зачем (задача 8, лог пользователя): отношение посчитано
+// по фильтрам на частоте гироскопа (≈ 2 кГц), а контур и КИХ — на частоте лога (400 Гц). У частоты Найквиста контура
+// оно комплексное и большое (снят notch третьей гармоники ≈ 233 Гц: 7.3∠63° на 200 Гц), а спектр контура там
+// действителен — разрыв даёт двусторонний «звон» импульсной характеристики, доля энергии до нуля 0.05–0.09, и все
+// варианты выходили «прогноз неустойчив». К тому же где G_log глубоко подавлял, T — шум, и обратный notch его раздувает.
+// На запас фазы и отклик влияет отношение у частоты среза и до нескольких её кратных, где |L| заметен; выше |L| ≪ 1.
+// Переход — широкий: само окно тоже ломает связь модуля и фазы, и узкое (5–10× частоты среза) или ограничение модуля
+// [0.5, 2] на том же логе дают 1e-3–1e-2 у INS_GYRO_FILTER 20 или 80. С широким переходом доля — до 1e-4 у всех
+// изменений фильтров на логе пользователя, запас фазы — тот же, перерегулирование — в пределах 0.5 пункта от «как есть»
+// (где оно считалось). Полное выключение notch (|R| ≈ 44 на 75 Гц, внутри полосы) так не лечится: T на частоте notch
+// лога — шум, прогноз «неустойчив или ненадёжен» — честно.
 // Неустойчивый вариант: обратное FFT T_new неустойчивого контура — не отклик, а периодический непричинный ряд
 // (ревью задачи 6: K 290, P ×3 — «0 %» при правде 316 %). Поэтому unstable — запас фазы первого пересечения
 // (pidtune_margins; поздние пересечения по измеренной T недостоверны) не больше 0 или импульсная характеристика прогноза
@@ -1295,8 +1312,8 @@ function pidtune_margins(freq, L, rules = pidtune_rules, options = {}) {
 // исключение), ratio — [re[], im[]] той же длины или null; rate_hz — частота лога (pidtune_segments). Страница (шаг 4)
 // строит c_new с FLTE и FLTD, принятыми на шаге 3, а c_log — с фильтрами лога (как и pidtune_controller_check).
 // → { freq, T (T_new), L (L_new) — [re[], im[]] на 0…rate_hz/2 (L[·][0] — Infinity или NaN: 0 Гц на бодэ не рисовать),
-// crossover_hz, pm_deg, gm_db, multiple_crossings, crossings (pidtune_margins), unstable, noncausal, step: { time, y }
-// | null, metrics | null } | null — нет КИХ или регулятора
+// crossover_hz, pm_deg, gm_db, multiple_crossings, crossings (pidtune_margins), unstable, noncausal, ratio_full_hz (без
+// поправки — null), step: { time, y } | null, metrics | null } | null — нет КИХ или регулятора
 function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rules) {
     if ((fir == null) || (c_log == null) || (c_new == null)) {
         return null
@@ -1324,6 +1341,32 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
         const d = br * br + bi * bi
         return [(ar * br + ai * bi) / d, (ai * br - ar * bi) / d]
     }
+    // Поправка фильтров гироскопа: полностью до ratio_full_hz (по частоте среза L_log), выше — плавно к 1 на Найквисте
+    let gyro = null
+    let ratio_full_hz = null
+    if (ratio != null) {
+        const L_log = [new Array(half + 1).fill(NaN), new Array(half + 1).fill(NaN)]
+        for (let k = 1; k <= half; k++) {
+            const tr = spectrum[2 * k]
+            const ti = (k == half) ? 0 : spectrum[2 * k + 1]
+            const phi = cdiv(c_log.FF[0][k], c_log.FF[1][k], c_log.C[0][k], c_log.C[1][k])
+            const l = cdiv(tr, ti, 1 + phi[0] - tr, phi[1] - ti)
+            L_log[0][k] = l[0]
+            L_log[1][k] = l[1]
+        }
+        const fc_log = pidtune_margins(grid.freq, L_log, rules).crossover_hz
+        const nyquist = grid.freq[half]
+        ratio_full_hz = !Number.isFinite(rules.gyro_ratio_full_x) ? Infinity
+            : ((fc_log != null) ? Math.min(rules.gyro_ratio_full_x * fc_log, nyquist / 2) : nyquist / 2)
+        gyro = [new Array(half + 1), new Array(half + 1)]
+        for (let k = 0; k <= half; k++) {
+            const f = grid.freq[k]
+            const w = (f <= ratio_full_hz) ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (f - ratio_full_hz) / (nyquist - ratio_full_hz))
+            gyro[0][k] = 1 + w * (ratio[0][k] - 1)
+            gyro[1][k] = w * ratio[1][k]
+        }
+    }
+
     const T_new = [new Array(half + 1), new Array(half + 1)]
     const L = [new Array(half + 1), new Array(half + 1)]
     let dc_by_continuity = false
@@ -1332,7 +1375,7 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
         const ti = ((k == 0) || (k == half)) ? 0 : spectrum[2 * k + 1]
         const cl = [c_log.C[0][k], c_log.C[1][k]]
         const cn = [c_new.C[0][k], c_new.C[1][k]]
-        const g = (ratio != null) ? [ratio[0][k], ratio[1][k]] : [1, 0]
+        const g = (gyro != null) ? [gyro[0][k], gyro[1][k]] : [1, 0]
         let R
         let phi_log
         let phi_new
@@ -1432,6 +1475,7 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
         crossings: margins.crossings,
         unstable: unstable,
         noncausal: noncausal,
+        ratio_full_hz: ratio_full_hz,
         step: step,
         metrics: metrics,
     }
@@ -1537,7 +1581,8 @@ function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) {
 //   текста, неполным он не считается. Текст — по признаку: запас первого пересечения не больше 0 — «контур неустойчив
 //   (запас фазы …)»; иначе (непричинный отклик) — «прогноз неустойчив — вариант на грани устойчивости или прогноз
 //   ненадёжен»: этот признак срабатывает и у вариантов, устойчивых по правде, когда прогноз ненадёжен (большое
-//   изменение D, мало возбуждения на высоких частотах) — отказ при сомнении;
+//   изменение D или фильтров гироскопа — например, выключенный notch, мало возбуждения на высоких частотах) — отказ при
+//   сомнении;
 //   low_pm — запас фазы ниже pm_min_deg;
 //   pm_drop — запас фазы хуже лога больше чем на pm_max_drop_deg;
 //   overshoot — перерегулирование в прогнозе выше overshoot_pred_max_pct;
@@ -1562,8 +1607,8 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) {
     const reasons = []
     if (unstable) {
         reasons.push((Number.isFinite(pm) && (pm <= 0)) ? "контур неустойчив (запас фазы " + pidtune_beyond(pm, 0, 1) + "°)"
-            : "прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D, мало возбуждения " +
-              "на высоких частотах)")
+            : "прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D или фильтров " +
+              "гироскопа, мало возбуждения на высоких частотах)")
     }
     if (flags.incomplete) {
         const missing = []

@@ -288,7 +288,8 @@ function pidtune_predict_grid(rate_hz, rules = pidtune_rules) { … }
 // частот), поздние — справка (главное значение фазы); options.min_over_crossings — наименьший по всем (точная L)
 // → { crossover_hz, pm_deg, gm_db, multiple_crossings, crossings: [{ freq_hz, pm_deg }] }
 function pidtune_margins(freq, L, rules = pidtune_rules, options = {}) { … }
-// Прогноз: T — FFT КИХ на сетке pidtune_predict_grid; φ = FF/C; R = (C_new/C_log)·ratio; L_new = R·T/(1 + φ_log − T);
+// Прогноз: T — FFT КИХ на сетке pidtune_predict_grid; φ = FF/C; R = (C_new/C_log)·ratio (ratio — полностью до 5× частоты
+// среза лога, выше плавно к 1 к частоте Найквиста: ratio_full_hz); L_new = R·T/(1 + φ_log − T);
 // T_new = R·T·(1 + φ_new)/(1 + φ_log − T + R·T); предел на 0 Гц (I только у лога — по непрерывности); неустойчив —
 // запас первого пересечения ≤ 0 или доля энергии отклика в последней четверти буфера > noncausal_max (тогда step
 // и metrics — null). c_log, c_new — на той же сетке (длина и
@@ -318,7 +319,7 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) { … }
 - `pm_min_deg: 30`, `pm_max_drop_deg: 5`, `overshoot_pred_max_pct: 20` — решение пользователя 25.10.2026;
 - `coherence_min: 0.5` **[наше]**;
 - `controller_check: { band_hz: [2, 20], mag_err_max: 0.1, phase_err_max_deg: 10, window: 1024, window_step: 64 }` **[наше]**;
-- после реализации: `round_digits: 4` (решение координатора по ревью задачи 5), `predict_resolution_hz: 0.1`, `crossover_min_hz: 0.5`, `noncausal_max: 1e-3` (ревью задачи 6) **[наше]**.
+- после реализации: `round_digits: 4` (решение координатора по ревью задачи 5), `predict_resolution_hz: 0.1`, `crossover_min_hz: 0.5`, `noncausal_max: 1e-3` (ревью задачи 6), `gyro_ratio_full_x: 5` (задача 8: поправка фильтров без ложной непричинности) **[наше]**.
 
 **Тесты:**
 
