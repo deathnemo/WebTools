@@ -11,6 +11,10 @@ const check_rules = {
     hover_learn_s: 30,              // с висения для обучения MOT_THST_HOVER: постоянная времени 10 с, ~95 % за 30 с [код, AP_MOTORS_THST_HOVER_TC]
     log_bitmask_pid: 12,           // номер бита PID в LOG_BITMASK [код, ArduCopter/defines.h MASK_LOG_PID]
     log_bitmask_imu_raw: 19,        // номер бита IMU_RAW [код, MASK_LOG_IMU_RAW]
+    log_bitmask_attitude_fast: 0,   // номер бита ATTITUDE_FAST [код, MASK_LOG_ATTITUDE_FAST]; без него Copter пишет PIDx
+                                    // и RATE с 10 Гц [код, ArduCopter/Copter.cpp ten_hz_logging_loop, rate_thread.cpp medium_logging_rate]
+    pid_log_min_rate_hz: 100,       // Гц: ниже отклик на ступеньку шага 4 не считается [наше; шумовая оценка метода PIDReview —
+                                    // до 25 Гц, дефект upstream 5, PID_STEP_MIN_RATE в core/pid.js]
 }
 
 // info — из log_info, params — из log_params, vibe — из vibe_summary (может быть null).
@@ -28,12 +32,24 @@ function run_checks(info, params, vibe) {
         add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает только Copter", "Загрузите лог ArduCopter")
     }
 
-    // Сообщения PID
+    // Сообщения PID и их частота (info.pid_log_rate — PIDR, без него RATE): ниже pid_log_min_rate_hz отклик на ступеньку
+    // шага 4 не считается
     const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
-    if (m.pid) {
-        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть: доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
+    const rate = info.pid_log_rate ?? null
+    const slow = (rate != null) && (rate.hz < r.pid_log_min_rate_hz)
+    // Частота словами: целые герцы, а ниже порога, но с округлением до него — с десятыми, чтобы 99.6 не читалось как «100»
+    const near = slow && (Math.round(rate.hz) >= r.pid_log_min_rate_hz)
+    const hz_text = (rate == null) ? "" : (near ? rate.hz.toFixed(1) : String(Math.round(rate.hz)))
+    const slow_text = slow ? rate.message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
+    const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
+    if (m.pid && slow) {
+        add("pid_log", "warn", "Сообщения PID", "PIDR/PIDP/PIDY есть, но " + slow_text,
+            "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
+    } else if (m.pid) {
+        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((rate != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
     } else if (m.rate) {
-        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: на шаге 4 не будет компонент P/I/D", pid_fix)
+        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: на шаге 4 не будет компонент P/I/D" + (slow ? "; " + slow_text : ""),
+            slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
     } else {
         add("pid_log", "fail", "Сообщения PID", "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
     }

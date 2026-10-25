@@ -19,17 +19,33 @@
 // без годных окон показывает прежнее среднее. Поэтому окна PIDReview определяются по трассе «все»: окон нет — мастер
 // обязан вернуть null, а среднее PIDReview не сравнивается (если в нём остались данные, это печатается).
 //
-// Эталон — PIDReview как есть: исправлений дефектов upstream в мастере пока нет. Когда задача 4 плана
-// docs/plans/2026-10-25-tune-wizard-stage4.md внесёт их в core/pid.js, те же исправления подменяются в коде PIDReview
-// до загрузки лога (patch_pidreview, по образцу patch_filterreview в tests/tunewizard-compare.cjs).
+// Эталон точного сравнения — PIDReview с теми же исправлениями дефектов upstream, что внесены в мастер (задача 4 плана
+// docs/plans/2026-10-25-tune-wizard-stage4.md, шапка core/pid.js, раздел 2 дизайна этапа 4): до загрузки лога в исходном
+// тексте функций PIDReview заменяются строки дефектов 1 и 2 (split_into_batches), 3 и 5 (redraw_step) и 6 (load) —
+// patch_pidreview, по образцу patch_filterreview в tests/tunewizard-compare.cjs; каждая замена обязана сработать заданное
+// число раз, иначе upstream изменился и тест надо пересмотреть. Дефект 6 на логах, которые PIDReview открывает без ошибок,
+// не срабатывает: без PARM PIDReview как есть падает, и тест останавливается раньше сравнения. Дефект 4 не исправляется
+// (раздел 3 дизайна), дефект 7 — только интерфейс.
+//
+// Кроме того, мастер сравнивается с PIDReview как есть (upstream): печатается, какие массивы совпадают, какие отличаются,
+// насколько и почему. Какие исправления действуют на логе, определяется по данным самих PIDReview (наборы параметров,
+// пакеты, частота). Дефект 2 действует всегда: каждый пакет теряет последний отсчёт (пакет до конца лога — два), частота
+// завышена. Если действует только он, проверяется точно: пакеты PIDReview с исправлениями на отсчёт длиннее (на два —
+// пакет до конца лога) с тем же началом, а частота пакета PIDReview как есть равна формуле upstream по отсчётам пакета
+// с исправлениями; при тех же числе окон, длине отклика и бине шумовой оценки окна и среднее совпадают, ось времени —
+// ровно ×k, средняя частота FFT — ×1/k (k — отношение средних частот как есть и с исправлениями). Длина отклика
+// (ceil(0.5·частота)) и бин шумовой оценки (первый выше 25 Гц) могут смениться, если частота у порога: при 400 Гц
+// и окне 512 бин 32 — ровно 25 Гц. Тогда, как и при действующих дефектах 1, 3 или 5, — только отчёт (точность
+// обеспечивает сравнение с эталоном). Логика правил (upstream_plan, check_upstream) без браузера проверяется
+// в tests/tunewizard-pid-compare-rules.test.cjs.
 // Нужны те же лог, браузер и python, что для tests/tunewizard-compare.cjs: CHROME_PATH — путь к chrome.exe (без него
 // Playwright берёт свой Chromium, если он установлен); без лога тест пропускается.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
-// Допуски — общие со сравнением с FilterReview
-const { tolerance, time_tolerance } = require('./tunewizard-compare.cjs')
+// Допуски и отклонение по общему началу — общие со сравнением с FilterReview
+const { tolerance, time_tolerance, deviation } = require('./tunewizard-compare.cjs')
 
 const repo = path.resolve(__dirname, '..')
 const logs_dir = path.join(repo, 'TuneWizard', 'logs')
@@ -38,6 +54,9 @@ const port = 8793
 const WINDOW_SIZE = 512
 // Оси PID: id сообщения = суффикс радио type_<id> PIDReview = id[0] оси load_pid
 const AXES = ['PIDR', 'PIDP', 'PIDY']
+// Шаг окон отклика — 1/16 окна (redraw_step); ниже этой частоты отклик не считается (дефект 5, PID_STEP_MIN_RATE)
+const STEP_SPACING_DIVISOR = 16
+const MIN_RATE = 100
 
 function find_log() {
     if (process.env.TUNEWIZARD_LOG) {
@@ -90,14 +109,89 @@ function patch_pidreview(page) {
             applied.push(name + ' (дефект ' + defect + ')')
         }
 
-        // [имя функции, номер дефекта, edits]. Пусто: эталон — PIDReview как есть. Задача 4 добавит сюда те же
-        // исправления, что внесёт в core/pid.js
-        const fixes = []
+        // Дефект 3: сквозное время окон всех пакетов набора — вставка в цикл по наборам redraw_step, как в core/pid.js
+        const window_time_block = [
+            '',
+            '        var window_time = []',
+            '        var batch_offset = new Array(num_batch)',
+            '        for (let i=0;i<num_batch;i++) {',
+            '            batch_offset[i] = window_time.length',
+            '            const num_points = PID.sets[j][i].Tar.length',
+            '            if (num_points < window_size) {',
+            '                continue',
+            '            }',
+            '            const num_windows = Math.floor((num_points-window_size)/window_spacing) + 1',
+            '            for (let k=0;k<num_windows;k++) {',
+            '                window_time.push((k * window_spacing + window_size * 0.5) * sample_time + PID.sets[j][i].time[0])',
+            '            }',
+            '        }',
+        ].join('\n')
+
+        // [имя функции, номер дефекта, edits] — те же исправления, что в core/pid.js (места помечены там
+        // «исправление дефекта upstream N»)
+        const fixes = [
+            // Дефект 1 (PIDReview 1401–1403, 1427): отсчёты до начала набора в пакет не входят
+            ['split_into_batches', 1, [
+                [/(if \(time\[j\] < set_start\) \{\s*continue\s*\})/, '$1\n        if (time[batch_start] < set_start) {\n            batch_start = j\n            continue\n        }', 1],
+            ]],
+            // Дефект 2 (PIDReview 1412, 1417): batch_end — конец среза не включая (в конце лога — и последний отсчёт),
+            // частота — по числу интервалов
+            ['split_into_batches', 2, [
+                [/if \(\(\(time\[j\] - time\[j-1\]\)\*count\) > \(\(time\[j\] - time\[batch_start\]\) \* 5\) \|\| \(j == \(len - 1\)\) \|\| past_set_end\) \{/,
+                 'const gap = ((time[j] - time[j-1])*count) > ((time[j] - time[batch_start]) * 5)\n        if (gap || (j == (len - 1)) || past_set_end) {\n' +
+                 '            const batch_end = ((j == (len - 1)) && !gap && !past_set_end) ? len : j', 1],
+                [/if \(count >= 64\)/, 'if ((batch_end - batch_start) >= 64)', 1],
+                [/1 \/ \(\(time\[j-1\] - time\[batch_start\]\) \/ count\)/, '1 / ((time[batch_end-1] - time[batch_start]) / (batch_end - batch_start - 1))', 1],
+                [/batch_end: j-1\}/, 'batch_end: batch_end}', 1],
+            ]],
+            // Дефект 3 (PIDReview 1129–1130): индексы окон — по сквозному времени окон набора
+            ['redraw_step', 3, [
+                [/(const plot_index = j\*2)/, '$1' + window_time_block, 1],
+                [/find_start_index\(fft_time\)/, 'Math.max(find_start_index(window_time) - batch_offset[i], 0)', 1],
+                [/find_end_index\(fft_time\)\+1/, 'Math.min(find_end_index(window_time)+1 - batch_offset[i], FFT_res.center.length)', 1],
+            ]],
+            // Дефект 5 (PIDReview 1082–1100): при частоте ниже 100 Гц отклик не считается
+            ['redraw_step', 5, [
+                [/(if \(valid_sets == 0\) \{\s*Plotly\.redraw\("step_plot"\)\s*return\s*\})/,
+                 '$1\n    if (PID.sets.FFT.average_sample_rate < 100) {\n        Plotly.redraw("step_plot")\n        return\n    }', 1],
+            ]],
+            // Дефект 6 (PIDReview 1511, 1525): без PARM — сообщение вместо TypeError
+            ['load', 6, [
+                [/(const PARM = log\.get\('PARM'\))/, '$1\n    if (PARM == null) {\n        alert("No PARM messages in log")\n        return\n    }', 1],
+            ]],
+        ]
         for (const [name, defect, edits] of fixes) {
             patch(name, defect, edits)
         }
         return applied
     })
+}
+
+// Сведения PIDReview об осях AXES для отчёта о расхождениях с PIDReview как есть: наборы параметров (границы),
+// пакеты по наборам (длина, частота, время первого, предпоследнего и последнего отсчёта), конец данных оси, средняя
+// частота и окно FFT, бин шумовой оценки отклика (первый выше 25 Гц, redraw_step). Строкой JSON, как wizard_step
+function pidreview_info(page) {
+    return page.evaluate((axes) => {
+        const out = {}
+        for (const id of axes) {
+            const PID = PID_log_messages.find((p) => (p.id.length == 1) && (p.id[0] === id))
+            if ((PID == null) || !PID.have_data) {
+                out[id] = { have_data: false }
+                continue
+            }
+            const batch = (b) => ({ length: b.time.length, rate: b.sample_rate, t0: b.time[0], t_prev: b.time[b.time.length - 2], t1: b.time[b.time.length - 1] })
+            out[id] = {
+                have_data: true,
+                end_time: PID.end_time,
+                sets: PID.params.sets.map((s) => ({ start: s.start_time, end: s.end_time })),
+                batches: Array.from(PID.sets, (set) => (set == null) ? null : set.map(batch)),
+                rate: PID.sets.FFT?.average_sample_rate ?? null,
+                window_size: PID.sets.FFT?.window_size ?? null,
+                lpf_index: PID.sets.FFT?.bins.findIndex((x) => x > 25) ?? null,
+            }
+        }
+        return JSON.stringify(out, (key, v) => ((typeof v === 'number') && !Number.isFinite(v)) ? String(v) : v)
+    }, AXES)
 }
 
 // Мастер: интервал по умолчанию и отклик на ступеньку осей AXES по всем наборам параметров. Результат — строкой JSON
@@ -255,6 +349,240 @@ function compare_axis(id, pr, wz, notes) {
     return { results, windows }
 }
 
+// PIDReview: открыть, при patched — применить исправления, загрузить лог, задать окно WINDOW_SIZE и интервал
+// interval = { start, end } (строки полей), «Calculate», снять отклик осей AXES и сведения о пакетах; страница
+// закрывается, чтобы разобранные логи не копились в памяти. → { patches, own_interval, reference, info }
+async function run_pidreview(browser, server, log_path, problems, patched, interval) {
+    const name = patched ? 'PIDReview с исправлениями' : 'PIDReview'
+    const pr = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
+    pr.on('pageerror', (e) => problems.push(name + ' pageerror: ' + e.message))
+    pr.on('dialog', (d) => { problems.push(name + ' alert: ' + d.message()); d.dismiss() })
+    await wait_for_server(pr, 'http://127.0.0.1:' + port + '/PIDReview/', server)
+    const patches = patched ? await patch_pidreview(pr) : []
+    await pr.setInputFiles('#fileItem', log_path)
+    // readFile ставит заголовок после окончания load
+    await pr.waitForFunction(() => document.title.startsWith('PID Review: '), null, { timeout: 180000 })
+    await wait_overlay(pr)
+    const own_interval = [await pr.inputValue('#TimeStart'), await pr.inputValue('#TimeEnd')]
+    // Окно — по умолчанию 512; другое значение задаётся напрямую (onchange поля шагает к соседней степени двойки)
+    await pr.evaluate((size) => {
+        const input = document.getElementById('FFTWindow_size')
+        if (input.value !== size) {
+            input.value = size
+            clear_calculation()
+        }
+    }, String(WINDOW_SIZE))
+    // Интервал: find_start_index/find_end_index читают поля при расчёте; change включает кнопку «Calculate»
+    await pr.fill('#TimeStart', interval.start)
+    await pr.fill('#TimeEnd', interval.end)
+    await pr.dispatchEvent('#TimeStart', 'change')
+    await pr.dispatchEvent('#TimeEnd', 'change')
+    assert.deepEqual([await pr.inputValue('#TimeStart'), await pr.inputValue('#TimeEnd')], [interval.start, interval.end], 'интервал ' + name + ' равен интервалу мастера')
+    await pr.click('#calculate')
+    await wait_overlay(pr)
+    // calculate() выключает кнопку: расчёт выполнен
+    assert.equal(await pr.isDisabled('#calculate'), true, name + ': «Calculate» выполнен')
+    assert.equal(await pr.inputValue('#FFTWindow_size'), String(WINDOW_SIZE), 'окно FFT ' + name)
+
+    // Оси: выбрать радио (смена оси — setup_axis с перерисовкой) и снять отклик
+    const reference = {}
+    for (const id of AXES) {
+        if (await pr.isDisabled('#type_' + id)) {
+            reference[id] = null
+            continue
+        }
+        if (!(await pr.isChecked('#type_' + id))) {
+            await pr.check('#type_' + id)
+            await wait_overlay(pr)
+        }
+        reference[id] = JSON.parse(await snapshot_pidreview(pr))
+        assert.equal(reference[id].id, id, name + ' показывает ось ' + id)
+    }
+    const info = JSON.parse(await pidreview_info(pr))
+    await pr.close()
+    return { patches, own_interval, reference, info }
+}
+
+// Пакеты набора, у которых все окна отклика (шаг окно/16, центр — середина окна) вне интервала [t0, t1]: у них
+// PIDReview как есть брал одно окно (дефект 3). info — элемент pidreview_info. → [{ set, batch }]
+function outside_batches(info, interval) {
+    const out = []
+    const W = info.window_size
+    const spacing = Math.round(W / STEP_SPACING_DIVISOR)
+    info.batches.forEach((set, j) => {
+        (set ?? []).forEach((b, i) => {
+            if (b.length < W) {
+                return
+            }
+            const num = Math.floor((b.length - W) / spacing) + 1
+            const first = b.t0 + (W / 2) / info.rate
+            const last = b.t0 + ((num - 1) * spacing + W / 2) / info.rate
+            if ((last < interval[0]) || (first > interval[1])) {
+                out.push({ set: j, batch: i })
+            }
+        })
+    })
+    return out
+}
+
+// Частота пакета PIDReview как есть по отсчётам пакета с исправлениями (fb): count / (time[j − 1] − time[batch_start]),
+// где j — отсчёт, на котором upstream резал пакет. Пакет на отсчёт длиннее — j − 1 = последний отсчёт fb, count = длина fb;
+// на два (пакет до конца лога) — j = последний отсчёт лога, j − 1 = предпоследний fb, count = длина fb − 1
+function upstream_batch_rate(fb, grow) {
+    return (grow == 1) ? 1 / ((fb.t1 - fb.t0) / fb.length) : 1 / ((fb.t_prev - fb.t0) / (fb.length - 1))
+}
+
+// План сверки с PIDReview как есть — без браузера (его проверяет tests/tunewizard-pid-compare-rules.test.cjs).
+// ctx = { up, fix, wizard, interval: [t0, t1] }: up / fix — результаты run_pidreview для PIDReview как есть и с исправлениями
+// (нужны reference и info), wizard — результат wizard_step.
+// Возвращает { active, inactive, checks, items }: действующие исправления [{ defect, axes }], недействующие [{ defect, why }],
+// проверки механизма дефекта 2 ({ ok, line }) и массивы с правилами для check_upstream
+function upstream_plan(ctx) {
+    const { up, fix, wizard, interval } = ctx
+    const axes = AXES.filter((id) => (up.info[id]?.have_data === true) && (fix.info[id]?.have_data === true) && wizard.axes[id].have_data)
+
+    // Какие исправления действуют — по данным самих PIDReview
+    const found = {
+        // пакет набора начинается раньше набора: отсчёты разрыва между наборами
+        1: axes.filter((id) => up.info[id].batches.some((set, j) => (set ?? []).some((b) => b.t0 < up.info[id].sets[j].start))),
+        // каждый пакет теряет последний отсчёт
+        2: axes,
+        3: axes.filter((id) => outside_batches(up.info[id], interval).length > 0),
+        5: axes.filter((id) => (up.info[id].rate != null) && (up.info[id].rate < MIN_RATE)),
+    }
+    const active = Object.entries(found).filter(([, list]) => list.length > 0).map(([defect, list]) => ({ defect: Number(defect), axes: list }))
+    const why_not = {
+        1: axes.every((id) => up.info[id].sets.length == 1) ? 'один набор параметров' : 'пакеты наборов начинаются в своих границах',
+        3: 'пакетов целиком вне интервала нет',
+        5: 'частота PID не ниже ' + MIN_RATE + ' Гц',
+    }
+    const inactive = [...Object.entries(why_not).filter(([defect]) => found[defect].length == 0).map(([defect, why]) => ({ defect: Number(defect), why })),
+                      { defect: 6, why: 'PARM в логе есть (без него PIDReview как есть падает раньше сравнения)' }]
+    const only2 = (active.length == 1) && (active[0].defect == 2)
+
+    // Механизм дефекта 2 — при нём одном: пакеты те же с тем же началом, на отсчёт длиннее (до конца лога — на два),
+    // частота пакета как есть — по формуле upstream из отсчётов пакета с исправлениями. Заодно — что ещё сменилось у оси
+    const checks = []
+    const changed = {}
+    for (const id of axes) {
+        const u = up.info[id]
+        const f = fix.info[id]
+        changed[id] = []
+        if (!only2) {
+            continue
+        }
+        const lengths = []
+        const rates = []
+        let ok = (u.batches.length == f.batches.length)
+        u.batches.forEach((set, j) => {
+            const fset = f.batches[j]
+            if ((set == null) || (fset == null) || (set.length != fset.length)) {
+                ok &&= (set == null) && (fset == null)
+                return
+            }
+            set.forEach((ub, i) => {
+                const fb = fset[i]
+                const grow = fb.length - ub.length
+                const expected = (fb.t1 === f.end_time) ? 2 : 1
+                const rate = upstream_batch_rate(fb, grow)
+                ok &&= (grow == expected) && (fb.t0 === ub.t0) && (Math.abs(rate - ub.rate) <= 1e-12 * ub.rate)
+                lengths.push(ub.length + ' → ' + fb.length + ' отсчётов' + ((expected == 2) ? ' (+2, до конца лога)' : ''))
+                rates.push(ub.rate.toFixed(7) + ' → ' + fb.rate.toFixed(7) + ' Гц')
+            })
+        })
+        checks.push({ ok, line: id + ': пакеты ' + lengths.join(', ') + ', частота пакета ' + rates.join(', ') +
+            (ok ? ' — частота PIDReview как есть равна формуле upstream по отсчётам пакета с исправлениями (дефект 2)' : ' — не объясняется дефектом 2') })
+        if (!ok) {
+            changed[id].push('пакеты')
+        }
+        if (u.lpf_index !== f.lpf_index) {
+            changed[id].push('бин шумовой оценки (' + u.lpf_index + ' → ' + f.lpf_index + ')')
+        }
+        const pr_up = up.reference[id]
+        const pr_fix = fix.reference[id]
+        for (let j = 0; j < Math.min(pr_up.sets.length, pr_fix.sets.length); j++) {
+            if (pr_up.sets[j].windows.length !== pr_fix.sets[j].windows.length) {
+                changed[id].push('число окон набора ' + (j + 1) + ' (' + pr_up.sets[j].windows.length + ' → ' + pr_fix.sets[j].windows.length + ')')
+            }
+            const len_up = pr_up.sets[j].mean_x?.length ?? 0
+            const len_fix = pr_fix.sets[j].mean_x?.length ?? 0
+            if ((pr_up.sets[j].windows.length > 0) && (pr_fix.sets[j].windows.length > 0) && (len_up !== len_fix)) {
+                changed[id].push('длину отклика набора ' + (j + 1) + ' (' + len_up + ' → ' + len_fix + ')')
+            }
+        }
+    }
+
+    // Правило массива: дефект 2 один и у оси ничего, кроме частоты, не сменилось — окна и среднее совпадают, время ×k,
+    // средняя частота ×1/k; иначе — отчёт
+    const why = {
+        rate: 'дефект 2 — частота пакета по числу интервалов',
+        time: 'дефект 2 — шаг времени отклика 1/частота',
+        other: 'дефекты ' + active.map((a) => a.defect).join(', ') + ' — проверено точным сравнением с PIDReview с исправлениями',
+    }
+    // what — rate или time (причина правила scale), k — его множитель
+    const rule = (id, what = null, k = null) => {
+        if (!only2) {
+            return { rule: { kind: 'report' }, reason: why.other }
+        }
+        if (changed[id].length > 0) {
+            return { rule: { kind: 'report' }, reason: 'дефект 2 сменил ' + changed[id].join(', ') + ' — проверено точным сравнением с PIDReview с исправлениями' }
+        }
+        return (what == null) ? { rule: { kind: 'same' }, reason: '' } : { rule: { kind: 'scale', k }, reason: why[what] }
+    }
+
+    const items = []
+    for (const id of axes) {
+        const u = up.info[id]
+        const f = fix.info[id]
+        const w = wizard.axes[id]
+        items.push({ name: id + ' · средняя частота FFT', up: [u.rate], wz: [w.rate], ...rule(id, 'rate', f.rate / u.rate) })
+        const pr_up = up.reference[id]
+        for (let j = 0; j < Math.min(pr_up.sets.length, w.sets.length); j++) {
+            const p = pr_up.sets[j]
+            const s = w.sets[j]
+            const label = id + ' · набор ' + (j + 1)
+            items.push({ name: label + ' · окон', up: [p.windows.length], wz: [(s == null) ? 0 : s.windows.length], ...rule(id) })
+            if ((p.windows.length == 0) || (s == null)) {
+                continue
+            }
+            items.push({ name: label + ' · время', up: p.mean_x, wz: s.time, abs: time_tolerance, ...rule(id, 'time', u.rate / f.rate) })
+            items.push({ name: label + ' · среднее', up: p.mean_y, wz: s.mean, ...rule(id) })
+            items.push({ name: label + ' · окна (' + p.windows.length + ')', up: p.windows.flat(), wz: s.windows.flat(), ...rule(id) })
+        }
+    }
+    return { active, inactive, checks, items }
+}
+
+// Проверка массива мастера против PIDReview как есть по правилу item.rule:
+//   same — совпадает; scale — PIDReview × k (отличие сверх допуска печатается, без него — «совпадает в пределах допуска»);
+//   report — только отчёт. item.abs — абсолютный допуск (ось времени). Возвращает { ok, same, line } — строку для вывода
+function check_upstream(item) {
+    const { name, up, wz, rule, reason, abs = null } = item
+    if ((up == null) || (wz == null)) {
+        return { ok: false, same: false, line: name + ': нет данных (PIDReview ' + (up == null ? 'null' : up.length) + ', мастер ' + (wz == null ? 'null' : wz.length) + ')' }
+    }
+    if (rule.kind == 'same') {
+        const r = compare_arrays(name, up, wz, abs)
+        return { ok: r.ok, same: r.ok, line: r.ok ? name : r.mismatch }
+    }
+    const dev = deviation(up, wz, abs)
+    if (rule.kind == 'scale') {
+        const r = compare_arrays(name + ' (PIDReview × ' + rule.k + ')', up.map((v) => (typeof v === 'number') ? v * rule.k : v), wz, abs)
+        if (!r.ok) {
+            return { ok: false, same: false, line: r.mismatch }
+        }
+        if ((dev.differ == 0) && (up.length == wz.length)) {
+            return { ok: true, same: true, line: name + ' — совпадает в пределах допуска (×' + rule.k + ')' }
+        }
+        return { ok: true, same: false, line: name + ' — отличается (до ' + dev.text + ', ×' + rule.k + '): ' + reason }
+    }
+    if ((dev.differ == 0) && (up.length == wz.length)) {
+        return { ok: true, same: true, line: name + ' — совпадает' }
+    }
+    const length = (up.length == wz.length) ? '' : 'длина ' + up.length + ' → ' + wz.length + ', '
+    return { ok: true, same: false, line: name + ' — отличается (' + length + 'позиций ' + dev.differ + ' из ' + dev.len + ', до ' + dev.text + '): ' + reason }
+}
+
 async function main() {
     const { chromium } = require('playwright')
     const log_path = find_log()
@@ -286,53 +614,12 @@ async function main() {
         assert.ok(wizard.end > wizard.start, 'интервал мастера по умолчанию: ' + wizard.start + '–' + wizard.end + ' с')
         const interval = { start: String(wizard.start), end: String(wizard.end) }
 
-        // 2. PIDReview: исправления (пока нет), лог, интервал мастера, окно 512, «Calculate»
-        const pr = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
-        pr.on('pageerror', (e) => problems.push('PIDReview pageerror: ' + e.message))
-        pr.on('dialog', (d) => { problems.push('PIDReview alert: ' + d.message()); d.dismiss() })
-        await wait_for_server(pr, 'http://127.0.0.1:' + port + '/PIDReview/', server)
-        const patches = await patch_pidreview(pr)
-        await pr.setInputFiles('#fileItem', log_path)
-        // readFile ставит заголовок после окончания load
-        await pr.waitForFunction(() => document.title.startsWith('PID Review: '), null, { timeout: 180000 })
-        await wait_overlay(pr)
-        const pr_default = [await pr.inputValue('#TimeStart'), await pr.inputValue('#TimeEnd')]
-        // Окно — по умолчанию 512; другое значение задаётся напрямую (onchange поля шагает к соседней степени двойки)
-        await pr.evaluate((size) => {
-            const input = document.getElementById('FFTWindow_size')
-            if (input.value !== size) {
-                input.value = size
-                clear_calculation()
-            }
-        }, String(WINDOW_SIZE))
-        // Интервал: find_start_index/find_end_index читают поля при расчёте; change включает кнопку «Calculate»
-        await pr.fill('#TimeStart', interval.start)
-        await pr.fill('#TimeEnd', interval.end)
-        await pr.dispatchEvent('#TimeStart', 'change')
-        await pr.dispatchEvent('#TimeEnd', 'change')
-        assert.deepEqual([await pr.inputValue('#TimeStart'), await pr.inputValue('#TimeEnd')], [interval.start, interval.end], 'интервал PIDReview равен интервалу мастера')
-        await pr.click('#calculate')
-        await wait_overlay(pr)
-        // calculate() выключает кнопку: расчёт выполнен
-        assert.equal(await pr.isDisabled('#calculate'), true, '«Calculate» выполнен')
-        assert.equal(await pr.inputValue('#FFTWindow_size'), String(WINDOW_SIZE), 'окно FFT PIDReview')
+        // 2. PIDReview с исправлениями — эталон точного сравнения; затем PIDReview как есть. Интервал мастера, окно 512
+        const fix = await run_pidreview(browser, server, log_path, problems, true, interval)
+        const up = await run_pidreview(browser, server, log_path, problems, false, interval)
+        const reference = fix.reference
 
-        // 3. Оси: выбрать радио (смена оси — setup_axis с перерисовкой) и снять отклик
-        const reference = {}
-        for (const id of AXES) {
-            if (await pr.isDisabled('#type_' + id)) {
-                reference[id] = null
-                continue
-            }
-            if (!(await pr.isChecked('#type_' + id))) {
-                await pr.check('#type_' + id)
-                await wait_overlay(pr)
-            }
-            reference[id] = JSON.parse(await snapshot_pidreview(pr))
-            assert.equal(reference[id].id, id, 'PIDReview показывает ось ' + id)
-        }
-
-        // 4. Поэлементное сравнение
+        // 3. Поэлементное сравнение с PIDReview с исправлениями
         assert.deepEqual(problems, [], 'ошибки страниц')
         const notes = []
         const summary = []
@@ -365,19 +652,49 @@ async function main() {
         const count = all_results.reduce((sum, r) => sum + r.count, 0)
         const max_rel = all_results.reduce((max, r) => Math.max(max, r.max_rel), 0)
         const max_abs = all_results.reduce((max, r) => Math.max(max, r.max_abs), 0)
+        let failed_total = 0
         if (failed.length > 0) {
-            console.error('tunewizard-pid-compare: расхождений с PIDReview ' + failed.length + ' из ' + all_results.length + ' массивов; первое: ' + failed[0].mismatch)
+            console.error('tunewizard-pid-compare: расхождений с PIDReview с исправлениями ' + failed.length + ' из ' + all_results.length + ' массивов; первое: ' + failed[0].mismatch)
             for (const r of failed.slice(1, 6)) {
                 console.error('  ' + r.mismatch)
             }
+            failed_total += failed.length
+        }
+
+        // 4. Отчёт о расхождениях с PIDReview как есть и точная проверка ожидаемых
+        const plan = upstream_plan({ up, fix, wizard, interval: [wizard.start, wizard.end] })
+        const checked = plan.items.map(check_upstream)
+        const same = checked.filter((c) => c.ok && c.same)
+        const differ = checked.filter((c) => c.ok && !c.same)
+        const upstream_failed = [...plan.checks.filter((c) => !c.ok), ...checked.filter((c) => !c.ok)]
+        const rate_change = (id) => id + ' ' + up.info[id].rate.toFixed(7) + ' → ' + fix.info[id].rate.toFixed(7) + ' Гц'
+        const active = plan.active.map((a) => a.defect + ' (' + ((a.defect == 2) ? 'средняя частота ' + a.axes.map(rate_change).join(', ') : a.axes.join(', ')) + ')')
+        console.log('tunewizard-pid-compare: PIDReview как есть — действующие исправления: ' + (active.length ? active.join('; ') : 'нет') +
+            '; не действуют: ' + plan.inactive.map((d) => d.defect + ' — ' + d.why).join(', ') + '; исправления в эталоне: ' + fix.patches.join(', '))
+        for (const c of plan.checks.filter((c) => c.ok)) {
+            console.log('  ' + c.line)
+        }
+        console.log('  совпадают ' + same.length + ' из ' + checked.length + ' массивов: ' + same.map((c) => c.line.replace(/ — совпадает$/, '')).join('; '))
+        for (const c of differ) {
+            console.log('  ' + c.line)
+        }
+        if (upstream_failed.length > 0) {
+            console.error('tunewizard-pid-compare: ожидаемые расхождения с PIDReview как есть не подтвердились — ' + upstream_failed.length + ':')
+            for (const c of upstream_failed.slice(0, 6)) {
+                console.error('  ' + c.line)
+            }
+            failed_total += upstream_failed.length
+        }
+
+        if (failed_total > 0) {
             process.exitCode = 1
             return
         }
         const rates = AXES.filter((id) => wizard.axes[id].have_data).map((id) => id + ' ' + wizard.axes[id].rate.toFixed(4))
-        console.log('tunewizard-pid-compare: совпадение с PIDReview (допуск ' + tolerance + ', по времени ' + time_tolerance + ' с) — оси ' + AXES.join('/') +
+        console.log('tunewizard-pid-compare: совпадение с PIDReview с исправлениями (допуск ' + tolerance + ', по времени ' + time_tolerance + ' с) — оси ' + AXES.join('/') +
             ': окон ' + summary.join(', ') + '; массивов ' + all_results.length + ', значений ' + count + ', наибольшее отклонение ' + max_rel.toExponential(2) +
-            ', по времени ' + max_abs.toExponential(2) + ' с. Интервал ' + interval.start + '–' + interval.end + ' с (у PIDReview по умолчанию ' + pr_default.join('–') +
-            ' с), окно ' + WINDOW_SIZE + ', средняя частота FFT ' + rates.join(', ') + ' Гц, исправления в эталоне: ' + (patches.length ? patches.join(', ') : 'нет'))
+            ', по времени ' + max_abs.toExponential(2) + ' с. Интервал ' + interval.start + '–' + interval.end + ' с (у PIDReview по умолчанию ' + fix.own_interval.join('–') +
+            ' с), окно ' + WINDOW_SIZE + ', средняя частота FFT ' + rates.join(', ') + ' Гц, исправления в эталоне: ' + (fix.patches.length ? fix.patches.join(', ') : 'нет'))
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения страниц:', problems)
@@ -393,7 +710,12 @@ async function main() {
     }
 }
 
-main().catch((e) => {
-    console.error(e)
-    process.exit(1)
-})
+if (require.main === module) {
+    main().catch((e) => {
+        console.error(e)
+        process.exit(1)
+    })
+} else {
+    // Для tests/tunewizard-pid-compare-rules.test.cjs: правила сверки без браузера
+    module.exports = { upstream_plan, check_upstream, upstream_batch_rate, outside_batches, AXES, time_tolerance, tolerance }
+}

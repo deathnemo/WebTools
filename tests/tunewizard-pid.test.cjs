@@ -1,5 +1,6 @@
 // Тесты переноса PIDReview в мастер настройки (TuneWizard/core/pid.js): загрузка PIDR и RATE, наборы параметров,
-// пакеты по разрывам, FFT компонент и отклик на ступеньку на синтетике.
+// пакеты по разрывам, FFT компонент и отклик на ступеньку на синтетике; исправления дефектов upstream 1, 2, 3, 5 и 6
+// (шапка core/pid.js) — тесты с пометкой «дефект upstream N».
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-steps.test.cjs).
 const test = require('node:test')
@@ -202,7 +203,7 @@ test('load_pid: PIDR — Tar/Act/Err из рад/с в °/с, P/I/D/FF без м
     assert.equal(axis.sets.length, 1)
     assert.equal(axis.sets[0].length, 1, 'без разрывов — один пакет')
     const batch = axis.sets[0][0]
-    assert.ok(batch.Tar.length >= TimeUS.length - 2 && batch.Tar.length <= TimeUS.length, 'длина пакета ' + batch.Tar.length)
+    assert.equal(batch.Tar.length, TimeUS.length, 'без разрывов — все отсчёты лога (дефект upstream 2)')
     assert.ok(Math.abs(batch.sample_rate - RATE_HZ) / RATE_HZ < 1e-3, 'частота ' + batch.sample_rate)
     for (let k = 0; k < batch.Tar.length; k++) {
         assert.equal(batch.time[k], TimeUS[k] * US2S)
@@ -264,6 +265,17 @@ test('load_pid: нет PID и RATE, не Copter — have_data ложно и пр
     assert.equal(plane.warnings.length, 1)
 })
 
+test('load_pid: лог без PARM — сообщение в warnings вместо TypeError (дефект upstream 6)', () => {
+    // В upstream log.get('PARM') без сообщений PARM не определён, и разбор падал на PARM.Name
+    const zero = () => 0
+    const msg = pid_msg(time_us([[0, 5]]), { Tar: zero, Act: zero, Err: zero, P: zero, I: zero, D: zero, FF: zero })
+    const res = load_pid(fake_log({ messages: { PIDR: msg } }), env)
+    assert.equal(res.have_data, false)
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /PARM/)
+    assert.deepEqual(res.axes.map((a) => a.have_data), [false, false, false, false, false, false])
+})
+
 // Лог PIDR и PIDP 0–20 с; изменения параметров: [[имя, значение, время с], ...]
 function changes_log(changes) {
     const TimeUS = time_us([[0, 20]])
@@ -322,6 +334,24 @@ test('load_pid: повторная смена в пределах 1 с посл�
     }
 })
 
+test('pid_split_into_batches: отсчёты разрыва между наборами не входят в пакет нового набора, частота не занижена (дефект upstream 1)', () => {
+    // Смены 10 с и 10.9 с: набор 1 начинается в 10.9 с, отсчёты 10.0025…10.8975 с — разрыв «без набора».
+    // В upstream первый пакет набора 1 начинался в 10.0025 с, а частота пакета занижалась до 364 Гц
+    const roll = load_pid(changes_log([["ATC_RAT_RLL_P", 0.12, 10], ["ATC_RAT_RLL_P", 0.13, 10.9]]), env).axes[0]
+    assert.deepEqual(roll.params.sets.map((s) => [s.start_time, s.end_time]), [[0, 10], [10.9, Infinity]])
+    assert.equal(roll.sets.length, 2)
+    assert.equal(roll.sets[1].length, 1)
+    const batch = roll.sets[1][0]
+    assert.equal(batch.time[0], roll.params.sets[1].start_time, 'пакет набора 1 начинается с первого отсчёта набора')
+    // Данные пакета — с того же отсчёта, что и время (Tar = sin(k/30) в рад/с)
+    assert.ok(Math.abs(batch.Tar[0] / R2D - Math.sin(Math.round(10.9 * RATE_HZ) / 30)) < 1e-12, 'Tar[0] — отсчёт 10.9 с')
+    for (const [j, set] of roll.sets.entries()) {
+        for (const b of set) {
+            assert.ok(Math.abs(b.sample_rate - RATE_HZ) < 1e-6, 'набор ' + j + ': частота пакета ' + b.sample_rate)
+        }
+    }
+})
+
 test('pid_split_into_batches: пропуск отсчётов — новый пакет; кусок короче 64 отсчётов отбрасывается', () => {
     // Участки: 0–5 с, 6–10 с, 11–11.1 с (40 отсчётов), 12–15 с
     const TimeUS = time_us([[0, 5], [6, 10], [11, 11.1], [12, 15]])
@@ -336,6 +366,33 @@ test('pid_split_into_batches: пропуск отсчётов — новый п�
         // Данные пакета — те же отсчёты, что и время
         assert.equal(batch.Tar[0] / R2D, TimeUS.findIndex((t) => Math.abs(t * US2S - batch.time[0]) < 1e-9))
     }
+})
+
+test('pid_split_into_batches: последний отсчёт пакета не теряется, частота — по числу интервалов (дефект upstream 2)', () => {
+    // Участки 0–5 с и 6–10 с: пакеты ровно по 2000 и 1600 отсчётов с частотой 400 Гц. В upstream срез кончался
+    // на отсчёте перед разрывом (1999), в конце лога терялись два (1598), а частота — n отсчётов на n − 1 интервалов
+    const fields = { Tar: (k) => k, Act: () => 0, Err: () => 0, P: () => 0, I: () => 0, D: () => 0, FF: () => 0 }
+    const axis_of = (TimeUS, params = base_params()) => load_pid(fake_log({ messages: { PIDR: pid_msg(TimeUS, fields) }, params }), env).axes[0]
+    const TimeUS = time_us([[0, 5], [6, 10]])
+    const axis = axis_of(TimeUS)
+    assert.deepEqual(axis.sets[0].map((b) => b.Tar.length), [2000, 1600])
+    for (const batch of axis.sets[0]) {
+        assert.equal(batch.time.length, batch.Tar.length)
+        // Отсчёты пакета подряд: Tar = номер отсчёта лога
+        assert.equal(batch.Tar.at(-1) / R2D - batch.Tar[0] / R2D, batch.Tar.length - 1)
+        assert.ok(Math.abs(batch.sample_rate - RATE_HZ) < 1e-9, 'частота пакета ' + batch.sample_rate)
+    }
+    assert.equal(axis.sets[0][1].time.at(-1), TimeUS.at(-1) * US2S, 'последний пакет — до последнего отсчёта лога')
+    // Средняя частота FFT и шаг времени отклика — 400 Гц ровно (в upstream ось времени сжата в n/(n − 1) раз)
+    pid_run_batch_fft(axis.sets, 512)
+    assert.ok(Math.abs(axis.sets.FFT.average_sample_rate - RATE_HZ) < 1e-9, 'средняя частота ' + axis.sets.FFT.average_sample_rate)
+
+    // Одиночный последний отсчёт за разрывом в пакет не входит
+    assert.deepEqual(axis_of([...time_us([[0, 5]]), 6e6]).sets[0].map((b) => b.Tar.length), [2000])
+    // Последний отсчёт лога уже в следующем наборе (смена в 19.996 с): пакет набора 0 — до предпоследнего отсчёта
+    const last = axis_of(time_us([[0, 20]]), [...base_params(), ["ATC_RAT_RLL_P", 0.12, 19.996]])
+    assert.equal(last.sets.length, 1, 'у набора 1 один отсчёт — пакета нет')
+    assert.equal(last.sets[0][0].Tar.length, 7999)
 })
 
 test('pid_run_batch_fft: синусоида в Tar — пик в своём бине; бины, частота и время окон — общие по набору', () => {
@@ -476,6 +533,42 @@ test('pid_step_response: только окна интервала, как в ups
     assert.equal(res.windows.length, last - first + 3)
 })
 
+test('pid_step_response: границы интервала — по сквозному времени окон набора, пакет целиком вне интервала окон не даёт (дефект upstream 3)', () => {
+    // Два пакета: 0–30 с и 31–61 с (пропуск 1 с). В upstream индексы искались по окнам каждого пакета отдельно, и пакет
+    // целиком до интервала давал своё последнее окно, а целиком после — первое
+    const axis = synthetic_axis(50, 200, 1, 30)
+    const [b0, b1] = axis.sets[0]
+    assert.equal(axis.sets[0].length, 2)
+    const sample_time = 1 / axis.sets.FFT.average_sample_rate
+    // Число окон пакета и номера первого и последнего окна с центром в [t0, t1] (-1, если таких нет) — независимо от кода переноса
+    const windows_in = (batch, t0, t1) => {
+        const num = Math.floor((batch.Tar.length - 512) / 32) + 1
+        let first = -1
+        let last = -1
+        for (let k = 0; k < num; k++) {
+            const center = batch.time[0] + (k * 32 + 256) * sample_time
+            if ((center >= t0) && (center <= t1)) {
+                if (first < 0) first = k
+                last = k
+            }
+        }
+        return { num, first, last }
+    }
+    // Интервал внутри второго пакета: его окна с краевыми (последним до 40 с и первым после 55 с), первый пакет — ни одного
+    const inner = windows_in(b1, 40, 55)
+    assert.ok(inner.first > 0 && inner.last < inner.num - 1)
+    assert.equal(pid_step_response(axis, 0, [40, 55]).windows.length, inner.last - inner.first + 3)
+    // Интервал внутри первого пакета: второй пакет (целиком после) окон не даёт
+    const early = windows_in(b0, 5, 20)
+    assert.equal(pid_step_response(axis, 0, [5, 20]).windows.length, early.last - early.first + 3)
+    // Начало интервала в пропуске: окно до начала — последнее окно первого пакета, дальше — окна второго до первого после 55 с
+    const across = windows_in(b1, 30.5, 55)
+    assert.equal(across.first, 0)
+    assert.equal(pid_step_response(axis, 0, [30.5, 55]).windows.length, 1 + across.last + 2)
+    // Окна — те же, что у каждого пакета: у всех цель не меньше 20 °/с
+    assert.equal(windows_over_threshold(b1, 512, inner.first - 1, inner.last + 2), inner.last - inner.first + 3)
+})
+
 test('pid_step_response: null без FFT, без данных оси и для несуществующего набора', () => {
     const tar = step_target(10 * RATE_HZ, 1, 50, 200)
     const res = load_pid(closed_loop_log(tar, first_order(tar, TAU, DELAY)), env)
@@ -485,4 +578,34 @@ test('pid_step_response: null без FFT, без данных оси и для �
     assert.notEqual(pid_step_response(axis, 0, [0, 100]), null)
     assert.equal(pid_step_response(axis, 1, [0, 100]), null, 'набора 1 нет')
     assert.equal(pid_step_response(res.axes[1], 0, [0, 100]), null, 'у PIDP нет данных')
+})
+
+test('pid_step_response: частота лога ниже 100 Гц — null и причина в warnings вместо нулевого отклика (дефект upstream 5)', () => {
+    // LOG_BITMASK без ATTITUDE_FAST: Copter пишет PIDx и RATE с частотой 10 Гц. В upstream шумовая оценка «до 25 Гц»
+    // при частоте не выше 50 Гц накрывала весь спектр (отклик нулевой), при 50–100 Гц выходила за массив спектра
+    for (const hz of [10, 40, 80, 125]) {
+        const n = 300 * hz
+        const tar = step_target(n, 1, 50, 200)
+        const act = first_order(tar, TAU, 2)
+        const zero = () => 0
+        const TimeUS = tar.map((_, k) => Math.round(k / hz * 1e6))
+        const msg = pid_msg(TimeUS, { Tar: (k) => tar[k] / R2D, Act: (k) => act[k] / R2D, Err: zero, P: zero, I: zero, D: zero, FF: zero })
+        const axis = load_pid(fake_log({ messages: { PIDR: msg }, params: base_params() }), env).axes[0]
+        pid_run_batch_fft(axis.sets, 512)
+        assert.ok(Math.abs(axis.sets.FFT.average_sample_rate - hz) / hz < 1e-3, 'частота ' + axis.sets.FFT.average_sample_rate)
+        const warnings = []
+        const res = pid_step_response(axis, 0, [0, 1e9], warnings)
+        if (hz < 100) {
+            assert.equal(res, null, hz + ' Гц: отклик не считается')
+            assert.equal(warnings.length, 1, hz + ' Гц: причина')
+            assert.match(warnings[0], /ATTITUDE_FAST/)
+            assert.match(warnings[0], new RegExp('PIDR: частота лога ' + hz + '\\.0 Гц'))
+            // Без массива предупреждений — тот же null
+            assert.equal(pid_step_response(axis, 0, [0, 1e9]), null)
+        } else {
+            assert.notEqual(res, null, hz + ' Гц: отклик есть')
+            assert.ok(res.windows.length > 0)
+            assert.deepEqual(warnings, [])
+        }
+    }
 })
