@@ -1094,7 +1094,7 @@ test('pidtune_margins: L = (fc/f)·e^(−j(90° + 360°·f·τ)) — срез fc
     assert.deepEqual(pidtune_margins(freq, bad), none)
 })
 
-test('pidtune_margins: резонанс даёт второе пересечение — запас наименьший по всем, частота среза — первого, у второго — главное значение фазы', () => {
+test('pidtune_margins: резонанс даёт второе пересечение — запас и частота среза первого, второе — справка (главное значение фазы); наименьший — опцией', () => {
     // L = (fc/f)·e^(−j(90° + 360°·f·τ))·P(f), P — резонанс 30 Гц, ζ 0.03 (пик |P| ≈ 16.7): |L| поднимается выше 1 у 30 Гц.
     // τ 5 мс — у второго пересечения запас отрицательный (наименьший); τ 12 мс — фаза второго ниже −360°, берётся
     // главное значение (развёрнутая дала бы запас около −206° вместо 154°)
@@ -1130,15 +1130,21 @@ test('pidtune_margins: резонанс даёт второе пересечен
         close_to(m.crossings[0].pm_deg, 180 + deg(f1), 0.1, what + ': запас первого — развёрнутая фаза')
         const principal = deg(f2) - 360 * Math.ceil(deg(f2) / 360)
         close_to(m.crossings[1].pm_deg, 180 + principal, 0.5, what + ': запас второго — главное значение')
-        assert.equal(m.pm_deg, Math.min(m.crossings[0].pm_deg, m.crossings[1].pm_deg), what)
+        // Запас — первого пересечения (поздние по измеренной T недостоверны); наименьший по всем — опцией (точная L)
+        assert.equal(m.pm_deg, m.crossings[0].pm_deg, what)
+        assert.ok(Number.isFinite(m.gm_db), what + ': запас по амплитуде ' + m.gm_db)
+        const all = pidtune_margins(freq, L, pidtune_rules, { min_over_crossings: true })
+        assert.equal(all.pm_deg, Math.min(m.crossings[0].pm_deg, m.crossings[1].pm_deg), what)
+        assert.equal(all.crossover_hz, m.crossover_hz)
         if (tau == 0.005) {
             assert.ok(m.crossings[1].pm_deg < 0, 'второе пересечение неустойчиво: ' + m.crossings[1].pm_deg)
-            assert.equal(m.pm_deg, m.crossings[1].pm_deg)
-            assert.equal(m.gm_db, null, 'запас фазы не больше 0 — запаса по амплитуде нет')
+            assert.equal(all.pm_deg, m.crossings[1].pm_deg)
+            assert.equal(all.gm_db, null, 'наименьший запас не больше 0 — запаса по амплитуде нет')
+            assert.ok(m.gm_db < 0, 'фаза переходит −180° в резонансе, где |L| > 1: ' + m.gm_db)
         } else {
             assert.ok(deg(f2) < -360, 'фаза второго ниже −360°: ' + deg(f2))
             assert.ok(m.crossings[1].pm_deg > 90, 'запас второго ' + m.crossings[1].pm_deg)
-            assert.equal(m.pm_deg, m.crossings[0].pm_deg)
+            assert.equal(all.pm_deg, m.crossings[0].pm_deg)
             assert.ok(m.gm_db > 0, 'запас по амплитуде ' + m.gm_db)
         }
     }
@@ -1224,9 +1230,9 @@ test('pidtune_predict: на известном контуре — T_new = G·g·
     // I только у варианта — на 0 Гц T_new = 1, как у контура с интегратором
     const p = check({ ...base, I: 0 }, base, ratio)
     assert.equal(p.T[0][0], 1)
-    // I только у лога — предел на 0 Гц по данным не определить: T_new(0) = T(0) (= 1 у контура лога), остальное точно
+    // I только у лога — предел на 0 Гц по данным не определить: T_new(0) по непрерывности (Re на 0.1 Гц), остальное точно
     const q = check(base, { ...base, I: 0 }, null, true)
-    close_to(q.T[0][0], 1, 1e-12, 'T_new(0) = T(0)')
+    assert.equal(q.T[0][0], q.T[0][1], 'T_new(0) = Re T_new(0.1 Гц)')
 })
 
 test('pidtune_predict: rate-only синтетика — прогноз P ±10 %, D ±10 %, P +30 % против прямой симуляции: перерегулирование ±3 пункта, запас фазы ±5°', () => {
@@ -1245,7 +1251,7 @@ test('pidtune_predict: rate-only синтетика — прогноз P ±10 %,
             const pred = pidtune_predict(fir, c_log, c_new, null, seg.rate_hz)
             // Правда: прямая симуляция новых коэффициентов (ступенька без шума) и запас фазы по L = C·G объекта
             const truth = pidtune_step_metrics(...Object.values(truth_step({ kp: v.P, ki: v.I, kd: v.D, fltd: FILTERS0.fltd }, plant)))
-            const truth_pm = pidtune_margins(grid.freq, cmul(c_new.C, Gp)).pm_deg
+            const truth_pm = pidtune_margins(grid.freq, cmul(c_new.C, Gp), pidtune_rules, { min_over_crossings: true }).pm_deg
             const what = 'K ' + plant.K + ', ' + title
             assert.equal(pred.unstable, false, what)
             assert.ok(pred.noncausal < 1e-6, what + ': доля энергии до нуля времени ' + pred.noncausal)
@@ -1495,7 +1501,9 @@ test('pidtune_flags: отметки на порогах — запас фазы 
     // Неустойчив при положительном запасе (непричинный отклик)
     const noncausal = pidtune_flags({ pm_deg: 12, metrics: null, unstable: true }, log)
     assert.equal(noncausal.unstable, true)
-    assert.ok(noncausal.reasons[0].startsWith('контур неустойчив (запас фазы 12.0°; прогноз отклика непричинный'), noncausal.reasons[0])
+    assert.equal(noncausal.reasons[0], 'прогноз неустойчив — вариант на грани устойчивости или прогноз ненадёжен (большое изменение D, ' +
+                 'мало возбуждения на высоких частотах)')
+    assert.ok(noncausal.reasons[1].startsWith('запас фазы 12.0° ниже 30°'), noncausal.reasons[1])
     assert.equal(pidtune_flags(pred(50, 10), log).unstable, false)
 })
 
@@ -1512,7 +1520,7 @@ test('pidtune_beyond: число у порога — с округлением �
     assert.equal(pidtune_beyond(29.96, 30, 1), '29.9', 'toFixed дал бы 30.0')
 })
 
-test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I только у варианта — 1; только у лога — T(0)', () => {
+test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I только у варианта — 1; только у лога — по непрерывности', () => {
     // КИХ «чистая задержка на отсчёт с усилением 0.9»: T = 0.9·e^(−jω), T(0) = 0.9 (у настоящего КИХ сумма h не ровно 1)
     const grid = pidtune_predict_grid(RATE_HZ)
     const fir = { h: Float64Array.from([0, 0.9]) }
@@ -1520,7 +1528,9 @@ test('pidtune_predict: 0 Гц — I у обоих: R = ki_new / ki_log; I тол
     // R(0) = 0.2 / 0.1 = 2: T_new(0) = 2·0.9 / (1 − 0.9 + 2·0.9)
     close_to(pidtune_predict(fir, ctrl(0.1), ctrl(0.2), null, RATE_HZ).T[0][0], 1.8 / 1.9, 1e-12, 'I у обоих')
     assert.equal(pidtune_predict(fir, ctrl(0), ctrl(0.2), null, RATE_HZ).T[0][0], 1, 'I только у варианта')
-    assert.equal(pidtune_predict(fir, ctrl(0.1), ctrl(0), null, RATE_HZ).T[0][0], 0.9, 'I только у лога')
+    const only_log = pidtune_predict(fir, ctrl(0.1), ctrl(0), null, RATE_HZ)
+    assert.equal(only_log.T[0][0], only_log.T[0][1], 'I только у лога — Re T_new на 0.1 Гц')
+    assert.equal(only_log.T[1][0], 0)
     // Без интеграторов — обычная формула: R(0) = Kp_new / Kp_log
     const p = (P) => pidtune_controller({ P: P, I: 0, D: 0.002 }, FILTERS0, RATE_HZ, grid.freq)
     close_to(pidtune_predict(fir, p(0.1), p(0.3), null, RATE_HZ).T[0][0], 3 * 0.9 / (0.1 + 3 * 0.9), 1e-12, 'без I')
@@ -1602,4 +1612,58 @@ test('pidtune_gyro_ratio: H меняется по окнам (движущийс
     assert.ok(differs > 0.05, 'отношение средних отличается от среднего отношений: ' + differs)
     // Вдали от notch — почти 1
     close_to(Math.hypot(ratio[0][0], ratio[1][0]), 1, 1e-3, '|отношение| на 5 Гц')
+})
+
+test('pidtune_predict: поздние пересечения от шума КИХ на достоверной оси не делают вариант неустойчивым (D ×3 — запас первого пересечения)', () => {
+    // Редкие манёвры, сильная турбулентность: ось достоверна, но шум КИХ на 20–40 Гц, умноженный большим D через R, даёт
+    // поздние пересечения |L| = 1 с бессмысленной фазой (ревью задачи 6: «Свой» D ×3 — «неустойчив, −164°» при правде 59°)
+    for (const [plant, low_pm] of [[PLANT_NORMAL, false], [PLANT_FAST, true]]) {
+        const m = measure(simulate(G0, { dur_s: 150, seed: 3, plant, pause: 0.9, turb_dps2: 2000 }), G0)
+        const quality = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true })
+        const grid = pidtune_predict_grid(m.seg.rate_hz)
+        const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+        const pred_log = pidtune_predict(m.fir, c_log, c_log, null, m.seg.rate_hz)
+        const cc = pidtune_controller_check(m.axis, 0, [0, 1e9], LOG_GAINS, FILTERS0, RATE_HZ, 1)
+        const validity = pidtune_validity(quality, cc, pidtune_coherence(m.seg.segments, m.seg.rate_hz, pred_log.crossover_hz))
+        const what = 'K ' + plant.K
+        assert.equal(validity.valid, true, what + ': ' + validity.reasons.join('; '))
+        const d3 = { ...LOG_GAINS, D: pidtune_round(3 * G0.kd) }
+        const c_new = pidtune_controller(d3, FILTERS0, RATE_HZ, grid.freq)
+        const pred = pidtune_predict(m.fir, c_log, c_new, null, m.seg.rate_hz)
+        const truth_pm = pidtune_margins(grid.freq, cmul(c_new.C, plant_response(plant_pulse(plant), grid.freq)), pidtune_rules,
+                                         { min_over_crossings: true }).pm_deg
+        assert.equal(pred.unstable, false, what + ': ' + JSON.stringify(pred.crossings))
+        assert.ok(pred.metrics != null, what + ': метрики есть')
+        assert.equal(pred.pm_deg, pred.crossings[0].pm_deg, what + ': запас — первого пересечения')
+        close_to(pred.pm_deg, truth_pm, 6, what + ': запас фазы против правды')
+        if (plant === PLANT_NORMAL) {
+            // Поздние пересечения есть, и по главному значению их «запас» отрицательный — это справка, не неустойчивость
+            assert.equal(pred.multiple_crossings, true)
+            assert.ok(pred.crossings.slice(1).some((c) => c.pm_deg < 0), JSON.stringify(pred.crossings))
+        }
+        const flags = pidtune_flags(pred, pred_log)
+        assert.equal(flags.unstable, false, what)
+        assert.equal(flags.low_pm, low_pm, what + ': запас ' + pred.pm_deg + ', правда ' + truth_pm)
+        if (!low_pm) {
+            assert.equal(flags.overshoot || flags.low_pm || flags.incomplete, false, what + ': ' + flags.reasons.join('; '))
+        }
+    }
+})
+
+test('pidtune_predict: рыскание с I = 0 (I только у лога) — T_new(0) по непрерывности, не «неустойчив», перерегулирование как у правды', () => {
+    // Рыскание: I = 0.1·P, FLTE 1 Гц, D без FLTD; объект медленнее крена. Скачок на бине 0 Гц дал бы постоянную добавку
+    // ко всей импульсной характеристике и ложную долю энергии «до нуля»
+    const yaw = { kp: 0.2298, ki: 0.02298, kd: 0.0017, fltd: 0, flte: 1, imax: 0.5 }
+    const plant = { K: 40, tau: 0.05, delay_s: 0.012 }
+    const filters = { flte: 1, fltd: 0 }
+    const m = measure(simulate(yaw, { dur_s: 150, seed: 3, plant }), yaw)
+    const grid = pidtune_predict_grid(m.seg.rate_hz)
+    const log = { P: yaw.kp, I: yaw.ki, D: yaw.kd }
+    const c_log = pidtune_controller(log, filters, RATE_HZ, grid.freq)
+    const pred = pidtune_predict(m.fir, c_log, pidtune_controller({ ...log, I: 0 }, filters, RATE_HZ, grid.freq), null, m.seg.rate_hz)
+    assert.equal(pred.T[0][0], pred.T[0][1], 'T_new(0) = Re T_new(0.1 Гц)')
+    assert.equal(pred.unstable, false)
+    assert.ok(pred.noncausal < 1e-4, 'доля энергии до нуля времени ' + pred.noncausal)
+    const truth = pidtune_step_metrics(...Object.values(truth_step({ ...yaw, ki: 0 }, plant)))
+    close_to(pred.metrics.overshoot_pct, truth.overshoot_pct, 3, 'перерегулирование, %')
 })

@@ -284,13 +284,14 @@ function pidtune_controller_check(axis, set_index, range, gains, filters, loop_r
 function pidtune_gyro_ratio(old_values, new_values, gyro_ctx, freq) { … }
 // Сетка прогноза: n — степень двойки ≥ rate_hz / predict_resolution_hz, freq — k·rate_hz/n, k = 0…n/2 → { n, freq }
 function pidtune_predict_grid(rate_hz, rules = pidtune_rules) { … }
-// Все пересечения |L| = 1 сверху вниз выше crossover_min_hz; запас — наименьший, частота среза — первого; фаза первого —
-// развёрнутая от низких частот, следующих — главное значение
+// Пересечения |L| = 1 сверху вниз выше crossover_min_hz; частота среза и запас — первого (фаза развёрнута от низких
+// частот), поздние — справка (главное значение фазы); options.min_over_crossings — наименьший по всем (точная L)
 // → { crossover_hz, pm_deg, gm_db, multiple_crossings, crossings: [{ freq_hz, pm_deg }] }
-function pidtune_margins(freq, L, rules = pidtune_rules) { … }
+function pidtune_margins(freq, L, rules = pidtune_rules, options = {}) { … }
 // Прогноз: T — FFT КИХ на сетке pidtune_predict_grid; φ = FF/C; R = (C_new/C_log)·ratio; L_new = R·T/(1 + φ_log − T);
-// T_new = R·T·(1 + φ_new)/(1 + φ_log − T + R·T); предел на 0 Гц; неустойчив — запас ≤ 0 или доля энергии отклика
-// в последней четверти буфера > noncausal_max (тогда step и metrics — null). c_log, c_new — на той же сетке (длина и
+// T_new = R·T·(1 + φ_new)/(1 + φ_log − T + R·T); предел на 0 Гц (I только у лога — по непрерывности); неустойчив —
+// запас первого пересечения ≤ 0 или доля энергии отклика в последней четверти буфера > noncausal_max (тогда step
+// и metrics — null). c_log, c_new — на той же сетке (длина и
 // шаг freq[1], иначе исключение); c_new строится с FLTE/FLTD, принятыми на шаге 3, c_log — с фильтрами лога
 // → { freq, T, L, crossover_hz, pm_deg, gm_db, multiple_crossings, crossings, unstable, noncausal, step | null, metrics | null } | null
 function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rules) { … }
@@ -302,7 +303,8 @@ function pidtune_validity(quality, controller_check, coherence_at_crossover, rul
 // Варианты оси: «Как в логе» (как есть), «По правилам», P ±10 % (I по правилу), D ±10 % (только при D > 0); изменённые —
 // 4 значащие цифры (pidtune_round); дедупликация (candidate_key) → [{ id, title, values: { P, I, D }, same_as: [id] }]
 function pidtune_candidates(log_gains, rule, axis, rules = pidtune_rules) { … }
-// Отметки варианта: unstable, low_pm (< pm_min_deg), pm_drop (хуже прогноза лога > pm_max_drop_deg),
+// Отметки варианта: unstable («контур неустойчив» при запасе ≤ 0, иначе «прогноз неустойчив … или ненадёжен»),
+// low_pm (< pm_min_deg), pm_drop (хуже прогноза лога > pm_max_drop_deg),
 // overshoot (> overshoot_pred_max_pct), incomplete; отказ при сомнении; числа у порога — от порога (pidtune_beyond)
 // → { unstable, low_pm, pm_drop, overshoot, incomplete, flagged, reasons }
 function pidtune_flags(pred, pred_log, rules = pidtune_rules) { … }
@@ -327,7 +329,7 @@ function pidtune_flags(pred, pred_log, rules = pidtune_rules) { … }
 - **Сверка регулятора:** верная модель проходит, испорченная (например, Kd ×2) — нет.
 - **Поправка фильтров:** одинаковые фильтры дают отношение 1.
 - **Варианты и отметки:** отметки на порогах; дедупликация; нет D ±10 % при D = 0; достоверность — каждая причина отказа.
-- **После ревью задачи 6:** неустойчивый вариант (K 290, P ×3) — `unstable`, отклика и метрик нет, отметка «контур неустойчив»; неустойчивость по причинности при положительном запасе; второе пересечение |L| = 1 (резонанс) — наименьший запас, у второго — главное значение фазы, у первого — развёрнутая (фаза ниже −360°); ось RATE — сверка не запускается, причина «по RATE прогноз не считается»; поправка фильтров при движущемся notch — отношение средних, а не среднее отношений; другая сетка (тот же размер, другой шаг) — исключение; нечисловой `i_scale` — NaN; числа у порога — с округлением от него.
+- **После ревью задачи 6:** неустойчивый вариант (K 290, P ×3) — `unstable`, отклика и метрик нет, отметка «контур неустойчив»; неустойчивость по причинности при положительном запасе; второе пересечение |L| = 1 (резонанс) — запас первого (развёрнутая фаза, в том числе ниже −360°), второе — справка с главным значением фазы, наименьший — опцией; повторное ревью: на достоверной оси с редкими манёврами «Свой» D ×3 не «неустойчив» (поздние пересечения от шума КИХ — справка), у K 290 — `low_pm` около 28° (правда 28.9°); рыскание с I = 0 — T_new(0) по непрерывности, не «неустойчив»; ось RATE — сверка не запускается, причина «по RATE прогноз не считается»; поправка фильтров при движущемся notch — отношение средних, а не среднее отношений; другая сетка (тот же размер, другой шаг) — исключение; нечисловой `i_scale` — NaN; числа у порога — с округлением от него.
 
 **Замер на логе пользователя** (скрипт в scratchpad), по каждой оси:
 
