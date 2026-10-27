@@ -1438,7 +1438,7 @@ async function main() {
         await page.click('#memory0_forget')
         const kept0 = await memory0()
         assert.deepEqual([kept0.visible, kept0.verdict, kept0.verdict_class, kept0.forget, kept0.pass, kept0.stored],
-                         [true, 'Проход уже заменён сохранённым на шаге 5 — он остаётся.', 'verdict verdict--warn', false, fc_key, [fc_key]], 'заменённую запись «Забыть» не удаляет')
+                         [true, 'Проход уже заменён более новым сохранением — он остаётся.', 'verdict verdict--warn', false, fc_key, [fc_key]], 'заменённую запись «Забыть» не удаляет')
         assert.deepEqual(await page.evaluate((key) => [passmem_read(localStorage).passes[key].saved_at, memory_state.pass.saved_at], fc_key), [replaced_at, replaced_at - 60000],
                          'в памяти — новая запись, в memory_state — показанный проход')
 
