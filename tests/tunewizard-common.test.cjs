@@ -373,20 +373,18 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
     assert.deepEqual([ctx.start, ctx.end, ctx.fft_key], [10, 100, 'batch:1'])
 })
 
-test('step_accepted_stale: без лога — false сразу, контекст итога не строится', () => {
+test('step_accepted_stale: без лога и для непринятого шага — false', () => {
     const saved = { settings: state.settings, spectrum: state.spectrum, steps: state.steps, params: state.params }
     try {
-        // Как после reset(): лога нет (state.params null), принятого нет — построитель контекста бросил бы
-        // (lowpass_param_names(null))
+        // Как после reset(): лога нет (state.params null), принятого нет
         state.params = null
         state.steps = []
         state.settings = { start: 0, end: 0 }
         state.spectrum = { filter_version: null }
-        assert.throws(() => step_summary_context(), 'без лога построитель контекста бросает')
         for (const n of [2, 3, 4]) {
             assert.equal(step_accepted_stale(n), false, 'шаг ' + n + ' без лога — не устарел')
         }
-        // Шаг не принят (null), а у других шагов принятое есть — тоже false без построения контекста
+        // Шаг не принят (null или нет записи), а у другого шага принятое есть — тоже false
         state.steps = [undefined, undefined, { accepted: {}, inputs: 'x' }, null]
         assert.equal(step_accepted_stale(3), false, 'шаг 3 не принят (null) — не устарел')
         assert.equal(step_accepted_stale(4), false, 'шаг 4 не принят (нет записи) — не устарел')

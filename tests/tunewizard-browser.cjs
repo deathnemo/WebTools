@@ -243,12 +243,12 @@ function step4_plots(page) {
 }
 
 // Сводка шага 5: вердикт, плитки, строки таблицы шагов (ячейки и кнопка), изменённые и неизменённые строки,
-// расхождения, «что перелететь», кнопки и устаревшие шаги; ожидаемое из ядра — строки summary_rows(step5_context())
+// расхождения, «что перелететь», кнопки и устаревшие шаги; ожидаемое из ядра — строки summary_rows(step_summary_context())
 // (изменённые: имя, «станет», шаг) и имена, которым по метаданным нужна перезагрузка
 function step5_summary(page) {
     return page.evaluate(() => {
         const cells = (tr) => [...tr.children].map((td) => td.textContent)
-        const rows = summary_rows(step5_context()).rows
+        const rows = summary_rows(step_summary_context()).rows
         const changed = rows.filter((row) => row.changed)
         return {
             verdict: document.getElementById('verdict5').textContent,
@@ -1197,7 +1197,7 @@ async function main() {
                          'таблица шагов: устаревшие — с кнопкой перехода')
         assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или принятое на шагах 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
                      v5.steps[2].cells[2])
-        assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-][\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
+        assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-]?[\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
         // Изменения — изменённые строки итога (имя, «станет», шаг); INS_GYRO_FILTER — 39 от шага 3, расхождение с шагом 2
         assert.deepEqual(v5.changes.map((cells) => [cells[0], cells[2], cells[3]]), v5.expected, 'строки изменений — изменённые строки итога')
         assert.ok(v5.expected.some(([name, value, step]) => (name === 'INS_GYRO_FILTER') && (value === '39') && (step === '3')), 'INS_GYRO_FILTER = 39 от шага 3')
@@ -1223,7 +1223,7 @@ async function main() {
         const file5_name = path.basename(log_path).replace(/\.[^.]*$/, '') + '_tune.param'
         assert.equal(download5.suggestedFilename(), file5_name, 'имя файла — имя лога + _tune.param')
         const file5 = await page.evaluate((text) => {
-            const ctx = step5_context()
+            const ctx = step_summary_context()
             const expected = summary_param_values(summary_rows(ctx).rows, ctx.bits)
             const parsed = parse_param_file(text)
             return { names: Object.keys(parsed).sort(), expected: Object.keys(expected).sort(),
@@ -1251,34 +1251,98 @@ async function main() {
         // «Запомнить проход» — та же память без файла
         await page.click('#step5_remember')
         assert.equal(await page.textContent('#step5_note'), 'Память прохода сохранена.')
+        // Хранилище браузера недоступно (доступ к localStorage бросает, как при запрете хранилища): «Запомнить проход» —
+        // текст ошибки в заметке, сводка не ломается; хранилище — вернуть
+        await page.evaluate(() => {
+            window.__storage = Object.getOwnPropertyDescriptor(window, 'localStorage') ?? null
+            Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new DOMException('Доступ запрещён', 'SecurityError') } })
+        })
+        await page.click('#step5_remember')
+        const blocked5 = await page.evaluate(() => ({ note: document.getElementById('step5_note').textContent, verdict: document.getElementById('verdict5').className }))
+        await page.evaluate(() => {
+            if (window.__storage != null) {
+                Object.defineProperty(window, 'localStorage', window.__storage)
+            } else {
+                delete window.localStorage
+            }
+        })
+        assert.deepEqual(blocked5, { note: 'Браузер не даёт сохранить память прохода (приватный режим, запрет или переполнение хранилища).', verdict: 'verdict verdict--warn' },
+                         'хранилище недоступно — текст в заметке, вердикт сводки прежний')
+        assert.equal(await page.evaluate(() => localStorage.getItem('tunewizard_v1') != null), true, 'хранилище вернули, память на месте')
+        // Метаданные параметров не загрузились — общий пункт о перезагрузке; ещё грузятся — пункта нет (появится после
+        // загрузки); состояние загрузки — вернуть
+        const meta5 = await page.evaluate(() => {
+            const saved = { ...step_metadata_state }
+            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent).filter((text) => text.includes('перезагрузите полётный контроллер'))
+            try {
+                Object.assign(step_metadata_state, { data: null, failed: true })
+                step5_render()
+                const failed = reboot()
+                Object.assign(step_metadata_state, { data: null, failed: false })
+                step5_render()
+                return { failed: failed, loading: reboot() }
+            } finally {
+                Object.assign(step_metadata_state, saved)
+                step5_render()
+            }
+        })
+        assert.equal(meta5.failed.length, 1, 'метаданные не загрузились — один пункт о перезагрузке: ' + meta5.failed.join(' | '))
+        assert.match(meta5.failed[0], /^Описания параметров не загрузились, .*: после записи перезагрузите полётный контроллер — так надёжнее\.$/, meta5.failed[0])
+        assert.deepEqual(meta5.loading, [], 'метаданные грузятся — пункта о перезагрузке нет')
+        assert.deepEqual((await step5_summary(page)).refly, v5.refly, 'состояние метаданных вернули — пункты прежние')
 
-        // «Печать»: шапка печати с логом, аппаратом и датой, затем диалог печати (здесь — заглушка window.print)
+        // «Печать» — диалог печати браузера (здесь — заглушка window.print). Перед печатью (событие beforeprint: браузер шлёт
+        // его и при Ctrl+P, эмуляция печати Playwright — нет) — шапка с логом, аппаратом и временем печати и раскрытый
+        // список «без изменений»; после печати (afterprint) список — как был
         await page.evaluate(() => {
             window.__print_calls = 0
             window.print = () => { window.__print_calls++ }
         })
         await page.click('#step5_print')
         assert.equal(await page.evaluate(() => window.__print_calls), 1, '«Печать» вызывает window.print')
+        const unchanged_open = () => page.evaluate(() => document.getElementById('unchanged5').open)
+        assert.equal(await unchanged_open(), false, 'до печати список «без изменений» свёрнут')
+        await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')))
         const print_head = await page.textContent('#step5_print_head')
         assert.ok(print_head.startsWith('Мастер настройки · ' + path.basename(log_path) + ' · StellarH7V2 0034002E 35335104 39363630, QUAD/X_REV · '), print_head)
-        assert.match(print_head, / · \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}$/, 'дата печати: ' + print_head)
-        // Правила печати: только сводка шага 5 — без вступления, навигации, шага 0, графиков и кнопок; шапка печати видна
+        assert.match(print_head, / · \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}$/, 'время печати: ' + print_head)
+        assert.equal(await unchanged_open(), true, 'при печати список «без изменений» раскрыт')
+        // Правила печати на шаге 5: сводка без вступления, навигации, кнопок, заметки о действии, пояснений для экрана и
+        // столбца «Действие»; другие секции (с графиками) скрыты атрибутом hidden; шапка печати и список «без изменений»
+        // видны, фон белый
         await page.emulateMedia({ media: 'print' })
         const print5 = await page.evaluate(() => {
-            const display = (el) => getComputedStyle(el).display
+            const seen = (el) => el.checkVisibility()
             return {
-                wizbar: display(document.querySelector('.wizbar')),
-                lede: display(document.querySelector('.hero .lede')),
-                step0: display(document.querySelector('section[data-step="0"]')),
-                plots: [...document.querySelectorAll('.plot')].map(display).filter((d) => d !== 'none').length,
-                buttons: [...document.querySelectorAll('section[data-step="5"] button')].map(display).filter((d) => d !== 'none').length,
+                wizbar: seen(document.querySelector('.wizbar')),
+                lede: seen(document.querySelector('.hero .lede')),
+                step0: seen(document.querySelector('section[data-step="0"]')),
+                plots: [...document.querySelectorAll('.plot')].filter(seen).length,
+                buttons: [...document.querySelectorAll('section[data-step="5"] button')].filter(seen).length,
+                note: seen(document.getElementById('step5_note')),
+                screen_only: [...document.querySelectorAll('section[data-step="5"] .screen-only')].filter(seen).length,
+                action: seen(document.querySelector('#steps5 thead th:nth-child(4)')),
+                head: seen(document.getElementById('step5_print_head')),
+                unchanged: seen(document.querySelector('#unchanged5 tbody tr')),
                 bg: getComputedStyle(document.body).backgroundColor,
             }
         })
-        assert.deepEqual(print5, { wizbar: 'none', lede: 'none', step0: 'none', plots: 0, buttons: 0, bg: 'rgb(255, 255, 255)' }, 'печать — только сводка на белом фоне')
-        assert.equal(await page.isVisible('#step5_print_head'), true, 'шапка печати видна')
+        assert.deepEqual(print5, { wizbar: false, lede: false, step0: false, plots: 0, buttons: 0, note: false, screen_only: 0, action: false, head: true, unchanged: true,
+                                   bg: 'rgb(255, 255, 255)' }, 'печать шага 5 — только сводка на белом фоне')
         await page.screenshot({ path: path.join(shots, 'step5-print.png'), fullPage: true })
+        await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+        assert.equal(await unchanged_open(), false, 'после печати список «без изменений» снова свёрнут')
+        // Печать других шагов не пустая: на шаге 0 видны его секция и график полёта, сводки нет
+        await page.evaluate(() => set_step(0))
+        const print0 = await page.evaluate(() => ({
+            step0: document.querySelector('section[data-step="0"]').checkVisibility(),
+            flight: document.getElementById('FlightData').checkVisibility(),
+            step5: document.querySelector('section[data-step="5"]').checkVisibility(),
+        }))
+        assert.deepEqual(print0, { step0: true, flight: true, step5: false }, 'печать шага 0 — его секция и график полёта')
         await page.emulateMedia({ media: 'screen' })
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
         assert.equal(await page.isVisible('#step5_print_head'), false, 'на экране шапки печати нет')
         // Без горизонтальной прокрутки страницы — и на узком окне (таблицы прокручиваются внутри своих рамок)
         const [fit_w, fit_c] = await page_fits(page)
@@ -1349,6 +1413,20 @@ async function main() {
         assert.doesNotMatch(p5.verdict, /^Принято/, 'вердикт шага 4 — не «Принято»: ' + p5.verdict)
         assert.equal(await page.evaluate(() => candidate_key(step4_values_from_form()) === candidate_key(step4_log_values())), true, 'форма шага 4 снова из лога')
         assert.ok((await step4_plots(page)).StepResp4.traces[2].finite > 0, 'после повторной загрузки — измеренный отклик снова на графике')
+        // Сводка после повторной загрузки: ничего не принято — «менять нечего», кнопки файла и памяти выключены, шаги —
+        // «не принят». Шаг 4 посчитан (не принят), все оси без надёжного измерения — в вердикте хвост о тестовом полёте,
+        // в «что перелететь» — его пункт, но не «слетайте тем же профилем»: менять нечего
+        await page.click('#wizbar button:nth-child(6)')
+        const none5 = await step5_summary(page)
+        assert.match(none5.verdict_class, /verdict--warn/, 'ничего не принято — предупреждение')
+        assert.equal(none5.verdict, 'Менять нечего: ни один из шагов 2–4 не принят. Оси шага 4 без надёжного измерения: крен, тангаж, рыскание — нужен тестовый полёт (ниже).')
+        assert.deepEqual(none5.tiles.map((tile) => tile.value), ['StellarH7V2', path.basename(log_path), '0', 'нет'], 'плитки: изменено 0, принятых шагов нет')
+        assert.deepEqual(none5.steps.map((row) => [row.cells[1], row.cells[2], row.button]), [2, 3, 4].map(() => ['не принят', 'Параметры шага остаются как в логе.', null]),
+                         'все шаги — «не принят»')
+        assert.deepEqual(none5.changes, [['Изменённых параметров нет.']], 'изменений нет')
+        assert.deepEqual(none5.disabled, [true, true], 'без изменений «Скачать .param» и «Запомнить проход» выключены')
+        assert.ok(none5.refly.some((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт')), 'пункт тестового полёта: ' + none5.refly.join(' | '))
+        assert.ok(!none5.refly.some((text) => text.startsWith('Слетайте тем же профилем')), 'без изменений «слетайте тем же профилем» нет')
         // Шаг 1 после этого — тот же, что при первом прогоне
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)

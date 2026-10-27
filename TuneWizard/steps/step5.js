@@ -8,9 +8,15 @@
 // (pidtune_axes), Libraries/FileSaver.js (saveAs), wizard.js (state, set_step, STEP_TITLES, html_escape),
 // steps/common.js (step_summary_context, step_accepted_stale, step_tile, step_verdict, step_value_text, step_signed,
 // step_try, step_metadata, step_metadata_failed, step_load_metadata, step_find_metadata), steps/step2.js
-// (step2_accepted_flags_text), steps/step3.js (step3_summary_text, step3_flagged, step3_flags_text), steps/step4.js
-// (step4, step4_axis_list, step4_ready, step4_stale, step4_fixed, step4_test_flight_short) и steps/memory.js
-// (memory_save). Все они нужны только при вызове.
+// (step2_flagged, step2_accepted_flags_text), steps/step3.js (step3_summary_text, step3_flagged, step3_flags_text),
+// steps/step4.js (step4, step4_axis_list, step4_ready, step4_stale, step4_fixed, step4_test_flight_short) и
+// steps/memory.js (memory_save). Все они нужны только при вызове.
+
+// Внутреннее состояние шага
+const step5_state = {
+    metadata_waiting: false,  // ждём загрузки метаданных параметров, чтобы перерисовать сводку (один .then на страницу)
+    unchanged_open: null,     // раскрыт ли список «без изменений» до печати (null — печать не идёт)
+}
 
 // Шаги, принятое которых сводит итог
 const step5_steps = [2, 3, 4]
@@ -45,21 +51,23 @@ function step5_axes_titles(axes) {
     return step4_axis_list.filter((axis) => axes.includes(axis)).map((axis) => pidtune_axes[axis].title).join(", ")
 }
 
-// ---------- Данные сводки ----------
-
-// Контекст итога (summary_rows) — тот же построитель, что у отпечатка входов (step_summary_context): «изменён» в сводке
-// и в ключе «устарело» считается по одной версии фильтра. Нужен загруженный лог
-function step5_context() {
-    return step_summary_context()
+// Оси шага 4 без надёжного измерения словами: «оси шага 4 без надёжного измерения: крен, тангаж — нужен тестовый
+// полёт» (одна ось — «ось шага 4 …»)
+function step5_unreliable_text(axes) {
+    return ((axes.length == 1) ? "ось шага 4 без надёжного измерения: " : "оси шага 4 без надёжного измерения: ") +
+        step5_axes_titles(axes) + " — нужен тестовый полёт"
 }
 
+// ---------- Данные сводки ----------
+
 // Оси шага 4 без надёжного измерения (ключи pidtune_axes) — для вердикта и «что перелететь»: из принятого шага 4
-// (metrics.reliable === false), а если шаг 4 не принят — из уже посчитанного, только при актуальном расчёте: на логе
-// вроде тестового менять нечего, и «Принять» могут не нажать [наше]. Шаг 4 не открывался или расчёт устарел — []
+// (metrics.reliable не true — как «ненадёжно» в таблице шагов), а если шаг 4 не принят — из уже посчитанного, только
+// при актуальном расчёте: на логе вроде тестового менять нечего, и «Принять» могут не нажать [наше]. Шаг 4 не
+// открывался или расчёт устарел — []
 function step5_unreliable_axes() {
     const accepted = state.steps[4]
     if (accepted != null) {
-        return step4_axis_list.filter((axis) => accepted.axes?.[axis]?.metrics?.reliable === false)
+        return step4_axis_list.filter((axis) => accepted.axes?.[axis]?.metrics?.reliable !== true)
     }
     if (!step4_ready() || step4_stale()) {
         return []
@@ -80,22 +88,39 @@ function step5_reboot_names(rows) {
     return summary_reboot_names(rows.filter((row) => row.changed).map((row) => row.name), data, step_find_metadata)
 }
 
-// Отметки принятого шага 2 — как в его вердикте (step2_render_verdict): пики хуже лога, задержка, неполная оценка
-function step5_flagged2(accepted) {
-    const flags = accepted.flags
-    return (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
-}
-
 // Оси принятого шага 4 с отметками прогноза (непустые flags.reasons)
 function step5_flagged4_axes(accepted) {
     return step4_axis_list.filter((axis) => (accepted.axes?.[axis]?.flags?.reasons?.length ?? 0) > 0)
+}
+
+// Прогноз оси принятого шага 4 словами (metrics — step4_metrics_summary): «ненадёжно», «прогноз недостоверен» или
+// перерегулирование и запас фазы прогноза; величины, которых в прогнозе нет, не пишутся
+function step5_axis_text(m) {
+    if ((m == null) || (m.reliable !== true)) {
+        return "ненадёжно"
+    }
+    if (!m.prediction_valid) {
+        return "прогноз недостоверен"
+    }
+    const pred = m.prediction
+    if (pred == null) {
+        return "прогноза нет"
+    }
+    if (pred.unstable) {
+        return "прогноз неустойчив"
+    }
+    const pm = Number.isFinite(pred.pm_deg) ? "запас фазы " + step4_fixed(pred.pm_deg, 1) + "°" : null
+    if (!Number.isFinite(pred.overshoot_pct)) {
+        return (pm != null) ? "прогноз: " + pm : "прогноза нет"
+    }
+    return "прогноз перерегулирования " + step4_fixed(pred.overshoot_pct, 1) + " %" + ((pm != null) ? ", " + pm : "")
 }
 
 // Итог принятого шага n словами → { text, flags }: text — короткий итог к логу (без заглавной), flags — отметки словами
 // теми же функциями, что у вердиктов шагов, или null — отметок нет.
 // Шаг 2 — полоса и задержка на старшей частоте задержки (30 Гц) к логу; шаг 3 — шум гироскопа, шум D крена и тангажа
 // и задержка путей P и D (step3_summary_text); шаг 4 — по осям прогноз перерегулирования и запаса фазы, «ненадёжно»
-// или «прогноз недостоверен»
+// или «прогноз недостоверен» (step5_axis_text)
 function step5_step_result(n, accepted) {
     const metrics = accepted.metrics
     if (n === 2) {
@@ -108,28 +133,13 @@ function step5_step_result(n, accepted) {
             text = "полоса " + rules.band_hz.join("–") + " Гц " + cur.band_dB.toFixed(2) + " дБ (к логу " + step_signed(cur.band_dB - log.band_dB, 2) +
                 "), задержка на " + hz + " Гц " + cur.lag_ms[hz].toFixed(2) + " мс (к логу " + step_signed(cur.lag_ms[hz] - log.lag_ms[hz], 2) + ")"
         }
-        return { text: text, flags: step5_flagged2(accepted) ? step2_accepted_flags_text(accepted) : null }
+        return { text: text, flags: step2_flagged(accepted.flags) ? step2_accepted_flags_text(accepted) : null }
     }
     if (n === 3) {
         const text = (metrics != null) ? step3_summary_text(metrics.current, metrics.log) + " (к логу)" : "без сравнения с логом"
         return { text: text, flags: step3_flagged(accepted.flags) ? step3_flags_text(accepted.flags, metrics.current, metrics.log) : null }
     }
-    const axis_text = (m) => {
-        if ((m == null) || (m.reliable !== true)) {
-            return "ненадёжно"
-        }
-        if (!m.prediction_valid) {
-            return "прогноз недостоверен"
-        }
-        if (m.prediction == null) {
-            return "прогноза нет"
-        }
-        if (m.prediction.unstable) {
-            return "прогноз неустойчив"
-        }
-        return "прогноз перерегулирования " + step4_fixed(m.prediction.overshoot_pct, 1) + " %, запас фазы " + step4_fixed(m.prediction.pm_deg, 1) + "°"
-    }
-    const text = step4_axis_list.map((axis) => pidtune_axes[axis].title + " — " + axis_text(accepted.axes?.[axis]?.metrics)).join("; ")
+    const text = step4_axis_list.map((axis) => pidtune_axes[axis].title + " — " + step5_axis_text(accepted.axes?.[axis]?.metrics)).join("; ")
     const flagged = step5_flagged4_axes(accepted)
     const flags = flagged.map((axis) => pidtune_axes[axis].title + " — " + accepted.axes[axis].flags.reasons.join("; ")).join(" · ")
     return { text: text, flags: (flagged.length > 0) ? flags : null }
@@ -148,6 +158,9 @@ function step5_init() {
             set_step(Number(button.dataset.goto))
         }
     })
+    // Печать и кнопкой «Печать», и из меню браузера (Ctrl+P)
+    window.addEventListener("beforeprint", step5_before_print)
+    window.addEventListener("afterprint", step5_after_print)
 }
 
 // Новый лог или ошибка загрузки: сводка пустая, кнопки файла и памяти выключены. Память браузера не трогается
@@ -167,15 +180,18 @@ function step5_reset() {
 // ---------- Показ и действия ----------
 
 // Показ шага: сводка сразу; заметка прошлого действия скрыта. Метаданных параметров ещё нет и они не сбились —
-// загрузить и перерисовать: пункт «что перелететь» о перезагрузке появится после загрузки
+// загрузить и перерисовать (один раз, сколько бы раз шаг ни показывали): пункт «что перелететь» о перезагрузке
+// появится после загрузки
 function step5_show() {
     if (state.info == null) {
         return
     }
     document.getElementById("step5_note").hidden = true
     step_try(step5_render, "verdict5", "шага 5")
-    if ((step_metadata() == null) && !step_metadata_failed()) {
+    if ((step_metadata() == null) && !step_metadata_failed() && !step5_state.metadata_waiting) {
+        step5_state.metadata_waiting = true
         step_load_metadata().then(() => {
+            step5_state.metadata_waiting = false
             if ((state.step === 5) && (state.info != null)) {
                 step_try(step5_render, "verdict5", "шага 5")
             }
@@ -191,10 +207,11 @@ function step5_note(text) {
 }
 
 // «Скачать .param»: только изменённые параметры (summary_param_text) в файл <лог>_tune.param, затем память прохода —
-// скачанный файл означает намерение применить [решение пользователя 25.10.2026]. Устаревшее принятое не блокирует
+// скачанный файл означает намерение применить [решение пользователя 25.10.2026]. Устаревшее принятое не блокирует.
+// Ошибку памяти memory_save возвращает текстом заметки, не бросает
 function step5_download() {
     step_try(() => {
-        const ctx = step5_context()
+        const ctx = step_summary_context()
         const rows = summary_rows(ctx).rows
         const text = summary_param_text(rows, ctx.bits)
         if (text == null) {
@@ -209,10 +226,10 @@ function step5_download() {
 
 // «Запомнить проход»: память без файла — значения вводятся на аппарате вручную [решение пользователя 25.10.2026]
 function step5_remember() {
-    step_try(() => step5_note(memory_save()), "verdict5", "шага 5")
+    step5_note(memory_save())
 }
 
-// Шапка печати (#step5_print_head, видна только при печати): «Мастер настройки · <лог> · <аппарат> · <дата>»;
+// Шапка печати (#step5_print_head, видна только при печати): «Мастер настройки · <лог> · <аппарат> · <дата печати>»;
 // аппарат — строка контроллера и рама
 function step5_fill_print_head() {
     const info = state.info
@@ -221,11 +238,31 @@ function step5_fill_print_head() {
     document.getElementById("step5_print_head").textContent = ["Мастер настройки", state.file_name ?? "—", (device !== "") ? device : "—", date].join(" · ")
 }
 
-// «Печать»: шапка с датой печати, затем диалог печати браузера (правила @media print оставляют только сводку)
-function step5_print() {
-    if (state.info != null) {
-        step5_fill_print_head()
+// Перед печатью на шаге 5 (кнопка «Печать» или меню браузера): шапка с временем печати и раскрытый список «без
+// изменений» — на бумаге его не раскрыть; прежнее состояние списка запоминается до конца печати
+function step5_before_print() {
+    if ((state.step !== 5) || (state.info == null)) {
+        return
     }
+    step5_fill_print_head()
+    const details = document.getElementById("unchanged5")
+    if (step5_state.unchanged_open == null) {
+        step5_state.unchanged_open = details.open
+    }
+    details.open = true
+}
+
+// После печати: список «без изменений» — как был до неё
+function step5_after_print() {
+    if (step5_state.unchanged_open == null) {
+        return
+    }
+    document.getElementById("unchanged5").open = step5_state.unchanged_open
+    step5_state.unchanged_open = null
+}
+
+// «Печать»: диалог печати браузера; шапку и список готовит step5_before_print, правила @media print оставляют сводку
+function step5_print() {
     window.print()
 }
 
@@ -234,7 +271,7 @@ function step5_print() {
 // Сводка целиком: итог прохода (summary_rows), устаревшее принятое (step_accepted_stale), оси шага 4 без надёжного
 // измерения; кнопки файла и памяти — только при изменённых строках
 function step5_render() {
-    const summary = summary_rows(step5_context())
+    const summary = summary_rows(step_summary_context())
     const rows = summary.rows
     const changed = rows.filter((row) => row.changed)
     const accepted = step5_steps.filter((n) => summary.accepted[n])
@@ -249,7 +286,6 @@ function step5_render() {
     for (const id of ["step5_download", "step5_remember"]) {
         document.getElementById(id).disabled = changed.length == 0
     }
-    step5_fill_print_head()
 }
 
 // Плитки: аппарат (плата — первое слово строки контроллера; рама и остаток строки — подписью), лог (прошивка подписью),
@@ -269,11 +305,13 @@ function step5_render_tiles(changed, accepted, stale) {
     box.hidden = false
 }
 
-// Вердикт: ничего не принято (или лог не Copter) — «менять нечего»; есть устаревшее, отметки шагов или оси шага 4
-// без надёжного измерения — предупреждение с перечнем; иначе — готово или «совпадает с логом»
+// Вердикт: ничего не принято (или лог не Copter) — «менять нечего» (и тестовый полёт, если оси шага 4 без надёжного
+// измерения уже известны); есть устаревшее, отметки шагов или оси шага 4 без надёжного измерения — предупреждение
+// с перечнем; иначе — готово или «совпадает с логом»
 function step5_render_verdict(changed, accepted, stale, unreliable) {
     if ((accepted.length == 0) || (state.info.vehicle !== "Copter")) {
-        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов 2–4 не принят.")
+        const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable)) + " (ниже)." : ""
+        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов 2–4 не принят." + tail)
         return
     }
     const issues = []
@@ -282,19 +320,22 @@ function step5_render_verdict(changed, accepted, stale, unreliable) {
     } else if (stale.length > 1) {
         issues.push("принятое шагов " + stale.join(", ") + " устарело — примите их заново")
     }
-    if ((state.steps[2] != null) && step5_flagged2(state.steps[2])) {
-        issues.push("шаг 2 принят хуже лога")
+    const flagged = []
+    if ((state.steps[2] != null) && step2_flagged(state.steps[2].flags)) {
+        flagged.push(2)
     }
     if ((state.steps[3] != null) && step3_flagged(state.steps[3].flags)) {
-        issues.push("шаг 3 принят хуже лога")
+        flagged.push(3)
+    }
+    if (flagged.length > 0) {
+        issues.push(((flagged.length == 1) ? "шаг " : "шаги ") + flagged.join(", ") + ((flagged.length == 1) ? " принят" : " приняты") + " с отметками")
     }
     const flagged4 = (state.steps[4] != null) ? step5_flagged4_axes(state.steps[4]) : []
     if (flagged4.length > 0) {
-        issues.push("прогноз шага 4 помечает " + step5_axes_titles(flagged4))
+        issues.push("у шага 4 отметки прогноза: " + step5_axes_titles(flagged4))
     }
     if (unreliable.length > 0) {
-        issues.push(((unreliable.length == 1) ? "ось шага 4 без надёжного измерения: " : "оси шага 4 без надёжного измерения: ") +
-                    step5_axes_titles(unreliable) + " — нужен тестовый полёт")
+        issues.push(step5_unreliable_text(unreliable))
     }
     const count = step5_count(changed.length, step5_param_forms)
     if (issues.length > 0) {

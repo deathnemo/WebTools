@@ -1180,9 +1180,7 @@ function step2_render_verdict() {
                    "), задержка на " + lag_hz + " Гц " + metrics.current.lag_ms[lag_hz].toFixed(2) + " мс (к логу " +
                    step_signed(metrics.current.lag_ms[lag_hz] - metrics.log.lag_ms[lag_hz], 2) + ")"
         }
-        const flags = accepted.flags
-        const flagged = (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
-        if (flagged) {
+        if (step2_flagged(accepted.flags)) {
             step_verdict("verdict2", "warn", "Принято, но хуже лога: " + step2_accepted_flags_text(accepted) + ". " + name + tail + ".")
         } else {
             step_verdict("verdict2", "ok", "Принято: " + name + tail + ".")
@@ -1244,6 +1242,12 @@ function step2_render_verdict() {
         "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step_signed(e.band_dB - log.band_dB, 2) +
         " дБ к логу, задержка на " + lag_hz + " Гц " + step_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс. " +
         (selected ? "Он выбран — нажмите «Применить вариант», затем «Принять»." : "Выберите его в таблице и нажмите «Применить вариант», затем «Принять».") + stale)
+}
+
+// Отметки варианта против лога (rank_candidates), которые делают его хуже лога: неполная оценка, пики хуже лога,
+// задержка сверх допуска; flags null — сравнения не было, отметок нет. Вердикт шага 2 и сводка шага 5
+function step2_flagged(flags) {
+    return (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
 }
 
 // Отметки принятого набора против лога словами (сохранены в state.steps[2].flags; пики — из сводки метрик)
