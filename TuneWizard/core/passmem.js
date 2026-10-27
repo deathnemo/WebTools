@@ -24,16 +24,20 @@ function passmem_is_object(value) {
     return (value != null) && (typeof value === "object") && !Array.isArray(value)
 }
 
-// Годна ли запись прохода из хранилища для функций памяти: объект; changed — массив объектов со строковым name и
-// числовым step; saved_at — число или нет (null — тоже нет: так его пишет passmem_record без даты); estimates —
-// объект или нет. Остальные поля функции памяти читают осторожно (?., null)
-function passmem_valid(record) {
+// Годна ли запись прохода record, лежащая в карте под ключом key, для функций памяти: объект; key — строка, равная
+// ключу в карте (иначе «Забыть» по pass.key промахнётся); changed — массив объектов со строковым name и числовым step;
+// saved_at — число или нет (null — тоже нет: так его пишет passmem_record без даты); estimates — объект или нет, его
+// оценки шагов 2–4 — объекты или null (нет). Остальные поля функции памяти читают осторожно (?., null)
+function passmem_valid(key, record) {
     return passmem_is_object(record) &&
+        (record.key === key) &&
         Array.isArray(record.changed) &&
         record.changed.every((change) => passmem_is_object(change) && (typeof change.name === "string") &&
                                          (typeof change.step === "number")) &&
         ((record.saved_at == null) || (typeof record.saved_at === "number")) &&
-        ((record.estimates == null) || passmem_is_object(record.estimates))
+        ((record.estimates == null) ||
+         (passmem_is_object(record.estimates) &&
+          [2, 3, 4].every((n) => (record.estimates[n] == null) || passmem_is_object(record.estimates[n]))))
 }
 
 // Проходы из хранилища → { passes, error }: error null — прочитано (ключа нет — пусто); "unavailable" — хранилища нет
@@ -66,7 +70,7 @@ function passmem_read(storage) {
     const passes = {}
     let dropped = false
     for (const [key, record] of Object.entries(data.passes)) {
-        if (passmem_valid(record)) {
+        if (passmem_valid(key, record)) {
             passes[key] = record
         } else {
             dropped = true
@@ -268,17 +272,19 @@ function passmem_applied(pass, params, bits) {
 // Применены ли параметры, от которых зависит прогноз шага n (2–4) прошлого прохода. applied — passmem_applied(pass, …);
 // шаг строки — шаг прохода, который дал значение. axis — ось шага 4 (roll | pitch | yaw); не передана — весь шаг 4.
 // Прогноз шага 3 считался от notch шага 2, шага 4 — от notch шага 2 и фильтров шага 3 [код, шаги мастера], поэтому
-// учитываются изменённые строки шагов 2..n; из строк шага 4 с осью — только этой оси (префикс pidtune_axes[axis].rate):
-// другая ось на неё не влияет [наше].
+// учитываются изменённые строки шагов 2..n. На шаге 4 с осью строки с префиксом другой оси (pidtune_axes[a].rate,
+// a ≠ axis) не учитываются ни у шага 4, ни у шагов 2–3 (ATC_RAT_PIT_FLTD, ATC_RAT_YAW_FLTE для крена): другая ось на
+// неё не влияет [наше]. Строки без префикса оси (notch, INS_GYRO_FILTER, пределы ускорения ATC_ACC*) учитываются.
 // → "none" — шаг n (на шаге 4 с осью — эта ось) в проходе ничего не менял: строки сравнения нет; "partial" — параметры
 //   шагов 2..n применены не все (другое значение или нет в логе); "applied" — все
 function passmem_step_status(applied, n, axis) {
-    const own = applied.rows.filter((row) => (row.step === n) &&
-        ((n !== 4) || (axis == null) || row.name.startsWith(pidtune_axes[axis].rate)))
-    if (own.length === 0) {
+    // Префиксы других осей: только на шаге 4 с осью
+    const others = ((n === 4) && (axis != null)) ?
+        Object.keys(pidtune_axes).filter((a) => a !== axis).map((a) => pidtune_axes[a].rate) : []
+    const rows = applied.rows.filter((row) => (row.step <= n) && !others.some((prefix) => row.name.startsWith(prefix)))
+    if (!rows.some((row) => row.step === n)) {
         return "none"
     }
-    const rows = applied.rows.filter((row) => row.step < n).concat(own)
     return rows.every((row) => row.status === "applied") ? "applied" : "partial"
 }
 

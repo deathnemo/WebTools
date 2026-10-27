@@ -221,24 +221,41 @@ test('passmem_read: битые записи отбрасываются, оста
     assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ a: null, b: { key: 'b' }, c: good }) })),
         { passes: { c: good }, error: 'corrupt' })
 
-    // Каждый вид порчи по отдельности
+    // Каждый вид порчи по отдельности — на годной записи под ключом x (сама она читается)
+    const base = { ...good, key: 'x' }
+    assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ c: good, x: base }) })),
+        { passes: { c: good, x: base }, error: null })
     const broken = {
-        array: [good],
+        array: [base],
         number: 5,
-        no_changed: { ...good, changed: undefined },
-        changed_object: { ...good, changed: {} },
-        changed_null_item: { ...good, changed: [null] },
-        name_number: { ...good, changed: [{ ...good.changed[0], name: 7 }] },
-        no_name: { ...good, changed: [{ log: 1, value: 2, step: 2 }] },
-        step_string: { ...good, changed: [{ ...good.changed[0], step: '2' }] },
-        saved_at_string: { ...good, saved_at: '1000' },
-        estimates_array: { ...good, estimates: [] },
-        estimates_number: { ...good, estimates: 1 },
+        // key не тот, что в карте (иначе «Забыть» по pass.key промахнётся), не строка или нет
+        key_other: { ...base, key: 'fc:B' },
+        key_number: { ...base, key: 7 },
+        no_key: { ...base, key: undefined },
+        no_changed: { ...base, changed: undefined },
+        changed_object: { ...base, changed: {} },
+        changed_null_item: { ...base, changed: [null] },
+        name_number: { ...base, changed: [{ ...base.changed[0], name: 7 }] },
+        no_name: { ...base, changed: [{ log: 1, value: 2, step: 2 }] },
+        step_string: { ...base, changed: [{ ...base.changed[0], step: '2' }] },
+        saved_at_string: { ...base, saved_at: '1000' },
+        estimates_array: { ...base, estimates: [] },
+        estimates_number: { ...base, estimates: 1 },
+        // Оценки шага — объект или null
+        estimates2_number: { ...base, estimates: { ...base.estimates, 2: 5 } },
+        estimates3_string: { ...base, estimates: { ...base.estimates, 3: 'x' } },
+        estimates4_array: { ...base, estimates: { ...base.estimates, 4: [] } },
     }
     for (const [what, record] of Object.entries(broken)) {
         assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ c: good, x: record }) })),
             { passes: { c: good }, error: 'corrupt' }, what)
     }
+    // Пример из ревью: ключ записи не совпал с ключом в карте
+    assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ 'fc:A': { key: 'fc:B', changed: [] } }) })),
+        { passes: {}, error: 'corrupt' })
+    // Оценки шагов null — годна
+    const no_estimates = { ...base, estimates: { 2: null, 3: null, 4: null } }
+    assert.equal(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ x: no_estimates }) })).error, null)
 
     // Без saved_at и estimates, с пустым changed — запись годна
     const minimal = { key: 'm', changed: [] }
@@ -681,6 +698,35 @@ test('passmem_compare: шаг 4 — «применено» по шагам 2–3
 
     // Рыскание шаг 4 не менял — строки нет, хотя ось надёжна, оценки есть, а шаг 3 не применён
     assert.equal(passmem_compare(fltd_not.pass, fltd_not.applied, 4, NOW4, 'yaw'), null)
+})
+
+test('passmem_compare: шаг 4 — строки шагов 2–3 с префиксом другой оси на ось не влияют, без префикса оси — влияют', () => {
+    // Шаг 3 менял ещё FLTD тангажа, FLTE рыскания и INS_GYRO_FILTER
+    const rows = [...ROWS,
+        { name: 'ATC_RAT_PIT_FLTD', log: 20, value: 25, step: 3, changed: true, note: null },
+        { name: 'ATC_RAT_YAW_FLTE', log: 2.5, value: 2, step: 3, changed: true, note: null },
+        { name: 'INS_GYRO_FILTER', log: 40, value: 42, step: 3, changed: true, note: null }]
+    const pass = fake_pass({ rows: rows })
+    const log = { ...APPLIED_LOG, ATC_RAT_PIT_FLTD: 25, ATC_RAT_YAW_FLTE: 2, INS_GYRO_FILTER: 42 }
+    const applied_with = (changes) => passmem_applied(pass, fake_params({ ...log, ...changes }), 8)
+
+    // Не применён ATC_RAT_PIT_FLTD — крен ok, тангаж partial; шаг 3 и шаг 4 целиком — partial
+    const pit_fltd = applied_with({ ATC_RAT_PIT_FLTD: 20 })
+    assert.equal(passmem_compare(pass, pit_fltd, 4, NOW4, 'roll').status, 'ok')
+    assert.deepEqual(passmem_compare(pass, pit_fltd, 4, NOW4, 'pitch'), { status: 'partial' })
+    assert.equal(passmem_step_status(pit_fltd, 4, 'roll'), 'applied')
+    assert.equal(passmem_step_status(pit_fltd, 4, 'pitch'), 'partial')
+    assert.equal(passmem_step_status(pit_fltd, 3), 'partial')
+    assert.equal(passmem_step_status(pit_fltd, 4), 'partial')
+
+    // Не применён ATC_RAT_YAW_FLTE — крен ok
+    assert.equal(passmem_compare(pass, applied_with({ ATC_RAT_YAW_FLTE: 2.5 }), 4, NOW4, 'roll').status, 'ok')
+
+    // Не применён INS_GYRO_FILTER (без префикса оси) — крен partial
+    assert.deepEqual(passmem_compare(pass, applied_with({ INS_GYRO_FILTER: 40 }), 4, NOW4, 'roll'), { status: 'partial' })
+
+    // Всё применено — крен ok
+    assert.equal(passmem_compare(pass, applied_with({}), 4, NOW4, 'roll').status, 'ok')
 })
 
 test('passmem_compare: шаг 4 — нет записи оси в оценках или ось не передана — null', () => {
