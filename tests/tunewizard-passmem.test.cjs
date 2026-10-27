@@ -1,6 +1,7 @@
 // Тесты памяти прохода мастера настройки (TuneWizard/core/passmem.js): чтение и запись хранилища (версия,
 // испорченный JSON, битые записи, недоступное хранилище), ключ аппарата и запасной ключ, запись прохода (изменённые
-// параметры, оценки шагов 2–4; устаревшие и перекрытые шаги без оценок), предел числа аппаратов, «забыть» и список,
+// параметры, оценки шагов 2–4; устаревшие и перекрытые шаги без оценок), одна оценка в форме памяти (её же страница
+// передаёт как оценку нового лога), предел числа аппаратов, «забыть» и список,
 // «применено / другое значение / нет в логе», «лог прошлого прохода», статус шага (накопительно по шагам 2–n) и
 // условия строки сравнения (всё применено, частично, ось ненадёжна), совместимость с записанным форматом v1.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
@@ -436,6 +437,45 @@ test('passmem_record: значение шага перекрыто другим 
     assert.notEqual(pass.estimates[4], null)
     // Расхождений нет — оценки всех шагов
     assert.notEqual(fake_pass({ steps: steps, conflicts: [] }).estimates[2], null)
+})
+
+test('passmem_estimate2/3/4_axis: одна оценка в форме памяти — те же поля, что у оценок прохода', () => {
+    const steps = fake_steps()
+    const pass = fake_pass({ steps: steps })
+    // Запись прохода строится этими же функциями: log и accepted шагов 2–3, оси шага 4
+    assert.deepEqual(passmem_estimate2(steps[2].metrics.log), pass.estimates[2].log)
+    assert.deepEqual(passmem_estimate2(steps[2].metrics.current), pass.estimates[2].accepted)
+    assert.deepEqual(passmem_estimate2(steps[2].metrics.log), { band_dB: -40.25, lag30_ms: 2.71 })
+    assert.deepEqual(passmem_estimate3(steps[3].metrics.log), pass.estimates[3].log)
+    assert.deepEqual(passmem_estimate3(steps[3].metrics.current), pass.estimates[3].accepted)
+    for (const axis of ['roll', 'pitch', 'yaw']) {
+        assert.deepEqual(passmem_estimate4_axis(steps[4].axes[axis].metrics), pass.estimates[4][axis], axis)
+    }
+    // Ось нового лога для строки сравнения — сводка без строки (prediction null)
+    assert.deepEqual(passmem_estimate4_axis(step4_eval({ reliable: true, measured: [0.05, 9], log: [54, 12] })),
+        { reliable: true, measured: { overshoot_pct: 9, rise_s: 0.05 }, log: { pm_deg: 54, crossover_hz: 12 }, prediction: null })
+})
+
+test('passmem_estimate2/3/4_axis: нет оценки или чисел — null на их месте; NaN и бесконечность — null', () => {
+    assert.deepEqual(passmem_estimate2(null), { band_dB: null, lag30_ms: null })
+    assert.deepEqual(passmem_estimate2({ band_dB: NaN, lag_ms: { 10: 1 } }), { band_dB: null, lag30_ms: null })
+    assert.deepEqual(passmem_estimate3(undefined), {
+        gyro_band_dB: null, dterm_dB: { roll: null, pitch: null },
+        lag30_ms: { roll: { P: null, D: null }, pitch: { P: null, D: null } },
+    })
+    const e3 = step3_eval(Infinity, { roll: null, pitch: -30 }, { roll: [1, 3, 1.3, -Infinity], pitch: [1, 3.1, 1.3, 4.1] })
+    assert.deepEqual(passmem_estimate3(e3), {
+        gyro_band_dB: null, dterm_dB: { roll: null, pitch: -30 },
+        lag30_ms: { roll: { P: 3, D: null }, pitch: { P: 3.1, D: 4.1 } },
+    })
+    assert.equal(passmem_estimate4_axis(null), null)
+    assert.equal(passmem_estimate4_axis(undefined), null)
+    assert.deepEqual(passmem_estimate4_axis(step4_eval({ reliable: false })),
+        { reliable: false, measured: null, log: null, prediction: null })
+    // Оценка нового лога в этой форме проходит в passmem_compare как now без изменений
+    const { pass, applied } = pass_and_applied(APPLIED_LOG)
+    const now2 = passmem_estimate2({ band_dB: -42, lag_ms: { 10: 0.9, 30: 2.5 } })
+    assert.deepEqual(passmem_compare(pass, applied, 2, now2).now, { band_dB: -42, lag30_ms: 2.5 })
 })
 
 // ---------------------------------------------------------------- проходы

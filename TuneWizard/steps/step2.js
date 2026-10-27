@@ -3,7 +3,8 @@
 // и спектрограмма для значений формы, метрики против лога, файл .param (core/params.js) и «Принять».
 // Состояние шага 1 не меняется: state.filters и FFT.H остаются от параметров лога (их рисует шаг 1), а
 // передаточная функция значений формы считается отдельно (filter_transfer) и подставляется в копию-взгляд gyro.
-// Общие помощники шагов (step_…, plot_…) — steps/common.js.
+// Общие помощники шагов (step_…, plot_…) — steps/common.js; строка сравнения с прошлым проходом — memory_show
+// (steps/memory.js).
 
 // Внутреннее состояние шага
 const step2 = {
@@ -258,7 +259,7 @@ function step2_reset() {
         filled: false, fit: null, analysis: null, ctx: null, candidates: null, evaluations: null, ranking: null, current_row: null,
         key: null, gyro_ref: null, selected_id: null, current: null, view_gyro: null, error: null,
     })
-    for (const id of ["verdict2", "warnings2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note",
+    for (const id of ["verdict2", "memory2", "warnings2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note",
                       "metrics2", "notch_file_note"]) {
         document.getElementById(id).hidden = true
     }
@@ -896,7 +897,7 @@ function step2_redraw_all() {
         document.getElementById(id).disabled = !ready
     }
     if (!ready) {
-        for (const id of ["candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note", "metrics2", "warnings2"]) {
+        for (const id of ["memory2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note", "metrics2", "warnings2"]) {
             document.getElementById(id).hidden = true
         }
         document.getElementById("cand2_apply").disabled = true
@@ -1166,8 +1167,10 @@ function step2_render_metrics() {
 }
 
 // Вердикт: принятые значения (всегда первыми); без данных «до» — предупреждение; рекомендация или «менять
-// не нужно» с причинами по отвергнутым вариантам; неудача автоподбора — приставкой к обычному тексту
+// не нужно» с причинами по отвергнутым вариантам; неудача автоподбора — приставкой к обычному тексту. Под ним — строка
+// сравнения с прошлым проходом (memory_show, steps/memory.js): при любом исходе вердикта
 function step2_render_verdict() {
+    memory_show(2)
     const accepted = state.steps[2]
     if ((accepted != null) && (step2_key(accepted.accepted) === step2_key(values_from_form()))) {
         const match = step2_match(accepted.accepted)

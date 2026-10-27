@@ -1076,7 +1076,49 @@ async function main() {
             step4_flush_edits(true)
         })
         assert.deepEqual((await step4_summary(page)).titles, sub4.titles, 'поля тангажа снова из лога — строки «Свой» нет')
-        const sub_lines = { titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
+        // Строка сравнения оси с прошлым проходом при надёжном измерении. Синтетический проход — только в memory_state
+        // (хранилище не трогается): тангаж менял D, значение применено. Фильтры шагов 2–3 приняты другими, а запас фазы
+        // «в этом логе» есть: прогноз лога — с фильтрами лога. Прогноз оси сейчас недостоверен — у запаса фазы нет звена
+        // «в этом логе»; прогноз прохода неустойчив — его чисел нет. memory_state и вердикт оси — вернуть
+        const line4 = await page.evaluate(() => {
+            const res = step4.calc.pitch
+            const record = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
+                             prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
+            const d = state.params.get('ATC_RAT_PIT_D')
+            const pass = { key: memory_state.key, saved_at: Date.now(), changed: [{ name: 'ATC_RAT_PIT_D', log: d * 2, value: d, step: 4 }],
+                           estimates: { 2: null, 3: null, 4: { roll: null, pitch: record, yaw: null } } }
+            const saved = { ...memory_state }
+            const text = () => {
+                step4_render_axis_verdict()
+                const box = document.getElementById('memory4')
+                return box.hidden ? null : box.textContent
+            }
+            try {
+                Object.assign(memory_state, { pass: pass, applied: passmem_applied(pass, state.params, hmncs_bits(state.params, state.spectrum.filter_version ?? 1)) })
+                const lines = { gyro_changed: step4_gyro_changed(), ok: text() }
+                res.predict_ok = false
+                lines.invalid = text()
+                res.predict_ok = true
+                record.prediction.unstable = true
+                lines.unstable = text()
+                return { ...lines, head: 'Прошлый проход (' + memory_date_text(pass.saved_at) + '): ',
+                         now: [res.metrics.overshoot_pct.toFixed(1), (res.metrics.rise_s * 1000).toFixed(1), res.pred_log.pm_deg.toFixed(1)] }
+            } finally {
+                res.predict_ok = true
+                Object.assign(memory_state, saved)
+                step4_render_axis_verdict()
+            }
+        })
+        const [os4, rise4, pm4] = line4.now
+        assert.equal(line4.gyro_changed, true, 'фильтры гироскопа шагов 2–3 отличаются от лога')
+        assert.equal(line4.ok, line4.head + 'перерегулирование 12.5 → прогноз 8.5 → в этом логе ' + os4 + ' %; нарастание 55.0 → прогноз 50.0 → в этом логе ' + rise4 +
+                     ' мс; запас фазы 48.0 → прогноз 55.0 → в этом логе ' + pm4 + '°.', 'строка оси: измерение и запас фазы лога')
+        assert.equal(line4.invalid, line4.head + 'перерегулирование 12.5 → прогноз 8.5 → в этом логе ' + os4 + ' %; нарастание 55.0 → прогноз 50.0 → в этом логе ' + rise4 +
+                     ' мс; запас фазы 48.0 → прогноз 55.0°.', 'прогноз оси недостоверен — запас фазы без «в этом логе»')
+        assert.equal(line4.unstable, line4.head + 'перерегулирование 12.5 → прогноз — → в этом логе ' + os4 + ' %; нарастание 55.0 → прогноз — → в этом логе ' + rise4 +
+                     ' мс; запас фазы 48.0 → прогноз — → в этом логе ' + pm4 + '°; прогноз был неустойчив.', 'прогноз прохода неустойчив — без его чисел')
+        assert.equal(await page.evaluate(() => document.getElementById('memory4').hidden), true, 'проход вернули — строки оси нет')
+        const sub_lines ={ titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
         // Снять подмену и пересчитать: снова ненадёжно на всех осях, бодэ пуст
         await page.evaluate(() => {
             pidtune_log_mode = window.__step4_orig.mode
@@ -1629,6 +1671,118 @@ async function main() {
         assert.equal(s4.verdict, s1.verdict, 'тот же вердикт')
         await page.click('#wizbar button:nth-child(1)')
 
+        // Строки сравнения с прошлым проходом на шагах 2–4 (раздел 4.5 дизайна). Синтетический проход этого аппарата —
+        // passmem_record по строкам итога changes ([имя, шаг, применено ли]: «было» — значение лога + 5, предложено —
+        // значение лога или, если не применено, + 1) и оценкам принятых шагов steps; положен в память, блок шага 0 — заново
+        // (memory_render_step0: проход — в memory_state), затем шаг открывается, и строка рисуется с его вердиктом. Шаги 2–4
+        // после повторной загрузки посчитаны выше и не приняты. Строки шагов — по атрибуту hidden (секции других шагов
+        // скрыты)
+        const memory_lines = () => page.evaluate(() => Object.fromEntries([2, 3, 4].map((n) => {
+            const box = document.getElementById('memory' + n)
+            return [n, box.hidden ? null : box.textContent]
+        })))
+        const put_pass = (changes, steps) => page.evaluate(([changes, steps]) => {
+            const rows = changes.map(([name, step, applied]) => {
+                const now = state.params.get(name)
+                return { name: name, log: now + 5, value: applied ? now : now + 1, step: step, changed: true }
+            })
+            const record = passmem_record({ key: memory_state.key, info: state.info, file_name: 'прошлый.bin', rows: rows, steps: steps,
+                                            saved_at: Date.now() - 86400000 })
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return { has: changes.every(([name]) => state.params.has(name)), head: 'Прошлый проход (' + memory_date_text(record.saved_at) + '): ',
+                     pass: memory_state.pass?.key ?? null }
+        }, [changes, steps])
+        // Оценки принятых шагов прохода — от оценок «Как в логе» этого лога со сдвигом (было и прогноз отличаются от
+        // «в этом логе»): шаг 2 — evaluate_candidate, шаг 3 — step3_metrics_summary; ось крена шага 4 — надёжна в проходе
+        const pass_steps = await page.evaluate(() => {
+            const e2 = step2.evaluations.log
+            const shift2 = (d) => ({ band_dB: e2.band_dB + d, lag_ms: { 30: e2.lag_ms[30] + d / 10 } })
+            const e3 = step3_metrics_summary(step3.evaluations.log)
+            const shift3 = (d) => ({ ...e3, gyro: { ...e3.gyro, band_dB: e3.gyro.band_dB + d } })
+            const roll = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
+                           prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
+            return { 2: { metrics: { log: shift2(1.5), current: shift2(-0.5) } }, 3: { metrics: { log: shift3(1.25), current: shift3(-0.75) } },
+                     4: { axes: { roll: { metrics: roll } } },
+                     now: { band: e2.band_dB.toFixed(2), lag: e2.lag_ms[30].toFixed(2), gyro: e3.gyro.band_dB.toFixed(2) } }
+        })
+
+        // Шаг 2 прошлого прохода применён (значение лога = предложенному): «было → прогноз → в этом логе» с числами оценки
+        // «Как в логе» этого лога и оговоркой про шум; шаг 3 в проходе не принят — строки нет
+        const pass_a = await put_pass([['INS_HNTCH_FREQ', 2, true]], { 2: pass_steps[2] })
+        assert.deepEqual([pass_a.has, pass_a.pass], [true, fc_key], 'параметры прохода есть в логе, проход — в memory_state')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        const mem_a = await memory_lines()
+        assert.ok(mem_a[2].startsWith(pass_a.head + 'полоса '), mem_a[2])
+        assert.ok(mem_a[2].includes(' → в этом логе ' + pass_steps.now.band + ' дБ; задержка на 30 Гц '), 'полоса этого лога — оценка «Как в логе»: ' + mem_a[2])
+        assert.ok(mem_a[2].endsWith(' → в этом логе ' + pass_steps.now.lag + ' мс. Шум зависит от полёта: газ, манёвры.'), mem_a[2])
+        assert.match(mem_a[2], /^Прошлый проход \(\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\): полоса -?[\d.]+ → прогноз -?[\d.]+ → в этом логе/, mem_a[2])
+        await page.screenshot({ path: path.join(shots, 'step2-memory.png'), fullPage: true })
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[3], null, 'шаг 3 в проходе не принят — строки нет')
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Шаг 3 прошлого прохода применён не весь (FLTD тангажа не стоит), шаг 4 менял крен, и он применён: на шаге 3 —
+        // «применены не все»; ось крена надёжна в проходе, но на тестовом логе измерение ненадёжно — «сравнивать нечем»;
+        // тангаж шаг 4 не менял, оценки оси нет — строки нет; на шаге 2 строка прежнего прохода убрана (шаг 2 не принят)
+        const pass_b = await put_pass([['ATC_RAT_PIT_FLTD', 3, false], ['ATC_RAT_RLL_P', 4, true]], { 3: pass_steps[3], 4: pass_steps[4] })
+        assert.equal(pass_b.has, true)
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[2], null, 'шаг 2 в проходе не принят — строки шага 2 больше нет')
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[3], pass_b.head + 'параметры шагов 2–3 применены не все — сравнивать нечего.')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        assert.equal(await page.evaluate(() => step4.axis), 'roll')
+        assert.equal((await memory_lines())[4], pass_b.head + 'измерение ненадёжно — сравнивать нечем.')
+        assert.equal(await page.evaluate(() => document.getElementById('memory4').previousElementSibling.id), 'axis_verdict4', 'строка оси — под вердиктом оси')
+        await page.click('#step4_tab_pitch')
+        assert.equal((await memory_lines())[4], null, 'тангаж: оценки оси в проходе нет — строки нет')
+        await page.click('#step4_tab_roll')
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Шаги 2–3 прошлого прохода применены: на шаге 3 — «в этом логе» по оценке «Как в логе», пока notch-база шага 3 —
+        // notch лога. Смена одного INS_GYRO_FILTER базой не считается (оценка берёт его у варианта); notch — считается.
+        // «Принять» на шаге 2 варианта с другим notch: шаг 3 считает «Как в логе» с принятым notch — числа этого лога нет
+        const pass_c = await put_pass([['INS_HNTCH_FREQ', 2, true], ['ATC_RAT_RLL_FLTD', 3, true]], { 2: pass_steps[2], 3: pass_steps[3] })
+        assert.equal(pass_c.has, true)
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        const mem_c = (await memory_lines())[3]
+        assert.ok(mem_c.startsWith(pass_c.head + 'шум гироскопа '), mem_c)
+        assert.ok(mem_c.includes(' → в этом логе ' + pass_steps.now.gyro + ' дБ; шум D крена '), 'шум гироскопа этого лога — оценка «Как в логе»: ' + mem_c)
+        assert.match(mem_c, /; задержка на 30 Гц: путь P крена .* мс, тангажа .* мс, путь D крена .* мс, тангажа .* мс\. Шум зависит от полёта: газ, манёвры\.$/, mem_c)
+        const notch_is_log = await page.evaluate(() => ({
+            gyro_only: memory_notch_is_log({ ...values_from_log(), INS_GYRO_FILTER: values_from_log().INS_GYRO_FILTER + 10 }),
+            freq: memory_notch_is_log({ ...values_from_log(), INS_HNTCH_FREQ: values_from_log().INS_HNTCH_FREQ + 10 }),
+            other: step2.candidates.find((c) => !memory_notch_is_log(c.values))?.id ?? null,
+        }))
+        assert.deepEqual([notch_is_log.gyro_only, notch_is_log.freq], [true, false], 'notch-база: один INS_GYRO_FILTER — notch лога, другая частота — нет')
+        assert.ok(notch_is_log.other != null, 'на тестовом логе есть вариант шага 2 с другим notch')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        await page.check('#cand2_' + notch_is_log.other)
+        await page.click('#cand2_apply')
+        await wait_overlay(page)
+        await page.click('#notch_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['3'], '«Принять» шага 2 открывает шаг 3')
+        const mem_d = (await memory_lines())[3]
+        assert.ok(mem_d.startsWith(pass_c.head + 'шум гироскопа '), mem_d)
+        assert.doesNotMatch(mem_d, /в этом логе/, 'числа этого лога нет: ' + mem_d)
+        assert.ok(mem_d.endsWith('. Оценка этого лога видна до «Принять» на шаге 2: после него шаг 3 считает с принятым notch.'), mem_d)
+        // Память и проход — как ждёт дальнейшее: память пуста, прохода нет (принятое шага 2 забудет перезагрузка страницы)
+        await page.click('#wizbar button:nth-child(1)')
+        assert.deepEqual(await page.evaluate(() => {
+            localStorage.removeItem('tunewizard_v1')
+            memory_render_step0()
+            return [memory_state.pass, document.getElementById('memory0').checkVisibility()]
+        }), [null, false], 'синтетический проход убран')
+
         // Размер винта переживает перезагрузку страницы (localStorage). Перезагрузка забывает лог — поэтому в самом конце
         await page.reload({ waitUntil: 'networkidle' })
         assert.equal(await page.inputValue('#prop_in'), '10', 'размер винта из памяти браузера после перезагрузки')
@@ -1663,6 +1817,8 @@ async function main() {
             sub_lines.recommended.join('; ') + '», бодэ ' + sub_lines.log)
         console.log('  шаг 5: изменено ' + v5.expected.length + ', без изменений ' + v5.expected_unchanged + '; вердикт «' + v5.verdict + '»; что перелететь — пунктов ' +
             v5.refly.length)
+        console.log('  прошлый проход: шаг 2 «' + mem_a[2] + '»; шаг 3 «' + mem_c + '»; шаг 3 после «Принять» на шаге 2 «' + mem_d + '»; ось шага 4 под подменой «' +
+            line4.ok + '»')
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

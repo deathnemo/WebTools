@@ -28,7 +28,8 @@
 // steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, step_pointer, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js
-// (values_from_log). Принятое шагами 2–3 читается из state.steps[2] и state.steps[3].
+// (values_from_log), steps/memory.js (memory_show — строка сравнения оси с прошлым проходом). Принятое шагами 2–3
+// читается из state.steps[2] и state.steps[3].
 
 // Внутреннее состояние шага
 const step4 = {
@@ -215,7 +216,7 @@ function step4_reset() {
     step4.edit_timer = null
     document.getElementById("step4_window").value = step4.window
     document.getElementById("pidf_form").innerHTML = ""
-    for (const id of ["verdict4", "step4_tabs", "step4_panel"]) {
+    for (const id of ["verdict4", "step4_tabs", "step4_panel", "memory4"]) {
         document.getElementById(id).hidden = true
     }
     for (const id of ["cand4_apply", "pidf_accept", "step4_open_pidreview"]) {
@@ -1259,9 +1260,11 @@ function step4_prediction_text(row, pred_log) {
 }
 
 // Вердикт оси: что показал отклик и измерение, режим лога, предложение, прогноз или причина недостоверности, мало
-// манёвров, D выключен, шум D, поправка фильтров гироскопа, что делать
+// манёвров, D выключен, шум D, поправка фильтров гироскопа, что делать. Под ним — строка сравнения оси с прошлым
+// проходом (memory_show): при любом исходе вердикта
 function step4_render_axis_verdict() {
     const axis = step4.axis
+    memory_show(4, axis)
     const res = step4.calc[axis]
     const rules = pidtune_rules
     const prefix = pidtune_axes[axis].rate

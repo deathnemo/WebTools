@@ -121,57 +121,78 @@ function passmem_number(value) {
     return Number.isFinite(value) ? value : null
 }
 
-// Оценки шага 2 из state.steps[2].metrics (step2_metrics_summary): полоса и задержка на 30 Гц (старшая из
-// lag_freqs_hz, lowpass_lag_hz) значений лога (log) и принятых (accepted); шаг не принят или без метрик — null
+// Одна оценка шага 2 в форме памяти: полоса и задержка на 30 Гц (старшая из lag_freqs_hz, lowpass_lag_hz).
+// e — оценка с полями band_dB и lag_ms (сводка step2_metrics_summary current или log, evaluate_candidate шага 2).
+// → { band_dB, lag30_ms }; нет числа (в том числе нет e) — null на его месте. Этой же формой страница передаёт
+// оценку нового лога в passmem_compare (строка сравнения шага 2)
+function passmem_estimate2(e) {
+    return { band_dB: passmem_number(e?.band_dB), lag30_ms: passmem_number(e?.lag_ms?.[30]) }
+}
+
+// Одна оценка шага 3 в форме памяти: шум гироскопа в полосе, шум D по осям lowpass_pid_axes (оценки D нет — null)
+// и задержка путей P и D на 30 Гц. e — сводка step3_metrics_summary (или evaluate_lowpass: поля те же).
+// → { gyro_band_dB, dterm_dB: { roll, pitch }, lag30_ms: { roll: { P, D }, pitch: { P, D } } }; нет числа — null.
+// Этой же формой страница передаёт оценку нового лога в passmem_compare (строка сравнения шага 3)
+function passmem_estimate3(e) {
+    const dterm = {}
+    const lag = {}
+    for (const axis of Object.keys(lowpass_pid_axes)) {
+        dterm[axis] = passmem_number(e?.dterm?.[axis]?.dB)
+        lag[axis] = { P: passmem_number(e?.lag_ms?.[axis]?.P?.[30]), D: passmem_number(e?.lag_ms?.[axis]?.D?.[30]) }
+    }
+    return { gyro_band_dB: passmem_number(e?.gyro?.band_dB), dterm_dB: dterm, lag30_ms: lag }
+}
+
+// Одна ось шага 4 в форме памяти. m — сводка оси step4_metrics_summary: надёжность измерения, измеренные
+// перерегулирование и нарастание, запас фазы и частота среза лога, прогноз для строки (недостоверен — null).
+// → { reliable, measured, log, prediction }; нет измерения, прогноза лога или прогноза строки — null на их месте;
+// m нет — null. Этой же формой (без prediction: passmem_compare его не читает) страница передаёт ось нового лога
+// в passmem_compare (строка сравнения шага 4)
+function passmem_estimate4_axis(m) {
+    if (m == null) {
+        return null
+    }
+    return {
+        reliable: passmem_value(m.reliable),
+        measured: (m.measured == null) ? null :
+            { overshoot_pct: passmem_number(m.measured.overshoot_pct), rise_s: passmem_number(m.measured.rise_s) },
+        log: (m.log == null) ? null : { pm_deg: passmem_number(m.log.pm_deg), crossover_hz: passmem_number(m.log.crossover_hz) },
+        prediction: (m.prediction == null) ? null : {
+            overshoot_pct: passmem_number(m.prediction.overshoot_pct), rise_s: passmem_number(m.prediction.rise_s),
+            pm_deg: passmem_number(m.prediction.pm_deg), unstable: passmem_value(m.prediction.unstable),
+        },
+    }
+}
+
+// Оценки шага 2 из state.steps[2].metrics (step2_metrics_summary): значения лога (log) и принятых (accepted) —
+// passmem_estimate2; шаг не принят или без метрик — null
 function passmem_estimates2(step) {
     const metrics = step?.metrics
     if (metrics == null) {
         return null
     }
-    const pick = (e) => ({ band_dB: passmem_number(e?.band_dB), lag30_ms: passmem_number(e?.lag_ms?.[30]) })
-    return { log: pick(metrics.log), accepted: pick(metrics.current) }
+    return { log: passmem_estimate2(metrics.log), accepted: passmem_estimate2(metrics.current) }
 }
 
-// Оценки шага 3 из state.steps[3].metrics (step3_metrics_summary для log и current): шум гироскопа в полосе, шум D
-// по осям (оценки D нет — null) и задержка путей P и D на 30 Гц; шаг не принят или без метрик — null
+// Оценки шага 3 из state.steps[3].metrics (step3_metrics_summary для log и current) — passmem_estimate3; шаг не
+// принят или без метрик — null
 function passmem_estimates3(step) {
     const metrics = step?.metrics
     if (metrics == null) {
         return null
     }
-    const pick = (e) => {
-        const dterm = {}
-        const lag = {}
-        for (const axis of Object.keys(lowpass_pid_axes)) {
-            dterm[axis] = passmem_number(e?.dterm?.[axis]?.dB)
-            lag[axis] = { P: passmem_number(e?.lag_ms?.[axis]?.P?.[30]), D: passmem_number(e?.lag_ms?.[axis]?.D?.[30]) }
-        }
-        return { gyro_band_dB: passmem_number(e?.gyro?.band_dB), dterm_dB: dterm, lag30_ms: lag }
-    }
-    return { log: pick(metrics.log), accepted: pick(metrics.current) }
+    return { log: passmem_estimate3(metrics.log), accepted: passmem_estimate3(metrics.current) }
 }
 
-// Оценки шага 4 по осям pidtune_axes из state.steps[4].axes[ось].metrics (step4_metrics_summary): надёжность
-// измерения, измеренные перерегулирование и нарастание, запас фазы и частота среза лога, прогноз для принятого
-// (недостоверен — null). Нет измерения или прогноза лога — null на их месте; нет метрик оси — null вместо оси;
-// шаг не принят — null
+// Оценки шага 4 по осям pidtune_axes из state.steps[4].axes[ось].metrics (step4_metrics_summary) —
+// passmem_estimate4_axis; нет метрик оси — null вместо оси; шаг не принят — null
 function passmem_estimates4(step) {
     if (step?.axes == null) {
         return null
     }
     const estimates = {}
     for (const axis of Object.keys(pidtune_axes)) {
-        const m = step.axes[axis]?.metrics
-        estimates[axis] = (m == null) ? null : {
-            reliable: passmem_value(m.reliable),
-            measured: (m.measured == null) ? null :
-                { overshoot_pct: passmem_number(m.measured.overshoot_pct), rise_s: passmem_number(m.measured.rise_s) },
-            log: (m.log == null) ? null : { pm_deg: passmem_number(m.log.pm_deg), crossover_hz: passmem_number(m.log.crossover_hz) },
-            prediction: (m.prediction == null) ? null : {
-                overshoot_pct: passmem_number(m.prediction.overshoot_pct), rise_s: passmem_number(m.prediction.rise_s),
-                pm_deg: passmem_number(m.prediction.pm_deg), unstable: passmem_value(m.prediction.unstable),
-            },
-        }
+        estimates[axis] = passmem_estimate4_axis(step.axes[axis]?.metrics)
     }
     return estimates
 }

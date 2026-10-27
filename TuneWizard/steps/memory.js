@@ -1,12 +1,14 @@
 // Память прохода на странице мастера: хранилище браузера, сохранение прохода по аппарату (шаг 5: «Скачать .param»
-// и «Запомнить проход») и блок «Прошлый проход» шага 0 — что из предложенного в прошлый раз стоит в загруженном логе.
-// Формат, ключ аппарата, запись и «применено» — ядро core/passmem.js; здесь — только состояние страницы.
-// Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 4. Строки сравнения шагов 2–4 — задача 7 плана
-// этапа 5: проход для лога они берут из memory_state.
+// и «Запомнить проход»), блок «Прошлый проход» шага 0 — что из предложенного в прошлый раз стоит в загруженном логе —
+// и строки сравнения шагов 2–4 «было → прогноз → в этом логе» (проход для лога — из memory_state).
+// Формат, ключ аппарата, запись, «применено» и условия строки сравнения — ядро core/passmem.js; здесь — только
+// состояние и текст страницы. Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 4.
 //
 // Нужны глобалы страницы: core/passmem.js (passmem_*), core/summary.js (summary_rows), core/params.js (hmncs_bits),
-// wizard.js (state, html_escape) и steps/common.js (step_summary_context, step_accepted_stale, step_try, step_verdict,
-// step_value_text). Все они нужны только при вызове.
+// core/candidates.js (candidate_key), core/lowpass.js (lowpass_pid_axes), wizard.js (state, html_escape),
+// steps/common.js (step_summary_context, step_accepted_stale, step_try, step_verdict, step_value_text), steps/step1.js
+// (values_from_log), steps/step2.js (step2), steps/step3.js (step3, step3_metrics_summary, step3_axis_names) и
+// steps/step4.js (step4, step4_metrics_summary). Все они нужны только при вызове.
 
 // Проход для загруженного лога (блок «Прошлый проход» шага 0): pass — проход из памяти (null — прохода нет, он не
 // выбран из списка или забыт), applied — passmem_applied(pass, …) по параметрам лога (null — без прохода), key — ключ
@@ -291,4 +293,172 @@ function memory_forget() {
         memory_show_empty()
     }
     memory_focus_after_forget()
+}
+
+// ---------- Шаги 2–4: строка сравнения с прошлым проходом ----------
+// Дизайн — раздел 4.5: «Прошлый проход (дата): было X → прогноз Y → в этом логе Z» — сбылся ли прогноз прошлого прохода
+// [решение пользователя 25.10.2026]. X — оценка лога прошлого прохода, Y — прогноз для принятого, Z — оценка
+// конфигурации нового лога (вариант «Как в логе»). Когда строка есть и что сравнивать — passmem_compare. Строку рисуют
+// вердикты шагов (step2_render_verdict, step3_render_verdict, step4_render_axis_verdict) через memory_show: она
+// обновляется при каждом показе шага, а проход берёт из memory_state (шаг 0 выставляет его при загрузке лога и выборе
+// в списке). Числа — с теми же знаками, что плитки метрик шагов
+
+// Оговорка строк шагов 2–3: шум нового лога зависит не только от фильтров, но и от полёта
+const memory_noise_note = "Шум зависит от полёта: газ, манёвры."
+
+// Звено одной величины: «X → прогноз Y → в этом логе Z» и единицы units (с пробелом впереди, если он нужен: " дБ",
+// но "°"); числа — с digits знаками, нет числа — «—». show_now false — без «→ в этом логе»: величины этого лога нет
+// (notch-база шага 3 — не лога, прогноз оси шага 4 сейчас недостоверен). Чисел нет совсем — null: величину не писать
+function memory_chain(was, predicted, now, digits, units, show_now = true) {
+    const values = show_now ? [was, predicted, now] : [was, predicted]
+    if (!values.some(Number.isFinite)) {
+        return null
+    }
+    const text = (value) => Number.isFinite(value) ? value.toFixed(digits) : "—"
+    return text(was) + " → прогноз " + text(predicted) + (show_now ? " → в этом логе " + text(now) : "") + units
+}
+
+// «<что> <звено>»; звена нет — null
+function memory_part(what, chain) {
+    return (chain != null) ? what + " " + chain : null
+}
+
+// Notch-база расчёта шага 3 — notch лога: base (step3.base — принятое на шаге 2 или values_from_log) без
+// INS_GYRO_FILTER равна значениям лога (values_from_log) по candidate_key. INS_GYRO_FILTER не сравнивается:
+// evaluate_lowpass берёт его у варианта, а не у базы (core/lowpass.js), поэтому оценка «Как в логе» шага 3 и при
+// другом INS_GYRO_FILTER, принятом на шаге 2, — оценка конфигурации лога (решение координатора по задаче 7).
+// Ложных отличий нет: значения лога — float32 без потерь, принятое шагом 2 — float32 формы, маски HMNCS с обеих сторон
+// без знака, ESCMSK при версии фильтра ниже 4 — 0 с обеих сторон
+function memory_notch_is_log(base) {
+    if (base == null) {
+        return false
+    }
+    const notch = (values) => {
+        const rest = { ...values }
+        delete rest.INS_GYRO_FILTER
+        return candidate_key(rest)
+    }
+    return notch(base) === notch(values_from_log())
+}
+
+// Оценка нового лога для строки сравнения шага n (2–4) — в форме estimates[n].log прохода (passmem_estimate2,
+// passmem_estimate3, passmem_estimate4_axis). → { now } или null — расчёта шага нет (строки нет). Только величины
+// конфигурации лога [дизайн, раздел 4.5]:
+// - шаг 2 — оценка «Как в логе» (step2.evaluations.log);
+// - шаг 3 — оценка «Как в логе» (step3.evaluations.log), если notch-база расчёта — notch лога (memory_notch_is_log);
+//   иначе now null: после «Принять» на шаге 2 шаг 3 считает «Как в логе» с принятым notch, и это уже не лог;
+// - шаг 4 — ось axis расчёта (step4_metrics_summary без строки): измерение — всегда; запас фазы и частота среза лога —
+//   только при достоверном прогнозе оси (как плитка «Срез · запас фазы (лог)»), иначе log null. От принятого на
+//   шагах 2–3 они не зависят: прогноз лога (res.pred_log) — регулятор с фильтрами лога, без поправки фильтров
+//   гироскопа (решение координатора по задаче 7)
+function memory_now(n, axis) {
+    if (n === 2) {
+        const log = step2.evaluations?.log ?? null
+        return (log != null) ? { now: passmem_estimate2(log) } : null
+    }
+    if (n === 3) {
+        const log = step3.evaluations?.log ?? null
+        if (log == null) {
+            return null
+        }
+        return { now: memory_notch_is_log(step3.base) ? passmem_estimate3(step3_metrics_summary(log)) : null }
+    }
+    if (step4.calc?.[axis] == null) {
+        return null
+    }
+    const metrics = step4_metrics_summary(axis, null)
+    const now = passmem_estimate4_axis(metrics)
+    if (!metrics.prediction_valid) {
+        now.log = null
+    }
+    return { now: now }
+}
+
+// Величины шага 2 словами: полоса и задержка на 30 Гц (поля lag30_ms памяти), оговорка про шум; величин нет — null
+function memory_text2(compare) {
+    const { was, predicted, now } = compare
+    const parts = [
+        memory_part("полоса", memory_chain(was?.band_dB, predicted?.band_dB, now?.band_dB, 2, " дБ")),
+        memory_part("задержка на 30 Гц", memory_chain(was?.lag30_ms, predicted?.lag30_ms, now?.lag30_ms, 2, " мс")),
+    ].filter((part) => part != null)
+    return (parts.length > 0) ? parts.join("; ") + ". " + memory_noise_note : null
+}
+
+// Величины шага 3 словами: шум гироскопа, шум D крена и тангажа, задержка путей P и D на 30 Гц; оси без чисел не
+// пишутся. Оценки этого лога нет (now null — notch-база не лога) — звенья без «в этом логе» и пояснение вместо
+// оговорки про шум; величин нет — null
+function memory_text3(compare) {
+    const { was, predicted, now } = compare
+    const show_now = now != null
+    const chain = (pick, units) => memory_chain(pick(was), pick(predicted), pick(now), 2, units, show_now)
+    // «<что> крена …, тангажа …»
+    const by_axis = (what, pick, units) => {
+        const items = Object.keys(lowpass_pid_axes).map((axis) => memory_part(step3_axis_names[axis].gen, chain((e) => pick(e, axis), units)))
+            .filter((item) => item != null)
+        return (items.length > 0) ? what + " " + items.join(", ") : null
+    }
+    const lag = ["P", "D"].map((path) => by_axis("путь " + path, (e, axis) => e?.lag30_ms?.[axis]?.[path], " мс")).filter((item) => item != null)
+    const parts = [
+        memory_part("шум гироскопа", chain((e) => e?.gyro_band_dB, " дБ")),
+        by_axis("шум D", (e, axis) => e?.dterm_dB?.[axis], " дБ"),
+        (lag.length > 0) ? "задержка на 30 Гц: " + lag.join(", ") : null,
+    ].filter((part) => part != null)
+    if (parts.length == 0) {
+        return null
+    }
+    const tail = show_now ? memory_noise_note : "Оценка этого лога видна до «Принять» на шаге 2: после него шаг 3 считает с принятым notch."
+    return parts.join("; ") + ". " + tail
+}
+
+// Величины оси шага 4 словами: перерегулирование и нарастание (измерение), запас фазы (прогноз лога). Нарастание — в мс,
+// числа — как в плитках шага 4. Прогноз прошлого прохода неустойчив — его числа не пишутся (как step4_margins_shown не
+// показывает их у неустойчивого), в конце — «прогноз был неустойчив». Запаса фазы этого лога нет (прогноз оси сейчас
+// недостоверен) — у него нет звена «в этом логе». Величин нет — null
+function memory_text4(compare) {
+    const { was, now } = compare
+    const unstable = compare.predicted?.unstable === true
+    const predicted = unstable ? null : compare.predicted
+    const ms = (seconds) => Number.isFinite(seconds) ? seconds * 1000 : null
+    const parts = [
+        memory_part("перерегулирование", memory_chain(was?.measured?.overshoot_pct, predicted?.overshoot_pct, now?.measured?.overshoot_pct, 1, " %")),
+        memory_part("нарастание", memory_chain(ms(was?.measured?.rise_s), ms(predicted?.rise_s), ms(now?.measured?.rise_s), 1, " мс")),
+        memory_part("запас фазы", memory_chain(was?.log?.pm_deg, predicted?.pm_deg, now?.log?.pm_deg, 1, "°", now?.log != null)),
+    ].filter((part) => part != null)
+    if (parts.length == 0) {
+        return null
+    }
+    if (unstable) {
+        parts.push("прогноз был неустойчив")
+    }
+    return parts.join("; ") + "."
+}
+
+// Текст строки сравнения шага n (2–4) или null — строки нет (passmem_compare: прохода нет, оценок шага нет, шаг —
+// на шаге 4 ось axis — в проходе ничего не менял; или величин нет совсем). now — оценка нового лога (memory_now).
+// Дата прохода — как в подписи блока шага 0 (memory_date_text)
+function memory_line(n, now, axis) {
+    const compare = passmem_compare(memory_state.pass, memory_state.applied, n, now, axis)
+    if (compare == null) {
+        return null
+    }
+    const head = "Прошлый проход (" + memory_date_text(memory_state.pass.saved_at) + "): "
+    if (compare.status === "partial") {
+        // Прогноз шага n считался от принятого на шагах до него: «применено» — накопительно по шагам 2–n
+        return head + "параметры " + ((n === 2) ? "шага 2" : "шагов 2–" + n) + " применены не все — сравнивать нечего."
+    }
+    if (compare.status === "unreliable") {
+        return head + "измерение ненадёжно — сравнивать нечем."
+    }
+    const body = { 2: memory_text2, 3: memory_text3, 4: memory_text4 }[n](compare)
+    return (body != null) ? head + body : null
+}
+
+// Строка сравнения шага n (2–4) в #memory<n>: текст memory_line по оценке нового лога из расчёта шага (memory_now);
+// нет расчёта или строки — скрыта. axis — ось открытой вкладки шага 4
+function memory_show(n, axis) {
+    const box = document.getElementById("memory" + n)
+    const est = memory_now(n, axis)
+    const text = (est != null) ? memory_line(n, est.now, axis) : null
+    box.textContent = text ?? ""
+    box.hidden = text == null
 }
