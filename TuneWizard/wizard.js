@@ -265,6 +265,9 @@ function init_wizard() {
     if (typeof step5_init === "function") {
         step5_init()
     }
+    if (typeof memory_init === "function") {
+        memory_init()
+    }
     set_step(0)
 }
 
@@ -345,6 +348,9 @@ function reset() {
     if (typeof step5_reset === "function") {
         step5_reset()
     }
+    if (typeof memory_reset === "function") {
+        memory_reset()
+    }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
@@ -409,6 +415,10 @@ async function load(buffer, file = null) {
 
     render_info()
     render_checks()
+    // Блок «Прошлый проход»: сбой памяти не роняет загрузку лога — ошибка в вердикте блока
+    if (typeof memory_render_step0 === "function") {
+        step_try(memory_render_step0, "memory0_verdict", "памяти прохода")
+    }
     plot_flight()
 
     for (const id of ["TimeStart", "TimeEnd"]) {

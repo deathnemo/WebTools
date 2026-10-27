@@ -318,7 +318,7 @@ async function main() {
         assert.equal(await page.locator('#wizbar button').count(), 6, 'шесть кнопок шагов')
         assert.deepEqual(await step_buttons_disabled(page), [false, true, true, true, true, true], 'до загрузки доступен только шаг 0')
         assert.deepEqual(await visible_steps(page), ['0'], 'видна только секция шага 0')
-        assert.deepEqual(await page.evaluate(() => ['log_verdict', 'log_info', 'log_checks'].filter((id) => getComputedStyle(document.getElementById(id)).display !== 'none')), [], 'блоки результата скрыты до загрузки')
+        assert.deepEqual(await page.evaluate(() => ['log_verdict', 'log_info', 'log_checks', 'memory0'].filter((id) => getComputedStyle(document.getElementById(id)).display !== 'none')), [], 'блоки результата скрыты до загрузки')
 
         // Только тёмная тема «Графит»: переключателя нет, color-scheme тёмная, фон страницы — токен --bg
         assert.equal(await page.locator('.themebar').count(), 0, 'переключателя темы нет')
@@ -355,6 +355,9 @@ async function main() {
         for (const status of statuses) {
             assert.ok(['ok', 'warn', 'fail'].includes(status), 'статус проверки: ' + status)
         }
+        // Браузер теста — новый контекст с пустым хранилищем: прошлого прохода нет, блок скрыт
+        assert.deepEqual(await page.evaluate(() => ({ visible: document.getElementById('memory0').checkVisibility(), key: memory_state.key, pass: memory_state.pass })),
+                         { visible: false, key: 'fc:StellarH7V2 0034002E 35335104 39363630', pass: null }, 'памяти нет — блок «Прошлый проход» скрыт')
 
         // Интервал анализа и график
         const start = Number(await page.inputValue('#TimeStart'))
@@ -1381,6 +1384,116 @@ async function main() {
         await page.waitForFunction(() => (state.log != null) && (state.log !== window.__old_log) &&
             (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
         assert.equal(await page.evaluate(() => state.gyro === null), true, 'новый лог — гироскоп ещё не загружен')
+
+        // Шаг 0, блок «Прошлый проход»: в памяти — проход этого аппарата, сохранённый на шаге 5 из этого же лога. Значения
+        // лога равны «было» прохода и имя файла то же — «лог прошлого прохода»; строки — изменённые параметры прохода по
+        // порядку, итог — «другое значение» (предложенное не стоит) или «нет в логе» (параметра не было); строка
+        // контроллера в логе есть — списка выбора нет
+        const fc_key = 'fc:StellarH7V2 0034002E 35335104 39363630'
+        const memory0 = () => page.evaluate(() => {
+            const seen = (id) => document.getElementById(id).checkVisibility()
+            const select = document.getElementById('memory0_pick')
+            return {
+                visible: seen('memory0'),
+                head: document.getElementById('memory0_head').textContent,
+                verdict: seen('memory0_verdict') ? document.getElementById('memory0_verdict').textContent : null,
+                verdict_class: document.getElementById('memory0_verdict').className,
+                rows: seen('memory0_table') ? [...document.querySelectorAll('#memory0_table tbody tr')].map((tr) => [...tr.cells].map((td) => td.textContent)) : null,
+                pick: seen('memory0_pick_field') ? { value: select.value, options: [...select.options].map((o) => [o.value, o.textContent]) } : null,
+                forget: seen('memory0_forget'),
+                pass: memory_state.pass?.key ?? null,
+                applied: (memory_state.applied != null) ? [memory_state.applied.applied, memory_state.applied.total] : null,
+                stored: Object.keys(JSON.parse(localStorage.getItem('tunewizard_v1') ?? '{"passes":{}}').passes),
+            }
+        })
+        const pass0 = await page.evaluate((key) => ({ changed: JSON.parse(localStorage.getItem('tunewizard_v1')).passes[key].changed, fw: state.info.fw_string }), fc_key)
+        const m0 = await memory0()
+        assert.equal(m0.visible, true, 'проход аппарата есть — блок «Прошлый проход» виден')
+        assert.match(m0.head, /^Сохранён \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}, лог /, m0.head)
+        assert.ok(m0.head.endsWith(', лог ' + path.basename(log_path) + ', прошивка ' + pass0.fw), m0.head)
+        assert.equal(m0.verdict, 'Это лог прошлого прохода — значения ещё не применялись.')
+        assert.match(m0.verdict_class, /verdict--warn/)
+        assert.equal(m0.rows.length, pass0.changed.length, 'строк — столько же, сколько изменённых в проходе')
+        assert.deepEqual(m0.rows.map((cells) => [cells[0], cells[1], cells[4]]),
+                         pass0.changed.map((c) => [c.name, String(c.step), (c.log == null) ? 'нет в логе' : 'другое значение']), 'строки — изменённые параметры прохода')
+        assert.deepEqual([m0.pick, m0.forget, m0.pass, m0.applied], [null, true, fc_key, [0, pass0.changed.length]], 'списка нет, «Забыть» есть, проход — в memory_state')
+        await page.screenshot({ path: path.join(shots, 'step0-memory.png'), fullPage: true })
+
+        // «Забыть проход этого аппарата» — блок скрыт, прохода нет ни в памяти браузера, ни в memory_state
+        await page.click('#memory0_forget')
+        const forgot0 = await memory0()
+        assert.deepEqual([forgot0.visible, forgot0.stored, forgot0.pass, forgot0.applied], [false, [], null, null], '«Забыть» — проход удалён, блок скрыт')
+
+        // Проход с другого лога, предложенные значения которого стоят в этом: «Применено N из N»; одно значение чужое —
+        // «Применено N−1 из N», итог строки — «другое значение». Имена — из констант тестового лога (есть в логе)
+        const synth_names = ['INS_GYRO_FILTER', 'ATC_RAT_RLL_FLTD', 'ATC_RAT_PIT_FLTD']
+        const put_synth = (other) => page.evaluate(([names, other]) => {
+            const changed = names.map((name, i) => {
+                const now = state.params.get(name)
+                return { name: name, log: now + 5, value: (i === other) ? now + 1 : now, step: 3 }
+            })
+            const record = { key: memory_state.key, board: state.info.board, frame: state.info.frame, fw: state.info.fw_string, file_name: 'прошлый.bin',
+                             saved_at: Date.now() - 86400000, changed: changed, estimates: { 2: null, 3: null, 4: null } }
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return names.every((name) => state.params.has(name))
+        }, [synth_names, other])
+        assert.equal(await put_synth(-1), true, 'параметры синтетического прохода есть в логе')
+        const all0 = await memory0()
+        assert.deepEqual([all0.visible, all0.verdict, all0.verdict_class, all0.rows.map((cells) => cells[4]), all0.applied],
+                         [true, 'Применено 3 из 3.', 'verdict verdict--ok', ['применено', 'применено', 'применено'], [3, 3]], 'все предложенные стоят в логе')
+        assert.match(all0.head, /, лог прошлый\.bin, прошивка /, all0.head)
+        await put_synth(1)
+        const one0 = await memory0()
+        assert.deepEqual([one0.verdict, one0.verdict_class, one0.rows.map((cells) => cells[4]), one0.applied],
+                         ['Применено 2 из 3.', 'verdict verdict--warn', ['применено', 'другое значение', 'применено'], [2, 3]], 'одно значение чужое')
+        // Битая запись рядом (не проходит проверку формы): проход аппарата уцелел — показан, к вердикту — строка
+        // предупреждения; битая запись из хранилища удалена
+        await page.evaluate(() => {
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            data.passes['fc:битая'] = { key: 'другой' }
+            localStorage.setItem('tunewizard_v1', JSON.stringify(data))
+            memory_render_step0()
+        })
+        const bad0 = await memory0()
+        assert.deepEqual([bad0.verdict, bad0.verdict_class, bad0.stored], ['Применено 2 из 3. Часть памяти прохода не прочитана — удалена.', 'verdict verdict--warn', [fc_key]],
+                         'битая запись — предупреждение и удалена')
+
+        // Лог без строки контроллера: список сохранённых проходов, ничего не выбрано — таблицы, вердикта и «Забыть» нет;
+        // выбор прохода — его таблица. Строку контроллера затем вернуть и построить блок заново
+        await page.evaluate(() => {
+            window.__board = state.info.board
+            state.info.board = null
+            memory_render_step0()
+        })
+        const nofc0 = await memory0()
+        assert.equal(nofc0.visible, true, 'без строки контроллера — блок со списком')
+        assert.deepEqual([nofc0.pick.value, nofc0.pick.options.map((option) => option[0]), nofc0.rows, nofc0.verdict, nofc0.forget, nofc0.pass],
+                         ['', ['', fc_key], null, null, false, null], 'ничего не выбрано, таблицы нет')
+        assert.match(nofc0.pick.options[1][1], /^\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2} · StellarH7V2 0034002E 35335104 39363630, QUAD\/X_REV · прошлый\.bin$/, nofc0.pick.options[1][1])
+        assert.equal(await page.evaluate(() => memory_state.key), 'log:1503·QUAD/X_REV·' + path.basename(log_path), 'запасной ключ аппарата')
+        await page.selectOption('#memory0_pick', fc_key)
+        const picked0 = await memory0()
+        assert.deepEqual([picked0.pass, picked0.verdict, picked0.rows.map((cells) => cells[0]), picked0.forget], [fc_key, 'Применено 2 из 3.', synth_names, true],
+                         'выбран проход — его таблица')
+        await page.screenshot({ path: path.join(shots, 'step0-memory-pick.png'), fullPage: true })
+        // Узкое окно: блок со списком не шире окна и не прокручивается сам (таблица — внутри своей рамки). Страницу целиком
+        // не меряем: график полёта Plotly подстраивает под окно с задержкой
+        await page.setViewportSize({ width: 390, height: 1000 })
+        const pick_fit = await page.evaluate(() => {
+            const box = document.getElementById('memory0')
+            return { right: Math.round(box.getBoundingClientRect().right), window: document.documentElement.clientWidth, scroll: box.scrollWidth, client: box.clientWidth }
+        })
+        assert.ok((pick_fit.right <= pick_fit.window) && (pick_fit.scroll <= pick_fit.client), 'блок «Прошлый проход» на узком окне: ' + JSON.stringify(pick_fit))
+        await page.setViewportSize({ width: 1400, height: 1000 })
+        await page.evaluate(() => {
+            state.info.board = window.__board
+            memory_render_step0()
+        })
+        // Память — как после «Забыть» выше (пуста): дальше тест её не ждёт, а повторная загрузка в конце — без блока
+        await page.click('#memory0_forget')
+        const end0 = await memory0()
+        assert.deepEqual([end0.visible, end0.stored], [false, []], 'синтетический проход забыт')
         // Сразу с шага 0 на шаг 2 (шаг 1 не открывался — расчёт через step1_prepare): форма снова из лога, без строки
         // «Текущий», принятое забыто
         await page.click('#wizbar button:nth-child(3)')
