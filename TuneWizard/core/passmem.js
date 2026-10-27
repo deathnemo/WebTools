@@ -146,8 +146,8 @@ function passmem_estimate3(e) {
 // Одна ось шага 4 в форме памяти. m — сводка оси step4_metrics_summary: надёжность измерения, измеренные
 // перерегулирование и нарастание, запас фазы и частота среза лога, прогноз для строки (недостоверен — null).
 // → { reliable, measured, log, prediction }; нет измерения, прогноза лога или прогноза строки — null на их месте;
-// m нет — null. Этой же формой (без prediction: passmem_compare его не читает) страница передаёт ось нового лога
-// в passmem_compare (строка сравнения шага 4)
+// m нет — null. Этой же формой (prediction — null: сводка без строки, passmem_compare его не читает) страница передаёт
+// ось нового лога в passmem_compare (строка сравнения шага 4)
 function passmem_estimate4_axis(m) {
     if (m == null) {
         return null

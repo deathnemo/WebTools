@@ -296,26 +296,26 @@ function memory_forget() {
 }
 
 // ---------- Шаги 2–4: строка сравнения с прошлым проходом ----------
-// Дизайн — раздел 4.5: «Прошлый проход (дата): было X → прогноз Y → в этом логе Z» — сбылся ли прогноз прошлого прохода
-// [решение пользователя 25.10.2026]. X — оценка лога прошлого прохода, Y — прогноз для принятого, Z — оценка
-// конфигурации нового лога (вариант «Как в логе»). Когда строка есть и что сравнивать — passmem_compare. Строку рисуют
-// вердикты шагов (step2_render_verdict, step3_render_verdict, step4_render_axis_verdict) через memory_show: она
-// обновляется при каждом показе шага, а проход берёт из memory_state (шаг 0 выставляет его при загрузке лога и выборе
-// в списке). Числа — с теми же знаками, что плитки метрик шагов
+// Дизайн — раздел 4.5: было X → прогноз Y → в этом логе Z — сбылся ли прогноз прошлого прохода [решение пользователя
+// 25.10.2026]. X — оценка лога прошлого прохода, Y — прогноз для принятого, Z — оценка конфигурации нового лога
+// (вариант «Как в логе»). Порядок называется один раз, в цепочках величин — только числа (решение координатора по ревью
+// задачи 7): «Прошлый проход (дата), было → прогноз → в этом логе: полоса -61.87 → -63.87 → -63.37 дБ; …»; оценки
+// этого лога нет ни у одной величины — «…, было → прогноз: …». Когда строка есть и что сравнивать — passmem_compare.
+// Строку рисуют вердикты шагов (step2_render_verdict, step3_render_verdict, step4_render_axis_verdict) через
+// memory_show: она обновляется при каждом показе шага, а проход берёт из memory_state (шаг 0 выставляет его при
+// загрузке лога и выборе в списке). Числа — с теми же знаками, что плитки метрик шагов
 
 // Оговорка строк шагов 2–3: шум нового лога зависит не только от фильтров, но и от полёта
 const memory_noise_note = "Шум зависит от полёта: газ, манёвры."
 
-// Звено одной величины: «X → прогноз Y → в этом логе Z» и единицы units (с пробелом впереди, если он нужен: " дБ",
-// но "°"); числа — с digits знаками, нет числа — «—». show_now false — без «→ в этом логе»: величины этого лога нет
-// (notch-база шага 3 — не лога, прогноз оси шага 4 сейчас недостоверен). Чисел нет совсем — null: величину не писать
-function memory_chain(was, predicted, now, digits, units, show_now = true) {
-    const values = show_now ? [was, predicted, now] : [was, predicted]
+// Цепочка чисел одной величины: values — [было, прогноз] или [было, прогноз, в этом логе] через « → » и единицы units
+// (с пробелом впереди, если он нужен: " дБ", но "°"); числа — с digits знаками, нет числа — «—». Чисел нет совсем —
+// null: величину не писать
+function memory_chain(values, digits, units) {
     if (!values.some(Number.isFinite)) {
         return null
     }
-    const text = (value) => Number.isFinite(value) ? value.toFixed(digits) : "—"
-    return text(was) + " → прогноз " + text(predicted) + (show_now ? " → в этом логе " + text(now) : "") + units
+    return values.map((value) => Number.isFinite(value) ? value.toFixed(digits) : "—").join(" → ") + units
 }
 
 // «<что> <звено>»; звена нет — null
@@ -374,23 +374,33 @@ function memory_now(n, axis) {
     return { now: now }
 }
 
-// Величины шага 2 словами: полоса и задержка на 30 Гц (поля lag30_ms памяти), оговорка про шум; величин нет — null
-function memory_text2(compare) {
-    const { was, predicted, now } = compare
-    const parts = [
-        memory_part("полоса", memory_chain(was?.band_dB, predicted?.band_dB, now?.band_dB, 2, " дБ")),
-        memory_part("задержка на 30 Гц", memory_chain(was?.lag30_ms, predicted?.lag30_ms, now?.lag30_ms, 2, " мс")),
-    ].filter((part) => part != null)
-    return (parts.length > 0) ? parts.join("; ") + ". " + memory_noise_note : null
+// Числа величины pick из оценок сравнения: [было, прогноз] и, если with_now, ещё «в этом логе»
+function memory_values(compare, pick, with_now) {
+    const values = [pick(compare.was), pick(compare.predicted)]
+    return with_now ? [...values, pick(compare.now)] : values
 }
 
-// Величины шага 3 словами: шум гироскопа, шум D крена и тангажа, задержка путей P и D на 30 Гц; оси без чисел не
-// пишутся. Оценки этого лога нет (now null — notch-база не лога) — звенья без «в этом логе» и пояснение вместо
-// оговорки про шум; величин нет — null
+// Величины шагов 2–4 словами — { with_now, body } (with_now — есть ли в цепочках «в этом логе»; body — текст после
+// «было → прогноз[ → в этом логе]: ») или null — величин нет.
+// Шаг 2: полоса и задержка на 30 Гц (поля lag30_ms памяти), оговорка про шум
+function memory_text2(compare) {
+    const with_now = compare.now != null
+    const chain = (pick, units) => memory_chain(memory_values(compare, pick, with_now), 2, units)
+    const parts = [
+        memory_part("полоса", chain((e) => e?.band_dB, " дБ")),
+        memory_part("задержка на 30 Гц", chain((e) => e?.lag30_ms, " мс")),
+    ].filter((part) => part != null)
+    if (parts.length == 0) {
+        return null
+    }
+    return { with_now: with_now, body: parts.join("; ") + "." + (with_now ? " " + memory_noise_note : "") }
+}
+
+// Шаг 3: шум гироскопа, шум D крена и тангажа, задержка путей P и D на 30 Гц; оси без чисел не пишутся. Оценки этого
+// лога нет (now null — notch-база не лога) — цепочки без «в этом логе» и пояснение вместо оговорки про шум
 function memory_text3(compare) {
-    const { was, predicted, now } = compare
-    const show_now = now != null
-    const chain = (pick, units) => memory_chain(pick(was), pick(predicted), pick(now), 2, units, show_now)
+    const with_now = compare.now != null
+    const chain = (pick, units) => memory_chain(memory_values(compare, pick, with_now), 2, units)
     // «<что> крена …, тангажа …»
     const by_axis = (what, pick, units) => {
         const items = Object.keys(lowpass_pid_axes).map((axis) => memory_part(step3_axis_names[axis].gen, chain((e) => pick(e, axis), units)))
@@ -406,31 +416,48 @@ function memory_text3(compare) {
     if (parts.length == 0) {
         return null
     }
-    const tail = show_now ? memory_noise_note : "Оценка этого лога видна до «Принять» на шаге 2: после него шаг 3 считает с принятым notch."
-    return parts.join("; ") + ". " + tail
+    const tail = with_now ? memory_noise_note : "Оценка этого лога видна до «Принять» на шаге 2: после него шаг 3 считает с принятыми на шаге 2 значениями."
+    return { with_now: with_now, body: parts.join("; ") + ". " + tail }
 }
 
-// Величины оси шага 4 словами: перерегулирование и нарастание (измерение), запас фазы (прогноз лога). Нарастание — в мс,
-// числа — как в плитках шага 4. Прогноз прошлого прохода неустойчив — его числа не пишутся (как step4_margins_shown не
-// показывает их у неустойчивого), в конце — «прогноз был неустойчив». Запаса фазы этого лога нет (прогноз оси сейчас
-// недостоверен) — у него нет звена «в этом логе». Величин нет — null
+// Шаг 4 (ось): перерегулирование и нарастание (измерение), запас фазы (прогноз лога); нарастание — в мс, числа — как в
+// плитках шага 4. Измерения в цепочках — всегда с «в этом логе» (строка есть, только если ось сейчас надёжна).
+// Прогноз прошлого прохода:
+// - недостоверен (predicted null у надёжной оси) — запаса фазы нет совсем (по недостоверному прогнозу о нём не судят),
+//   в конце — «прогноз был недостоверен»; у измерений вместо прогноза — «—»;
+// - неустойчив — его числа не пишутся (как step4_prediction_text и step5_axis_text: у неустойчивого — не числа, а
+//   «неустойчив»), в конце — «прогноз был неустойчив».
+// Запаса фазы этого лога нет (прогноз оси сейчас недостоверен) — у него два числа, в конце — пояснение
 function memory_text4(compare) {
     const { was, now } = compare
+    const valid = compare.predicted != null
     const unstable = compare.predicted?.unstable === true
     const predicted = unstable ? null : compare.predicted
     const ms = (seconds) => Number.isFinite(seconds) ? seconds * 1000 : null
     const parts = [
-        memory_part("перерегулирование", memory_chain(was?.measured?.overshoot_pct, predicted?.overshoot_pct, now?.measured?.overshoot_pct, 1, " %")),
-        memory_part("нарастание", memory_chain(ms(was?.measured?.rise_s), ms(predicted?.rise_s), ms(now?.measured?.rise_s), 1, " мс")),
-        memory_part("запас фазы", memory_chain(was?.log?.pm_deg, predicted?.pm_deg, now?.log?.pm_deg, 1, "°", now?.log != null)),
-    ].filter((part) => part != null)
-    if (parts.length == 0) {
+        memory_part("перерегулирование", memory_chain([was?.measured?.overshoot_pct, predicted?.overshoot_pct, now?.measured?.overshoot_pct], 1, " %")),
+        memory_part("нарастание", memory_chain([ms(was?.measured?.rise_s), ms(predicted?.rise_s), ms(now?.measured?.rise_s)], 1, " мс")),
+    ]
+    const tails = []
+    if (!valid) {
+        tails.push("прогноз был недостоверен")
+    } else {
+        const pm_now = now?.log != null
+        const pm = [was?.log?.pm_deg, predicted?.pm_deg]
+        const chain = memory_chain(pm_now ? [...pm, now.log.pm_deg] : pm, 1, "°")
+        parts.push(memory_part("запас фазы", chain))
+        if (unstable) {
+            tails.push("прогноз был неустойчив")
+        }
+        if ((chain != null) && !pm_now) {
+            tails.push("запас фазы этого лога — только при достоверном прогнозе")
+        }
+    }
+    const shown = parts.filter((part) => part != null)
+    if (shown.length == 0) {
         return null
     }
-    if (unstable) {
-        parts.push("прогноз был неустойчив")
-    }
-    return parts.join("; ") + "."
+    return { with_now: true, body: [...shown, ...tails].join("; ") + "." }
 }
 
 // Текст строки сравнения шага n (2–4) или null — строки нет (passmem_compare: прохода нет, оценок шага нет, шаг —
@@ -441,24 +468,40 @@ function memory_line(n, now, axis) {
     if (compare == null) {
         return null
     }
-    const head = "Прошлый проход (" + memory_date_text(memory_state.pass.saved_at) + "): "
+    const head = "Прошлый проход (" + memory_date_text(memory_state.pass.saved_at) + ")"
     if (compare.status === "partial") {
-        // Прогноз шага n считался от принятого на шагах до него: «применено» — накопительно по шагам 2–n
-        return head + "параметры " + ((n === 2) ? "шага 2" : "шагов 2–" + n) + " применены не все — сравнивать нечего."
+        // Прогноз шага n считался от принятого на шагах до него: «применено» — накопительно по шагам 2–n, на шаге 4 —
+        // шаги 2–3 и параметры этой оси (passmem_step_status)
+        return head + ": параметры " + { 2: "шага 2", 3: "шагов 2–3", 4: "шагов 2–3 и этой оси" }[n] + " применены не все — сравнивать нечего."
     }
     if (compare.status === "unreliable") {
-        return head + "измерение ненадёжно — сравнивать нечем."
+        return head + ": измерение ненадёжно — сравнивать нечем."
     }
-    const body = { 2: memory_text2, 3: memory_text3, 4: memory_text4 }[n](compare)
-    return (body != null) ? head + body : null
+    const text = { 2: memory_text2, 3: memory_text3, 4: memory_text4 }[n](compare)
+    if (text == null) {
+        return null
+    }
+    return head + ", было → прогноз" + (text.with_now ? " → в этом логе" : "") + ": " + text.body
 }
 
 // Строка сравнения шага n (2–4) в #memory<n>: текст memory_line по оценке нового лога из расчёта шага (memory_now);
-// нет расчёта или строки — скрыта. axis — ось открытой вкладки шага 4
+// прохода нет, нет расчёта или строки — скрыта. axis — ось открытой вкладки шага 4. Ошибка памяти не роняет вердикт и
+// графики шага (функцию зовут вердикты): строка скрыта, ошибка — в консоль
 function memory_show(n, axis) {
     const box = document.getElementById("memory" + n)
-    const est = memory_now(n, axis)
-    const text = (est != null) ? memory_line(n, est.now, axis) : null
-    box.textContent = text ?? ""
-    box.hidden = text == null
+    box.hidden = true
+    box.textContent = ""
+    if (memory_state.pass == null) {
+        return
+    }
+    try {
+        const est = memory_now(n, axis)
+        const text = (est != null) ? memory_line(n, est.now, axis) : null
+        if (text != null) {
+            box.textContent = text
+            box.hidden = false
+        }
+    } catch (e) {
+        console.error(e)
+    }
 }
