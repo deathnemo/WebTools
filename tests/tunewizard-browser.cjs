@@ -12,6 +12,9 @@ const { chromium } = require('playwright')
 const repo = path.resolve(__dirname, '..')
 const logs_dir = path.join(repo, 'TuneWizard', 'logs')
 const port = 8791
+// Строка полётного контроллера тестового лога (MSG) и ключ аппарата памяти прохода по ней
+const test_board = 'StellarH7V2 0034002E 35335104 39363630'
+const fc_key = 'fc:' + test_board
 
 function find_log() {
     if (process.env.TUNEWIZARD_LOG) {
@@ -122,6 +125,13 @@ function step1_untouched(page) {
         H: state.gyro.every((g, i) => (g?.FFT?.H ?? null) === window.__step1_H[i]) && window.__step1_H.some((H) => H != null),
         est: JSON.stringify(Array.from(document.getElementById('Spectrum1').data[spec_trace_index(0, 2, 0)].y)) === JSON.stringify(window.__step1_est),
     }))
+}
+
+// Сразу после «Принять» шага n (2–4): в state.steps[n].inputs — отпечаток входов текущего состояния (step_inputs_key),
+// и принятое не устарело (step_accepted_stale)
+async function assert_accepted_fresh(page, n) {
+    const fresh = await page.evaluate((n) => ({ inputs: state.steps[n].inputs === step_inputs_key(n), stale: step_accepted_stale(n) }), n)
+    assert.deepEqual(fresh, { inputs: true, stale: false }, 'шаг ' + n + ': отпечаток входов принятого — от текущего состояния')
 }
 
 // Сводка шага 3: строки таблицы вариантов (подписи, рекомендованные, текст строки по id), выбранная строка, вердикт
@@ -235,6 +245,39 @@ function step4_plots(page) {
     })))
 }
 
+// Сводка шага 5: вердикт, плитки, строки таблицы шагов (ячейки и кнопка), изменённые и неизменённые строки,
+// расхождения, «что перелететь», кнопки и устаревшие шаги; ожидаемое из ядра — строки summary_rows(step_summary_context())
+// (изменённые: имя, «станет», шаг) и имена, которым по метаданным нужна перезагрузка
+function step5_summary(page) {
+    return page.evaluate(() => {
+        const cells = (tr) => [...tr.children].map((td) => td.textContent)
+        const rows = summary_rows(step_summary_context()).rows
+        const changed = rows.filter((row) => row.changed)
+        return {
+            verdict: document.getElementById('verdict5').textContent,
+            verdict_class: document.getElementById('verdict5').className,
+            tiles: [...document.querySelectorAll('#tiles5 .stat')].map((tile) => ({ key: tile.querySelector('.stat__k').textContent,
+                value: tile.querySelector('.stat__v').textContent, sub: tile.querySelector('.stat__s')?.textContent ?? null })),
+            steps: [...document.querySelectorAll('#steps5 tbody tr')].map((tr) => ({ cells: cells(tr), button: tr.querySelector('button')?.textContent ?? null })),
+            changes: [...document.querySelectorAll('#changes5 tbody tr')].map(cells),
+            expected: changed.map((row) => [row.name, step_value_text(row.value), String(row.step)]),
+            unchanged_summary: document.querySelector('#unchanged5 summary').textContent,
+            unchanged: document.querySelectorAll('#unchanged5 tbody tr').length,
+            expected_unchanged: rows.length - changed.length,
+            conflicts: document.getElementById('conflicts5').hidden ? null : document.getElementById('conflicts5').textContent,
+            refly: [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent),
+            reboot: summary_reboot_names(changed.map((row) => row.name), step_metadata(), step_find_metadata),
+            disabled: ['step5_download', 'step5_remember'].map((id) => document.getElementById(id).disabled),
+            stale: [2, 3, 4].map((n) => step_accepted_stale(n)),
+        }
+    })
+}
+
+// Ширина содержимого страницы и окна: без горизонтальной прокрутки первая не больше второй
+function page_fits(page) {
+    return page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth])
+}
+
 // Ключ значений формы и ключ значений варианта id — одинаковые, если вариант применён
 function form_matches_variant(page, id) {
     return page.evaluate((id) => step2_key(values_from_form()) === step2_key(step2_rows().find((r) => r.id === id).values), id)
@@ -278,7 +321,7 @@ async function main() {
         assert.equal(await page.locator('#wizbar button').count(), 6, 'шесть кнопок шагов')
         assert.deepEqual(await step_buttons_disabled(page), [false, true, true, true, true, true], 'до загрузки доступен только шаг 0')
         assert.deepEqual(await visible_steps(page), ['0'], 'видна только секция шага 0')
-        assert.deepEqual(await page.evaluate(() => ['log_verdict', 'log_info', 'log_checks'].filter((id) => getComputedStyle(document.getElementById(id)).display !== 'none')), [], 'блоки результата скрыты до загрузки')
+        assert.deepEqual(await page.evaluate(() => ['log_verdict', 'log_info', 'log_checks', 'memory0'].filter((id) => getComputedStyle(document.getElementById(id)).display !== 'none')), [], 'блоки результата скрыты до загрузки')
 
         // Только тёмная тема «Графит»: переключателя нет, color-scheme тёмная, фон страницы — токен --bg
         assert.equal(await page.locator('.themebar').count(), 0, 'переключателя темы нет')
@@ -302,6 +345,9 @@ async function main() {
         assert.match(await page.title(), /Мастер настройки: /)
         assert.match(await page.locator('#log_verdict').getAttribute('class'), /verdict--(ok|warn|fail)/)
         assert.ok((await page.locator('#log_info .stat').count()) >= 9, 'плитки сведений')
+        // Рама из MSG «Frame: …» и номер платы APJ из VER — для подписи и запасного ключа аппарата памяти прохода
+        assert.deepEqual(await page.evaluate(() => ({ frame: state.info.frame, board_id: state.info.board_id })), { frame: 'QUAD/X_REV', board_id: 1503 },
+                         'рама и номер платы тестового лога')
         const count = await page.locator('#log_checks .check').count()
         assert.ok(count >= 7 && count <= 9, 'от 7 до 9 проверок (clipping и газ висения зависят от лога)')
         const titles = await page.evaluate(() => [...document.querySelectorAll('#log_checks .check h3')].map((h) => h.textContent))
@@ -312,6 +358,9 @@ async function main() {
         for (const status of statuses) {
             assert.ok(['ok', 'warn', 'fail'].includes(status), 'статус проверки: ' + status)
         }
+        // Браузер теста — новый контекст с пустым хранилищем: прошлого прохода нет, блок скрыт
+        assert.deepEqual(await page.evaluate(() => ({ visible: document.getElementById('memory0').checkVisibility(), key: memory_state.key, pass: memory_state.pass })),
+                         { visible: false, key: fc_key, pass: null }, 'памяти нет — блок «Прошлый проход» скрыт')
 
         // Интервал анализа и график
         const start = Number(await page.inputValue('#TimeStart'))
@@ -619,6 +668,7 @@ async function main() {
         assert.ok((accepted.metrics != null) && Number.isFinite(accepted.metrics.current.band_dB) && Number.isFinite(accepted.metrics.current.lag_ms[30]), 'метрики принятого')
         assert.ok((accepted.flags != null) && Array.isArray(accepted.flags.worse_peaks), 'отметки принятого против лога')
         assert.match(await page.textContent('#verdict2'), /^Принято/, 'вердикт шага 2 — «Принято»')
+        await assert_accepted_fresh(page, 2)
 
         // Принять вариант, который хуже лога: вердикт warn «Принято, но хуже лога»
         await page.click('#wizbar button:nth-child(3)')
@@ -637,6 +687,24 @@ async function main() {
         assert.ok((flagged.flags.worse_peaks.length > 0) || flagged.flags.lag_over, 'отметки принятого: ' + JSON.stringify(flagged.flags))
         assert.match(flagged.cls, /verdict--warn/, 'принятое хуже лога — предупреждение')
         assert.match(flagged.text, /^Принято, но хуже лога: /, flagged.text)
+        await assert_accepted_fresh(page, 2)
+        // Память прохода, пока принятое шага 2 актуально: его оценки — числа (формы метрик страницы step2_metrics_summary
+        // и ядра passmem_estimates2 совпадают), шаги 3–4 не приняты — null. Запись убирается: сводка шага 5 ниже проверяет
+        // запись, сделанную «Скачать .param»
+        const mem2 = await page.evaluate(() => {
+            const text = memory_save()
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            localStorage.removeItem('tunewizard_v1')
+            return { text: text, keys: Object.keys(data.passes), estimates: data.passes[passmem_aircraft_key(state.info, state.file_name)].estimates }
+        })
+        assert.equal(mem2.text, 'Память прохода сохранена.')
+        assert.deepEqual(mem2.keys, [fc_key], 'проход — по строке контроллера')
+        for (const part of ['log', 'accepted']) {
+            for (const field of ['band_dB', 'lag30_ms']) {
+                assert.ok(Number.isFinite(mem2.estimates[2][part][field]), 'оценка шага 2 ' + part + '.' + field + ' — число: ' + JSON.stringify(mem2.estimates[2]))
+            }
+        }
+        assert.deepEqual([mem2.estimates[3], mem2.estimates[4]], [null, null], 'шаги 3–4 не приняты — оценок нет')
 
         // Шаг 3: варианты низкочастотных фильтров, размер винта, графики, «Принять». Notch-база — принятое на шаге 2
         // (выше принят вариант хуже лога), интервал сдвинут на 20 с, поэтому числа сравниваются с «Как в логе» того же
@@ -795,6 +863,7 @@ async function main() {
         assert.ok((accepted3.metrics != null) && (accepted3.flags != null), 'метрики и отметки принятого')
         const verdict3_prop = await page.textContent('#verdict3')
         assert.match(verdict3_prop, /^Принято/, verdict3_prop)
+        await assert_accepted_fresh(page, 3)
 
         // Правка поля формы и сразу «Принять» (щелчок раньше пересчёта правки): принимаются значения формы — «Свой»
         await page.click('#wizbar button:nth-child(4)')
@@ -808,6 +877,7 @@ async function main() {
         assert.equal(custom3.accepted.INS_GYRO_FILTER, 38, 'правка и сразу «Принять» — значение формы')
         assert.equal(custom3.candidate_id, 'custom', 'правка вручную — вариант «custom»')
         assert.match(await page.textContent('#verdict3'), /^Принято/, 'вердикт шага 3 — «Принято»')
+        await assert_accepted_fresh(page, 3)
 
         // Скриншот шага 3: принятые свои значения, строка «Свой» выбрана
         await page.click('#wizbar button:nth-child(4)')
@@ -1006,6 +1076,63 @@ async function main() {
             step4_flush_edits(true)
         })
         assert.deepEqual((await step4_summary(page)).titles, sub4.titles, 'поля тангажа снова из лога — строки «Свой» нет')
+        // Строка сравнения оси с прошлым проходом при надёжном измерении. Синтетический проход — только в memory_state
+        // (хранилище не трогается): тангаж менял D, значение применено. Фильтры шагов 2–3 приняты другими, а запас фазы
+        // «в этом логе» есть: прогноз лога — с фильтрами лога. Прогноз оси сейчас недостоверен — у запаса фазы два числа
+        // и пояснение; прогноз прохода неустойчив — его чисел нет; недостоверен — запаса фазы нет совсем; D тангажа не
+        // применён — «применены не все». memory_state, прогноз оси и вердикт оси — вернуть
+        const line4 = await page.evaluate(() => {
+            const res = step4.calc.pitch
+            const record = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
+                             prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
+            const d = state.params.get('ATC_RAT_PIT_D')
+            const pass = { key: memory_state.key, saved_at: Date.now(), changed: [{ name: 'ATC_RAT_PIT_D', log: d * 2, value: d, step: 4 }],
+                           estimates: { 2: null, 3: null, 4: { roll: null, pitch: record, yaw: null } } }
+            const saved = { ...memory_state }
+            const predict_ok = res.predict_ok
+            const bits = hmncs_bits(state.params, state.spectrum.filter_version ?? 1)
+            const text = () => {
+                step4_render_axis_verdict()
+                const box = document.getElementById('memory4')
+                return box.hidden ? null : box.textContent
+            }
+            try {
+                Object.assign(memory_state, { pass: pass, applied: passmem_applied(pass, state.params, bits) })
+                const lines = { gyro_changed: step4_gyro_changed(), ok: text() }
+                res.predict_ok = false
+                lines.invalid_now = text()
+                res.predict_ok = predict_ok
+                record.prediction.unstable = true
+                lines.unstable = text()
+                record.prediction = null
+                lines.invalid_was = text()
+                pass.changed[0].value = d * 3
+                memory_state.applied = passmem_applied(pass, state.params, bits)
+                lines.partial = text()
+                return { ...lines, head: 'Прошлый проход (' + memory_date_text(pass.saved_at) + ')',
+                         now: [res.metrics.overshoot_pct.toFixed(1), (res.metrics.rise_s * 1000).toFixed(1), res.pred_log.pm_deg.toFixed(1)] }
+            } finally {
+                res.predict_ok = predict_ok
+                Object.assign(memory_state, saved)
+                step4_render_axis_verdict()
+            }
+        })
+        const [os4, rise4, pm4] = line4.now
+        const head4 = line4.head + ', было → прогноз → в этом логе: '
+        assert.equal(line4.gyro_changed, true, 'фильтры гироскопа шагов 2–3 отличаются от лога')
+        assert.equal(line4.ok, head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; нарастание 55.0 → 50.0 → ' + rise4 + ' мс; запас фазы 48.0 → 55.0 → ' + pm4 + '°.',
+                     'строка оси: измерение и запас фазы лога')
+        assert.ok(line4.invalid_now.startsWith(head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; '), line4.invalid_now)
+        assert.ok(line4.invalid_now.endsWith('; запас фазы 48.0 → 55.0°; запас фазы этого лога — только при достоверном прогнозе.'),
+                  'прогноз оси сейчас недостоверен — у запаса фазы два числа и пояснение: ' + line4.invalid_now)
+        assert.ok(line4.unstable.includes('перерегулирование 12.5 → — → ' + os4 + ' %; ') && line4.unstable.includes('; запас фазы 48.0 → — → ' + pm4 + '°; ') &&
+                  line4.unstable.endsWith('; прогноз был неустойчив.'), 'прогноз прохода неустойчив — без его чисел: ' + line4.unstable)
+        assert.ok(line4.invalid_was.startsWith(head4 + 'перерегулирование 12.5 → — → ' + os4 + ' %; нарастание 55.0 → — → ' + rise4 + ' мс; ') &&
+                  !line4.invalid_was.includes('запас фазы') && line4.invalid_was.endsWith('; прогноз был недостоверен.'),
+                  'прогноз прохода недостоверен — запаса фазы нет: ' + line4.invalid_was)
+        assert.equal(line4.partial, line4.head + ': параметры шагов 2–3 и этой оси применены не все — сравнивать нечего.')
+        assert.deepEqual(await page.evaluate(() => [document.getElementById('memory4').hidden, step4.calc.pitch.predict_ok]), [true, true],
+                         'проход и прогноз оси вернули — строки оси нет')
         const sub_lines = { titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
         // Снять подмену и пересчитать: снова ненадёжно на всех осях, бодэ пуст
         await page.evaluate(() => {
@@ -1032,6 +1159,9 @@ async function main() {
         const acc4 = await page.evaluate(() => state.steps[4])
         assert.equal(acc4.accepted.ATC_RAT_RLL_P, Math.fround(0.125), 'правка и сразу «Принять» — значение формы')
         assert.deepEqual([acc4.axes.roll.candidate_id, acc4.axes.pitch.candidate_id, acc4.axes.yaw.candidate_id], ['custom', 'log', 'log'], 'у крена «Свой», у остальных — лог')
+        await assert_accepted_fresh(page, 4)
+        // Шаги 2–3 приняты на интервале, сдвинутом на 20 с, а интервал с тех пор вернули — их принятое устарело
+        assert.deepEqual(await page.evaluate(() => [step_accepted_stale(2), step_accepted_stale(3)]), [true, true], 'после смены интервала шаги 2–3 устарели')
         await page.click('#wizbar button:nth-child(5)')
         await wait_overlay(page)
         const e1 = await step4_summary(page)
@@ -1073,6 +1203,7 @@ async function main() {
         assert.deepEqual(await visible_steps(page), ['5'], '«Принять» с новым окном открывает шаг 5')
         const acc_w = await page.evaluate(() => ({ window: step4.window, key_window: JSON.parse(state.steps[4].calc_key)[2], yaw_p: state.steps[4].accepted.ATC_RAT_YAW_P }))
         assert.deepEqual(acc_w, { window: 1024, key_window: 1024, yaw_p: Math.fround(0.25) }, 'окно FFT 1024 и сразу «Принять» — принято с новым окном')
+        await assert_accepted_fresh(page, 4)
         await page.click('#wizbar button:nth-child(5)')
         await wait_overlay(page)
         assert.equal(await page.inputValue('#step4_window'), '1024', 'в поле — окно 1024')
@@ -1091,6 +1222,9 @@ async function main() {
         const stale4 = await step4_summary(page)
         assert.match(stale4.verdict, /^Принято раньше для другого интервала, окна FFT, набора или фильтров шагов 2–3/, stale4.verdict)
         assert.match(stale4.verdict_class, /verdict--warn/, '«Принято раньше» — предупреждение')
+        // Отпечаток входов: принятое шага 4 устарело (сменилось принятое шага 3), шага 3 — нет
+        await assert_accepted_fresh(page, 3)
+        assert.equal(await page.evaluate(() => step_accepted_stale(4)), true, 'шаг 3 принят заново — принятое шага 4 устарело')
 
         // Графики шага 4 на крене: данные, фон --surface, ширина как у контейнера (проверка после перезагрузки страницы
         // в конце строже: снимки выше уже включили autosize), скриншот
@@ -1106,6 +1240,215 @@ async function main() {
         await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
 
+        // Шаг 5 «Сводка» после устаревания: шаг 2 принят на сдвинутом интервале, а интервал вернули — устарел; шаг 3 принят
+        // заново (INS_GYRO_FILTER 39) — актуален; шаг 4 устарел из-за нового принятого шага 3; у шага 4 все оси без
+        // надёжного измерения. Метаданные параметров уже загружены шагами 3–4 — пункт о перезагрузке считается по ним
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'], 'открыт шаг 5')
+        await page.waitForFunction(() => step_metadata() != null, null, { timeout: 30000 })
+        const v5 = await step5_summary(page)
+        assert.deepEqual(v5.stale, [true, false, true], 'устарели шаги 2 и 4, шаг 3 актуален')
+        assert.match(v5.verdict_class, /verdict--warn/, 'сводка — предупреждение')
+        assert.match(v5.verdict, /^Изменено \d+ параметр\S*, но проверьте: принятое шагов 2, 4 устарело — примите их заново;/, v5.verdict)
+        assert.match(v5.verdict, /; оси шага 4 без надёжного измерения: крен, тангаж, рыскание — нужен тестовый полёт\.$/, v5.verdict)
+        assert.deepEqual(v5.tiles.map((tile) => [tile.key, tile.value]), [['Аппарат', 'StellarH7V2'], ['Лог', path.basename(log_path)],
+                         ['Изменено', String(v5.expected.length)], ['Приняты шаги', '2, 3, 4']], 'плитки сводки')
+        assert.equal(v5.tiles[0].sub, 'QUAD/X_REV · 0034002E 35335104 39363630', 'аппарат: плата — значением, рама и номер процессора — подписью')
+        assert.equal(v5.tiles[3].sub, 'устарело: 2, 4')
+        assert.deepEqual(v5.steps.map((row) => [row.cells[0], row.cells[1], row.button]),
+                         [['Шаг 2Гармонический notch', 'устарело', 'К шагу 2'], ['Шаг 3Низкочастотные фильтры', 'принят', null], ['Шаг 4PID по осям', 'устарело', 'К шагу 4']],
+                         'таблица шагов: устаревшие — с кнопкой перехода')
+        assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или фильтры шагов 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
+                     v5.steps[2].cells[2])
+        assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-]?[\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
+        // Изменения — изменённые строки итога (имя, «станет», шаг); INS_GYRO_FILTER — 39 от шага 3, расхождение с шагом 2
+        assert.deepEqual(v5.changes.map((cells) => [cells[0], cells[2], cells[3]]), v5.expected, 'строки изменений — изменённые строки итога')
+        assert.ok(v5.expected.some(([name, value, step]) => (name === 'INS_GYRO_FILTER') && (value === '39') && (step === '3')), 'INS_GYRO_FILTER = 39 от шага 3')
+        assert.match(v5.conflicts, /^INS_GYRO_FILTER: шаг 2 — [\d.]+, шаг 3 — 39, в файл идёт шаг 3\.$/, v5.conflicts)
+        assert.equal(v5.unchanged, v5.expected_unchanged, 'неизменённые — в свёрнутом списке')
+        assert.match(v5.unchanged_summary, new RegExp('^Без изменений — ' + v5.expected_unchanged + ' параметр'), v5.unchanged_summary)
+        // Что перелететь: тестовый полёт (все оси ненадёжны), перезагрузка — по метаданным, последним — «слетайте тем же профилем»
+        assert.match(v5.refly[v5.refly.length - 1], /^Слетайте тем же профилем/, 'последний пункт: ' + v5.refly.join(' | '))
+        assert.ok(v5.refly.some((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт: Acro')), 'пункт тестового полёта: ' + v5.refly.join(' | '))
+        assert.equal(v5.refly.some((text) => text.startsWith('После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' + v5.reboot.join(', '))),
+                     v5.reboot.length > 0, 'пункт о перезагрузке — по метаданным: ' + JSON.stringify(v5.reboot))
+        assert.deepEqual(v5.disabled, [false, false], 'изменения есть — «Скачать .param» и «Запомнить проход» доступны')
+
+        // «К шагу 4» открывает шаг 4
+        await page.click('#steps5 button[data-goto="4"]')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['4'], '«К шагу 4» открывает шаг 4')
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
+        // «К шагу 2»: форма шага 2 — принятое, но оно устарело (принято на другом интервале) — вердикт шага 2 не «Принято…»
+        // со старыми метриками, а «Принято раньше…», как «устарело» сводки
+        await page.click('#steps5 button[data-goto="2"]')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['2'], '«К шагу 2» открывает шаг 2')
+        const stale2 = await page.evaluate(() => ({ form: step2_key(values_from_form()) === step2_key(state.steps[2].accepted), stale: step_accepted_stale(2),
+                                                    text: document.getElementById('verdict2').textContent, cls: document.getElementById('verdict2').className }))
+        assert.deepEqual([stale2.form, stale2.stale], [true, true], 'в форме шага 2 — принятое, и оно устарело')
+        assert.match(stale2.text, /^Принято раньше для другого интервала или расчёта шага 1 — проверьте и примите заново\.$/, stale2.text)
+        assert.match(stale2.cls, /verdict--warn/, '«Принято раньше» — предупреждение')
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
+
+        // «Скачать .param»: только изменённые параметры итога (устаревшее не блокирует), затем память прохода
+        const [download5] = await Promise.all([page.waitForEvent('download'), page.click('#step5_download')])
+        const file5_name = path.basename(log_path).replace(/\.[^.]*$/, '') + '_tune.param'
+        assert.equal(download5.suggestedFilename(), file5_name, 'имя файла — имя лога + _tune.param')
+        const file5 = await page.evaluate((text) => {
+            const ctx = step_summary_context()
+            const expected = summary_param_values(summary_rows(ctx).rows, ctx.bits)
+            const parsed = parse_param_file(text)
+            return { names: Object.keys(parsed).sort(), expected: Object.keys(expected).sort(),
+                     same: Object.keys(expected).every((name) => Math.fround(parsed[name]) === Math.fround(expected[name])),
+                     count_text: step_plural(Object.keys(parsed).length, step5_param_forms) }
+        }, fs.readFileSync(await download5.path(), 'utf8'))
+        assert.deepEqual(file5.names, file5.expected, 'в .param — изменённые параметры итога')
+        assert.equal(file5.same, true, 'значения .param — значения итога (маски HMNCS — как summary_param_values)')
+        assert.equal(file5.names.length, v5.expected.length, 'неизменённое в файл не попало')
+        assert.equal(await page.textContent('#step5_note'), 'Файл ' + file5_name + ': ' + file5.count_text + '. Память прохода сохранена.', 'заметка о файле и памяти')
+        // Память прохода: проход аппарата по строке контроллера; оценки устаревших шагов (2 и 4; у шага 2 ещё и значение
+        // INS_GYRO_FILTER перекрыто шагом 3) — null, актуального шага 3 — числа
+        const mem5 = await page.evaluate((key) => {
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            return { version: data.version, keys: Object.keys(data.passes), pass: data.passes[key] ?? null }
+        }, fc_key)
+        assert.equal(mem5.version, 1)
+        assert.deepEqual(mem5.keys, [fc_key], 'в памяти — проход этого аппарата')
+        assert.deepEqual([mem5.pass.board, mem5.pass.frame, mem5.pass.file_name], [test_board, 'QUAD/X_REV', path.basename(log_path)])
+        assert.deepEqual(mem5.pass.changed.map((change) => change.name).sort(), file5.names, 'в проходе — изменённые параметры')
+        assert.deepEqual([mem5.pass.estimates[2], mem5.pass.estimates[4]], [null, null], 'оценки устаревших шагов 2 и 4 — null')
+        const est3 = mem5.pass.estimates[3]
+        assert.ok([est3.log.gyro_band_dB, est3.accepted.gyro_band_dB, est3.log.lag30_ms.roll.P, est3.log.lag30_ms.pitch.D, est3.log.dterm_dB.roll].every(Number.isFinite),
+                  'оценки актуального шага 3 — числа: ' + JSON.stringify(est3))
+        // «Запомнить проход» — та же память без файла
+        await page.click('#step5_remember')
+        assert.equal(await page.textContent('#step5_note'), 'Память прохода сохранена.')
+        // Хранилище браузера недоступно (доступ к localStorage бросает, как при запрете хранилища): «Запомнить проход» —
+        // текст ошибки в заметке, сводка не ломается; хранилище — вернуть
+        await page.evaluate(() => {
+            window.__storage = Object.getOwnPropertyDescriptor(window, 'localStorage') ?? null
+            Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new DOMException('Доступ запрещён', 'SecurityError') } })
+        })
+        await page.click('#step5_remember')
+        const blocked5 = await page.evaluate(() => ({ note: document.getElementById('step5_note').textContent, verdict: document.getElementById('verdict5').className }))
+        await page.evaluate(() => {
+            if (window.__storage != null) {
+                Object.defineProperty(window, 'localStorage', window.__storage)
+            } else {
+                delete window.localStorage
+            }
+        })
+        assert.deepEqual(blocked5, { note: 'Браузер не даёт сохранить память прохода (приватный режим, запрет или переполнение хранилища).', verdict: 'verdict verdict--warn' },
+                         'хранилище недоступно — текст в заметке, вердикт сводки прежний')
+        assert.equal(await page.evaluate(() => localStorage.getItem('tunewizard_v1') != null), true, 'хранилище вернули, память на месте')
+        // Метаданные параметров не загрузились — общий пункт о перезагрузке; ещё грузятся — пункта нет (появится после
+        // загрузки); состояние загрузки — вернуть
+        const meta5 = await page.evaluate(() => {
+            const saved = { ...step_metadata_state }
+            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent).filter((text) => text.includes('перезагрузите полётный контроллер'))
+            try {
+                Object.assign(step_metadata_state, { data: null, failed: true })
+                step5_render()
+                const failed = reboot()
+                Object.assign(step_metadata_state, { data: null, failed: false })
+                step5_render()
+                return { failed: failed, loading: reboot() }
+            } finally {
+                Object.assign(step_metadata_state, saved)
+                step5_render()
+            }
+        })
+        assert.equal(meta5.failed.length, 1, 'метаданные не загрузились — один пункт о перезагрузке: ' + meta5.failed.join(' | '))
+        assert.match(meta5.failed[0], /^Описания параметров не загрузились, .*: после записи перезагрузите полётный контроллер — так надёжнее\.$/, meta5.failed[0])
+        assert.deepEqual(meta5.loading, [], 'метаданные грузятся — пункта о перезагрузке нет')
+        assert.deepEqual((await step5_summary(page)).refly, v5.refly, 'состояние метаданных вернули — пункты прежние')
+
+        // «Печать» — диалог печати браузера (здесь — заглушка window.print). Перед печатью (событие beforeprint: браузер шлёт
+        // его и при Ctrl+P, эмуляция печати Playwright — нет) — шапка с логом, аппаратом и временем печати и раскрытый
+        // список «без изменений»; после печати (afterprint) список — как был
+        await page.evaluate(() => {
+            window.__print_calls = 0
+            window.print = () => { window.__print_calls++ }
+        })
+        await page.click('#step5_print')
+        assert.equal(await page.evaluate(() => window.__print_calls), 1, '«Печать» вызывает window.print')
+        const unchanged_open = () => page.evaluate(() => document.getElementById('unchanged5').open)
+        assert.equal(await unchanged_open(), false, 'до печати список «без изменений» свёрнут')
+        await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')))
+        const print_head = await page.textContent('#step5_print_head')
+        assert.ok(print_head.startsWith('Мастер настройки · ' + path.basename(log_path) + ' · ' + test_board + ', QUAD/X_REV · '), print_head)
+        assert.match(print_head, / · \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}$/, 'время печати: ' + print_head)
+        assert.equal(await unchanged_open(), true, 'при печати список «без изменений» раскрыт')
+        // Правила печати на шаге 5: сводка без вступления, навигации, кнопок, заметки о действии, пояснений для экрана и
+        // столбца «Действие»; другие секции (с графиками) скрыты атрибутом hidden; шапка печати и список «без изменений»
+        // видны, фон белый
+        await page.emulateMedia({ media: 'print' })
+        const print5 = await page.evaluate(() => {
+            const seen = (el) => el.checkVisibility()
+            return {
+                wizbar: seen(document.querySelector('.wizbar')),
+                lede: seen(document.querySelector('.hero .lede')),
+                step0: seen(document.querySelector('section[data-step="0"]')),
+                plots: [...document.querySelectorAll('.plot')].filter(seen).length,
+                buttons: [...document.querySelectorAll('section[data-step="5"] button')].filter(seen).length,
+                note: seen(document.getElementById('step5_note')),
+                screen_only: [...document.querySelectorAll('section[data-step="5"] .screen-only')].filter(seen).length,
+                action: seen(document.querySelector('#steps5 thead th:nth-child(4)')),
+                head: seen(document.getElementById('step5_print_head')),
+                unchanged: seen(document.querySelector('#unchanged5 tbody tr')),
+                bg: getComputedStyle(document.body).backgroundColor,
+            }
+        })
+        assert.deepEqual(print5, { wizbar: false, lede: false, step0: false, plots: 0, buttons: 0, note: false, screen_only: 0, action: false, head: true, unchanged: true,
+                                   bg: 'rgb(255, 255, 255)' }, 'печать шага 5 — только сводка на белом фоне')
+        await page.screenshot({ path: path.join(shots, 'step5-print.png'), fullPage: true })
+        await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+        assert.equal(await unchanged_open(), false, 'после печати список «без изменений» снова свёрнут')
+        // Печать других шагов не пустая: на шаге 0 видны его секция и график полёта, сводки нет
+        await page.evaluate(() => set_step(0))
+        const print0 = await page.evaluate(() => ({
+            step0: document.querySelector('section[data-step="0"]').checkVisibility(),
+            flight: document.getElementById('FlightData').checkVisibility(),
+            step5: document.querySelector('section[data-step="5"]').checkVisibility(),
+        }))
+        assert.deepEqual(print0, { step0: true, flight: true, step5: false }, 'печать шага 0 — его секция и график полёта')
+        await page.emulateMedia({ media: 'screen' })
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
+        assert.equal(await page.isVisible('#step5_print_head'), false, 'на экране шапки печати нет')
+        // Без горизонтальной прокрутки страницы — и на узком окне (таблицы прокручиваются внутри своих рамок)
+        const [fit_w, fit_c] = await page_fits(page)
+        assert.ok(fit_w <= fit_c, 'шаг 5: ширина страницы ' + fit_w + ' px — окно ' + fit_c + ' px')
+        await page.screenshot({ path: path.join(shots, 'step5.png'), fullPage: true })
+        await page.setViewportSize({ width: 390, height: 1000 })
+        const [narrow_w, narrow_c] = await page_fits(page)
+        assert.ok(narrow_w <= narrow_c, 'шаг 5 на узком окне: ширина страницы ' + narrow_w + ' px — окно ' + narrow_c + ' px')
+        await page.setViewportSize({ width: 1400, height: 1000 })
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Версия фильтра — во входах шагов 2–3: другая версия на шаге 1 («Пересчитать», FFT тот же) меняет отпечаток шага 2 и
+        // делает принятое шага 3 устаревшим, возврат версии — снова актуальным (шаг 2 уже устарел из-за интервала, у него —
+        // сам отпечаток до и после; раскладку ключа проверяют юнит-тесты)
+        await page.click('#wizbar button:nth-child(2)')
+        await wait_overlay(page)
+        const before_fv = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: step_inputs_key(2) }))
+        const other_fv = (before_fv.version < 4) ? before_fv.version + 1 : 3
+        await page.check('#spec_fv_' + other_fv)
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        const fv_stale = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: step_inputs_key(2), stale3: step_accepted_stale(3) }))
+        assert.deepEqual({ ...fv_stale, key2: fv_stale.key2 !== before_fv.key2 }, { version: other_fv, fft_key: before_fv.fft_key, key2: true, stale3: true },
+                         'другая версия фильтра — отпечаток шага 2 сменился, принятое шага 3 устарело')
+        await page.check('#spec_fv_' + before_fv.version)
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        assert.deepEqual(await page.evaluate(() => ({ key2: step_inputs_key(2), stale3: step_accepted_stale(3) })), { key2: before_fv.key2, stale3: false },
+                         'версию фильтра вернули — отпечаток шага 2 прежний, принятое шага 3 снова актуально')
+        await page.click('#wizbar button:nth-child(1)')
+
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):
         // шаг 1 считается заново начисто
         await page.evaluate(() => { window.__old_log = state.log; window.__fft = null })
@@ -1113,6 +1456,194 @@ async function main() {
         await page.waitForFunction(() => (state.log != null) && (state.log !== window.__old_log) &&
             (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
         assert.equal(await page.evaluate(() => state.gyro === null), true, 'новый лог — гироскоп ещё не загружен')
+
+        // Шаг 0, блок «Прошлый проход»: в памяти — проход этого аппарата, сохранённый на шаге 5 из этого же лога. Значения
+        // лога равны «было» прохода и имя файла то же — «лог прошлого прохода»; строки — изменённые параметры прохода по
+        // порядку (столбцы — как в изменениях шага 5: параметр, предлагалось, в логе сейчас, шаг, итог), итог — «другое
+        // значение» (предложенное не стоит) или «нет в логе» (параметра не было); строка контроллера в логе есть — списка
+        // выбора нет
+        const memory0 = () => page.evaluate(() => {
+            const seen = (id) => document.getElementById(id).checkVisibility()
+            const select = document.getElementById('memory0_pick')
+            return {
+                visible: seen('memory0'),
+                head: seen('memory0_head') ? document.getElementById('memory0_head').textContent : null,
+                verdict: seen('memory0_verdict') ? document.getElementById('memory0_verdict').textContent : null,
+                verdict_class: document.getElementById('memory0_verdict').className,
+                rows: seen('memory0_table') ? [...document.querySelectorAll('#memory0_table tbody tr')].map((tr) => [...tr.cells].map((td) => td.textContent)) : null,
+                pick: seen('memory0_pick_field') ? { value: select.value, options: [...select.options].map((o) => [o.value, o.textContent]) } : null,
+                forget: seen('memory0_forget'),
+                forget_text: document.getElementById('memory0_forget').textContent,
+                row: document.querySelector('#memory0 > .row').checkVisibility(),
+                key: memory_state.key,
+                pass: memory_state.pass?.key ?? null,
+                applied: (memory_state.applied != null) ? [memory_state.applied.applied, memory_state.applied.total] : null,
+                focus: document.activeElement?.id ?? null,
+                stored: Object.keys(JSON.parse(localStorage.getItem('tunewizard_v1') ?? '{"passes":{}}').passes),
+            }
+        })
+        const pass0 = await page.evaluate((key) => ({ record: JSON.parse(localStorage.getItem('tunewizard_v1')).passes[key], fw: state.info.fw_string }), fc_key)
+        pass0.changed = pass0.record.changed
+        const m0 = await memory0()
+        assert.equal(m0.visible, true, 'проход аппарата есть — блок «Прошлый проход» виден')
+        assert.match(m0.head, /^Сохранён \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}, лог /, m0.head)
+        assert.ok(m0.head.endsWith(', лог ' + path.basename(log_path) + ', прошивка ' + pass0.fw), m0.head)
+        assert.equal(m0.verdict, 'Это лог прошлого прохода — значения ещё не применялись.')
+        assert.match(m0.verdict_class, /verdict--warn/)
+        assert.equal(m0.rows.length, pass0.changed.length, 'строк — столько же, сколько изменённых в проходе')
+        assert.deepEqual(m0.rows.map((cells) => [cells[0], cells[3], cells[4]]),
+                         pass0.changed.map((c) => [c.name, String(c.step), (c.log == null) ? 'нет в логе' : 'другое значение']), 'строки — изменённые параметры прохода')
+        assert.deepEqual([m0.pick, m0.forget, m0.forget_text, m0.key, m0.pass, m0.applied], [null, true, 'Забыть проход этого аппарата', fc_key, fc_key, [0, pass0.changed.length]],
+                         'списка нет, «Забыть» есть, проход — в memory_state')
+        await page.screenshot({ path: path.join(shots, 'step0-memory.png'), fullPage: true })
+
+        // Запись аппарата заменена после загрузки лога (как «Скачать .param» на шаге 5 — та же запись с новой датой):
+        // «Забыть» новую запись не трогает — предупреждение, кнопки больше нет, для сравнения остаётся показанный проход
+        const replaced_at = await page.evaluate((key) => {
+            const passes = passmem_read(localStorage).passes
+            const record = { ...passes[key], saved_at: passes[key].saved_at + 60000 }
+            passmem_write(localStorage, passmem_put(passes, record))
+            return record.saved_at
+        }, fc_key)
+        await page.click('#memory0_forget')
+        const kept0 = await memory0()
+        assert.deepEqual([kept0.visible, kept0.verdict, kept0.verdict_class, kept0.forget, kept0.pass, kept0.stored],
+                         [true, 'Проход уже заменён более новым сохранением — он остаётся.', 'verdict verdict--warn', false, fc_key, [fc_key]], 'заменённую запись «Забыть» не удаляет')
+        assert.deepEqual(await page.evaluate((key) => [passmem_read(localStorage).passes[key].saved_at, memory_state.pass.saved_at], fc_key), [replaced_at, replaced_at - 60000],
+                         'в памяти — новая запись, в memory_state — показанный проход')
+
+        // Блок заново — показан новый проход; «Забыть» — блок скрыт, прохода нет ни в памяти браузера, ни в memory_state,
+        // фокус — на выборе лога
+        await page.evaluate(() => memory_render_step0())
+        await page.click('#memory0_forget')
+        const forgot0 = await memory0()
+        assert.deepEqual([forgot0.visible, forgot0.stored, forgot0.pass, forgot0.applied, forgot0.focus], [false, [], null, null, 'fileItem'], '«Забыть» — проход удалён, блок скрыт')
+
+        // Хранилища нет (memory_storage → null): блок скрыт, ключ аппарата лога всё равно есть
+        const unavailable0 = await page.evaluate(() => {
+            const saved = window.memory_storage
+            window.memory_storage = () => null
+            try {
+                memory_render_step0()
+                return { visible: document.getElementById('memory0').checkVisibility(), key: memory_state.key }
+            } finally {
+                window.memory_storage = saved
+            }
+        })
+        assert.deepEqual(unavailable0, { visible: false, key: fc_key }, 'хранилища нет — блок скрыт, ключ есть')
+        // Весь JSON памяти битый, прохода нет: блок — только с предупреждением (подписи, таблицы и пустого ряда нет), память
+        // переписана пустой. Переписать не удалось (запись бросает) — предупреждение без «удалена»
+        await page.evaluate(() => {
+            localStorage.setItem('tunewizard_v1', '{битый')
+            memory_render_step0()
+        })
+        const broken0 = await memory0()
+        assert.deepEqual([broken0.visible, broken0.verdict, broken0.verdict_class, broken0.head, broken0.rows, broken0.row, broken0.stored],
+                         [true, 'Часть памяти прохода не прочитана — удалена.', 'verdict verdict--warn', null, null, false, []], 'битая память без прохода — только предупреждение')
+        const kept_text0 = await page.evaluate(() => {
+            const saved = window.memory_storage
+            window.memory_storage = () => ({ getItem: () => '{битый', setItem() { throw new DOMException('Нет места', 'QuotaExceededError') }, removeItem() {} })
+            try {
+                memory_render_step0()
+                return document.getElementById('memory0_verdict').textContent
+            } finally {
+                window.memory_storage = saved
+            }
+        })
+        assert.equal(kept_text0, 'Часть памяти прохода не прочитана.', 'битую память переписать не удалось — без «удалена»')
+        // Проход без изменённых параметров — как прохода нет
+        await page.evaluate(() => {
+            passmem_write(localStorage, passmem_put({}, { key: memory_state.key, board: state.info.board, frame: null, fw: null, file_name: 'пустой.bin', saved_at: Date.now(),
+                                                          changed: [], estimates: null }))
+            memory_render_step0()
+        })
+        const empty0 = await memory0()
+        assert.deepEqual([empty0.visible, empty0.pass, empty0.stored], [false, null, [fc_key]], 'проход без изменений — блок скрыт')
+
+        // Проход с другого лога, предложенные значения которого стоят в этом: «Применено N из N»; одно значение чужое —
+        // «Применено N−1 из N», итог строки — «другое значение». Имена — из констант тестового лога (есть в логе)
+        const synth_names = ['INS_GYRO_FILTER', 'ATC_RAT_RLL_FLTD', 'ATC_RAT_PIT_FLTD']
+        const put_synth = (other) => page.evaluate(([names, other]) => {
+            const changed = names.map((name, i) => {
+                const now = state.params.get(name)
+                return { name: name, log: now + 5, value: (i === other) ? now + 1 : now, step: 3 }
+            })
+            const record = { key: memory_state.key, board: state.info.board, frame: state.info.frame, fw: state.info.fw_string, file_name: 'прошлый.bin',
+                             saved_at: Date.now() - 86400000, changed: changed, estimates: { 2: null, 3: null, 4: null } }
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return names.every((name) => state.params.has(name))
+        }, [synth_names, other])
+        assert.equal(await put_synth(-1), true, 'параметры синтетического прохода есть в логе')
+        const all0 = await memory0()
+        assert.deepEqual([all0.visible, all0.verdict, all0.verdict_class, all0.rows.map((cells) => cells[4]), all0.applied],
+                         [true, 'Применено 3 из 3.', 'verdict verdict--ok', ['применено', 'применено', 'применено'], [3, 3]], 'все предложенные стоят в логе')
+        assert.match(all0.head, /, лог прошлый\.bin, прошивка /, all0.head)
+        await put_synth(1)
+        const one0 = await memory0()
+        assert.deepEqual([one0.verdict, one0.verdict_class, one0.rows.map((cells) => cells[4]), one0.applied],
+                         ['Применено 2 из 3.', 'verdict verdict--warn', ['применено', 'другое значение', 'применено'], [2, 3]], 'одно значение чужое')
+        // Битая запись рядом (не проходит проверку формы): проход аппарата уцелел — показан, к вердикту — строка
+        // предупреждения; битая запись из хранилища удалена
+        await page.evaluate(() => {
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            data.passes['fc:битая'] = { key: 'другой' }
+            localStorage.setItem('tunewizard_v1', JSON.stringify(data))
+            memory_render_step0()
+        })
+        const bad0 = await memory0()
+        assert.deepEqual([bad0.verdict, bad0.verdict_class, bad0.stored], ['Применено 2 из 3. Часть памяти прохода не прочитана — удалена.', 'verdict verdict--warn', [fc_key]],
+                         'битая запись — предупреждение и удалена')
+
+        // Лог без строки контроллера: список сохранённых проходов по убыванию даты. Проход с тем же запасным ключом (та же
+        // плата, рама и имя файла) выбран сразу — его таблица, кнопка «Забыть выбранный проход»
+        const fallback_key = 'log:1503·QUAD/X_REV·' + path.basename(log_path)
+        await page.evaluate((names) => {
+            window.__board = state.info.board
+            state.info.board = null
+            const changed = names.map((name) => ({ name: name, log: state.params.get(name) + 5, value: state.params.get(name), step: 3 }))
+            const record = { key: passmem_aircraft_key(state.info, state.file_name), board: null, frame: state.info.frame, fw: state.info.fw_string,
+                             file_name: state.file_name, saved_at: Date.now() - 2 * 86400000, changed: changed, estimates: null }
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+        }, synth_names)
+        const list0 = await memory0()
+        assert.equal(list0.key, fallback_key, 'запасной ключ аппарата')
+        assert.deepEqual([list0.visible, list0.pick.value, list0.pick.options.map((option) => option[0]), list0.pass, list0.verdict, list0.rows.length, list0.forget, list0.forget_text],
+                         [true, fallback_key, ['', fc_key, fallback_key], fallback_key, 'Применено 3 из 3.', 3, true, 'Забыть выбранный проход'], 'проход того же файла выбран сразу')
+        assert.match(list0.pick.options[1][1], new RegExp('^\\d{2}\\.\\d{2}\\.\\d{4}, \\d{2}:\\d{2} · ' + test_board + ', QUAD/X_REV · прошлый\\.bin$'), list0.pick.options[1][1])
+        assert.ok(list0.pick.options[2][1].endsWith(' · QUAD/X_REV · ' + path.basename(log_path)), 'без платы — рама: ' + list0.pick.options[2][1])
+        await page.screenshot({ path: path.join(shots, 'step0-memory-pick.png'), fullPage: true })
+        // Узкое окно: блок со списком не шире окна и не прокручивается сам (таблица — внутри своей рамки). Страницу целиком
+        // не меряем: график полёта Plotly подстраивает под окно с задержкой
+        await page.setViewportSize({ width: 390, height: 1000 })
+        const pick_fit = await page.evaluate(() => {
+            const box = document.getElementById('memory0')
+            return { right: Math.round(box.getBoundingClientRect().right), window: document.documentElement.clientWidth, scroll: box.scrollWidth, client: box.clientWidth }
+        })
+        assert.ok((pick_fit.right <= pick_fit.window) && (pick_fit.scroll <= pick_fit.client), 'блок «Прошлый проход» на узком окне: ' + JSON.stringify(pick_fit))
+        await page.setViewportSize({ width: 1400, height: 1000 })
+        // «Забыть выбранный проход» — он убран из памяти и из списка, список показан заново: ничего не выбрано, таблицы и
+        // кнопки нет, фокус — на списке. Выбор оставшегося — его таблица; «Забыть» последнего — блок скрыт
+        await page.click('#memory0_forget')
+        const rest0 = await memory0()
+        assert.deepEqual([rest0.visible, rest0.pick.value, rest0.pick.options.map((option) => option[0]), rest0.rows, rest0.verdict, rest0.forget, rest0.pass, rest0.stored, rest0.focus],
+                         [true, '', ['', fc_key], null, null, false, null, [fc_key], 'memory0_pick'], 'выбранный проход забыт, список — без него')
+        await page.selectOption('#memory0_pick', fc_key)
+        const picked0 = await memory0()
+        assert.deepEqual([picked0.pass, picked0.verdict, picked0.rows.map((cells) => cells[0]), picked0.forget], [fc_key, 'Применено 2 из 3.', synth_names, true],
+                         'выбран проход — его таблица')
+        await page.click('#memory0_forget')
+        const last0 = await memory0()
+        assert.deepEqual([last0.visible, last0.stored, last0.pass, last0.focus], [false, [], null, 'fileItem'], 'забыт последний проход списка — блок скрыт')
+        // Строку контроллера вернуть и построить блок заново: память пуста — блок скрыт; дальше тест память не ждёт, а
+        // повторная загрузка в конце — без блока
+        await page.evaluate(() => {
+            state.info.board = window.__board
+            memory_render_step0()
+        })
+        const end0 = await memory0()
+        assert.deepEqual([end0.visible, end0.key, end0.stored], [false, fc_key, []], 'строка контроллера возвращена, память пуста')
         // Сразу с шага 0 на шаг 2 (шаг 1 не открывался — расчёт через step1_prepare): форма снова из лога, без строки
         // «Текущий», принятое забыто
         await page.click('#wizbar button:nth-child(3)')
@@ -1145,6 +1676,20 @@ async function main() {
         assert.doesNotMatch(p5.verdict, /^Принято/, 'вердикт шага 4 — не «Принято»: ' + p5.verdict)
         assert.equal(await page.evaluate(() => candidate_key(step4_values_from_form()) === candidate_key(step4_log_values())), true, 'форма шага 4 снова из лога')
         assert.ok((await step4_plots(page)).StepResp4.traces[2].finite > 0, 'после повторной загрузки — измеренный отклик снова на графике')
+        // Сводка после повторной загрузки: ничего не принято — «менять нечего», кнопки файла и памяти выключены, шаги —
+        // «не принят». Шаг 4 посчитан (не принят), все оси без надёжного измерения — в вердикте хвост о тестовом полёте,
+        // в «что перелететь» — его пункт, но не «слетайте тем же профилем»: менять нечего
+        await page.click('#wizbar button:nth-child(6)')
+        const none5 = await step5_summary(page)
+        assert.match(none5.verdict_class, /verdict--warn/, 'ничего не принято — предупреждение')
+        assert.equal(none5.verdict, 'Менять нечего: ни один из шагов 2–4 не принят. Оси шага 4 без надёжного измерения: крен, тангаж, рыскание — нужен тестовый полёт (ниже).')
+        assert.deepEqual(none5.tiles.map((tile) => tile.value), ['StellarH7V2', path.basename(log_path), '0', 'нет'], 'плитки: изменено 0, принятых шагов нет')
+        assert.deepEqual(none5.steps.map((row) => [row.cells[1], row.cells[2], row.button]), [2, 3, 4].map(() => ['не принят', 'Параметры шага остаются как в логе.', null]),
+                         'все шаги — «не принят»')
+        assert.deepEqual(none5.changes, [['Изменённых параметров нет.']], 'изменений нет')
+        assert.deepEqual(none5.disabled, [true, true], 'без изменений «Скачать .param» и «Запомнить проход» выключены')
+        assert.ok(none5.refly.some((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт')), 'пункт тестового полёта: ' + none5.refly.join(' | '))
+        assert.ok(!none5.refly.some((text) => text.startsWith('Слетайте тем же профилем')), 'без изменений «слетайте тем же профилем» нет')
         // Шаг 1 после этого — тот же, что при первом прогоне
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
@@ -1153,6 +1698,152 @@ async function main() {
         assert.deepEqual(s4.peak_rows, s1.peak_rows, 'та же таблица пиков')
         assert.equal(s4.verdict, s1.verdict, 'тот же вердикт')
         await page.click('#wizbar button:nth-child(1)')
+
+        // Строки сравнения с прошлым проходом на шагах 2–4 (раздел 4.5 дизайна). Синтетический проход этого аппарата —
+        // passmem_record по строкам итога changes ([имя, шаг, применено ли]: «было» — значение лога + 5, предложено —
+        // значение лога или, если не применено, + 1) и оценкам принятых шагов steps; положен в память, блок шага 0 — заново
+        // (memory_render_step0: проход — в memory_state), затем шаг открывается, и строка рисуется с его вердиктом. Шаги 2–4
+        // после повторной загрузки посчитаны выше и не приняты. Строки шагов — по атрибуту hidden (секции других шагов
+        // скрыты)
+        const memory_lines = () => page.evaluate(() => Object.fromEntries([2, 3, 4].map((n) => {
+            const box = document.getElementById('memory' + n)
+            return [n, box.hidden ? null : box.textContent]
+        })))
+        const put_pass = (changes, steps) => page.evaluate(([changes, steps]) => {
+            const rows = changes.map(([name, step, applied]) => {
+                const now = state.params.get(name)
+                return { name: name, log: now + 5, value: applied ? now : now + 1, step: step, changed: true }
+            })
+            const record = passmem_record({ key: memory_state.key, info: state.info, file_name: 'прошлый.bin', rows: rows, steps: steps,
+                                            saved_at: Date.now() - 86400000 })
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return { has: changes.every(([name]) => state.params.has(name)), head: 'Прошлый проход (' + memory_date_text(record.saved_at) + ')',
+                     pass: memory_state.pass?.key ?? null }
+        }, [changes, steps])
+        // Оценки принятых шагов прохода — от оценок «Как в логе» этого лога со сдвигом (было и прогноз отличаются от
+        // «в этом логе»): шаг 2 — evaluate_candidate, шаг 3 — step3_metrics_summary (шум гироскопа, шум D и задержки);
+        // ось крена шага 4 — надёжна в проходе
+        const pass_steps = await page.evaluate(() => {
+            const e2 = step2.evaluations.log
+            const shift2 = (d) => ({ band_dB: e2.band_dB + d, lag_ms: { 30: e2.lag_ms[30] + d / 10 } })
+            const e3 = step3_metrics_summary(step3.evaluations.log)
+            const map = (obj, fn) => Object.fromEntries(Object.entries(obj).map(([key, value]) => [key, fn(value)]))
+            const shift3 = (d) => ({
+                ...e3,
+                gyro: { ...e3.gyro, band_dB: e3.gyro.band_dB + d },
+                dterm: map(e3.dterm, (axis) => (axis != null) ? { dB: axis.dB + d } : null),
+                lag_ms: map(e3.lag_ms, (paths) => map(paths, (lag) => ({ ...lag, 30: lag[30] + d / 10 }))),
+            })
+            const roll = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
+                           prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
+            return { 2: { metrics: { log: shift2(1.5), current: shift2(-0.5) } }, 3: { metrics: { log: shift3(1.25), current: shift3(-0.75) } },
+                     4: { axes: { roll: { metrics: roll } } },
+                     now: { band: e2.band_dB.toFixed(2), lag: e2.lag_ms[30].toFixed(2), gyro: e3.gyro.band_dB.toFixed(2), dterm_roll: e3.dterm.roll.dB.toFixed(2),
+                            dterm_roll_was: (e3.dterm.roll.dB + 1.25).toFixed(2) } }
+        })
+
+        // Лог прошлого прохода: в памяти снова проход, сохранённый на шаге 5 из этого же лога (значения лога равны «было»,
+        // имя файла то же — значения ещё не применялись). Строк сравнения на шагах 2–4 нет, хотя по условиям строки шаг 3
+        // написал бы «применены не все — сравнивать нечего» (шум: шаг 0 уже говорит, что это лог прошлого прохода)
+        const own = await page.evaluate((record) => {
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return { pass: memory_state.pass?.key ?? null, pass_log: memory_is_pass_log(memory_state.pass, memory_state.applied),
+                     verdict: document.getElementById('memory0_verdict').textContent,
+                     compare3: passmem_compare(memory_state.pass, memory_state.applied, 3, null)?.status ?? null }
+        }, pass0.record)
+        assert.deepEqual(own, { pass: fc_key, pass_log: true, verdict: 'Это лог прошлого прохода — значения ещё не применялись.', compare3: 'partial' },
+                         'проход этого лога из шага 5: по условиям строки шаг 3 — «применены не все»')
+        for (const n of [2, 3, 4]) {
+            await page.click('#wizbar button:nth-child(' + (n + 1) + ')')
+            await wait_overlay(page)
+            assert.equal((await memory_lines())[n], null, 'лог прошлого прохода — строки сравнения шага ' + n + ' нет')
+        }
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Шаг 2 прошлого прохода применён (значение лога = предложенному): «было → прогноз → в этом логе» с числами оценки
+        // «Как в логе» этого лога и оговоркой про шум; шаг 3 в проходе не принят — строки нет
+        const pass_a = await put_pass([['INS_HNTCH_FREQ', 2, true]], { 2: pass_steps[2] })
+        assert.deepEqual([pass_a.has, pass_a.pass], [true, fc_key], 'параметры прохода есть в логе, проход — в memory_state')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        const mem_a = await memory_lines()
+        assert.ok(mem_a[2].startsWith(pass_a.head + ', было → прогноз → в этом логе: полоса '), mem_a[2])
+        assert.ok(mem_a[2].includes(' → ' + pass_steps.now.band + ' дБ; задержка на 30 Гц '), 'полоса этого лога — оценка «Как в логе»: ' + mem_a[2])
+        assert.ok(mem_a[2].endsWith(' → ' + pass_steps.now.lag + ' мс. Шум зависит от полёта: газ, манёвры.'), mem_a[2])
+        assert.match(mem_a[2], /^Прошлый проход \(\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\), было → прогноз → в этом логе: полоса -?[\d.]+ → -?[\d.]+ → -?[\d.]+ дБ; /, mem_a[2])
+        await page.screenshot({ path: path.join(shots, 'step2-memory.png'), fullPage: true })
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[3], null, 'шаг 3 в проходе не принят — строки нет')
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Шаг 3 прошлого прохода применён не весь (FLTD тангажа не стоит), шаг 4 менял крен, и он применён: на шаге 3 —
+        // «применены не все»; ось крена надёжна в проходе, но на тестовом логе измерение ненадёжно — «сравнивать нечем»;
+        // тангаж шаг 4 не менял, оценки оси нет — строки нет; на шаге 2 строка прежнего прохода убрана (шаг 2 не принят)
+        const pass_b = await put_pass([['ATC_RAT_PIT_FLTD', 3, false], ['ATC_RAT_RLL_P', 4, true]], { 3: pass_steps[3], 4: pass_steps[4] })
+        assert.equal(pass_b.has, true)
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[2], null, 'шаг 2 в проходе не принят — строки шага 2 больше нет')
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        assert.equal((await memory_lines())[3], pass_b.head + ': параметры шагов 2–3 применены не все — сравнивать нечего.')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        assert.equal(await page.evaluate(() => step4.axis), 'roll')
+        assert.equal((await memory_lines())[4], pass_b.head + ': измерение ненадёжно — сравнивать нечем.')
+        assert.equal(await page.evaluate(() => document.getElementById('memory4').previousElementSibling.id), 'axis_verdict4', 'строка оси — под вердиктом оси')
+        await page.click('#step4_tab_pitch')
+        assert.equal((await memory_lines())[4], null, 'тангаж: оценки оси в проходе нет — строки нет')
+        await page.click('#step4_tab_roll')
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Шаги 2–3 прошлого прохода применены: на шаге 3 — «в этом логе» по оценке «Как в логе», пока notch-база шага 3 —
+        // notch лога. Смена одного INS_GYRO_FILTER базой не считается (оценка берёт его у варианта); notch — считается;
+        // форма шага 2 со значениями лога (float32, маски) — notch лога. «Принять» на шаге 2 варианта с другим notch: шаг 3
+        // считает «Как в логе» с принятым notch — числа этого лога нет
+        const pass_c = await put_pass([['INS_HNTCH_FREQ', 2, true], ['ATC_RAT_RLL_FLTD', 3, true]], { 2: pass_steps[2], 3: pass_steps[3] })
+        assert.equal(pass_c.has, true)
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        const mem_c = (await memory_lines())[3]
+        assert.ok(mem_c.startsWith(pass_c.head + ', было → прогноз → в этом логе: шум гироскопа '), mem_c)
+        assert.ok(mem_c.includes(' → ' + pass_steps.now.gyro + ' дБ; шум D крена '), 'шум гироскопа этого лога — оценка «Как в логе»: ' + mem_c)
+        assert.ok(mem_c.includes('; шум D крена ' + pass_steps.now.dterm_roll_was + ' → ') && mem_c.includes(' → ' + pass_steps.now.dterm_roll + ' дБ, тангажа '),
+                  'шум D крена: было прохода и «в этом логе» — оценка «Как в логе»: ' + mem_c)
+        assert.match(mem_c, /; задержка на 30 Гц: путь P крена -?[\d.]+ → -?[\d.]+ → -?[\d.]+ мс, тангажа .* мс, путь D крена .* мс, тангажа .* мс\. Шум зависит от полёта: газ, манёвры\.$/, mem_c)
+        const notch_is_log = await page.evaluate(() => ({
+            form: step2_key(values_from_form()) === step2_key(values_from_log()),
+            form_is_log: memory_notch_is_log(values_from_form()),
+            gyro_only: memory_notch_is_log({ ...values_from_log(), INS_GYRO_FILTER: values_from_log().INS_GYRO_FILTER + 10 }),
+            freq: memory_notch_is_log({ ...values_from_log(), INS_HNTCH_FREQ: values_from_log().INS_HNTCH_FREQ + 10 }),
+            other: step2.candidates.find((c) => !memory_notch_is_log(c.values))?.id ?? null,
+        }))
+        assert.deepEqual([notch_is_log.form, notch_is_log.form_is_log], [true, true], 'форма шага 2 со значениями лога — notch лога (float32 и маски без ложных отличий)')
+        assert.deepEqual([notch_is_log.gyro_only, notch_is_log.freq], [true, false], 'notch-база: один INS_GYRO_FILTER — notch лога, другая частота — нет')
+        assert.ok(notch_is_log.other != null, 'на тестовом логе есть вариант шага 2 с другим notch')
+        await page.click('#wizbar button:nth-child(3)')
+        await wait_overlay(page)
+        await page.check('#cand2_' + notch_is_log.other)
+        await page.click('#cand2_apply')
+        await wait_overlay(page)
+        await page.click('#notch_accept')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['3'], '«Принять» шага 2 открывает шаг 3')
+        const mem_d = (await memory_lines())[3]
+        assert.match(mem_d, /^Прошлый проход \([^)]+\), было → прогноз: шум гироскопа -?[\d.]+ → -?[\d.]+ дБ; /, mem_d)
+        assert.ok(mem_d.startsWith(pass_c.head + ', было → прогноз: '), mem_d)
+        assert.doesNotMatch(mem_d, /в этом логе/, 'числа этого лога нет: ' + mem_d)
+        assert.ok(mem_d.endsWith('. Оценка этого лога видна до «Принять» на шаге 2: после него шаг 3 считает с принятыми на шаге 2 значениями.'), mem_d)
+        // Память и проход — как ждёт дальнейшее: память пуста, прохода нет (принятое шага 2 забудет перезагрузка страницы)
+        await page.click('#wizbar button:nth-child(1)')
+        assert.deepEqual(await page.evaluate(() => {
+            localStorage.removeItem('tunewizard_v1')
+            memory_render_step0()
+            return [memory_state.pass, document.getElementById('memory0').checkVisibility()]
+        }), [null, false], 'синтетический проход убран')
 
         // Размер винта переживает перезагрузку страницы (localStorage). Перезагрузка забывает лог — поэтому в самом конце
         await page.reload({ waitUntil: 'networkidle' })
@@ -1167,6 +1858,7 @@ async function main() {
         await page.locator('#log_verdict').waitFor({ state: 'visible', timeout: 180000 })
         await wait_overlay(page)
         assert.equal(await page.evaluate(() => document.getElementById('Spectrum1').layout.autosize ?? null), null, 'снимков после перезагрузки не было: autosize не включён')
+        assert.equal(await page.isVisible('#memory0'), false, 'память прохода пуста — блока «Прошлый проход» нет')
         for (const [button, ids] of [[2, ['Spectrum1', 'Spectrogram1']], [3, ['Spectrum2', 'Bode2', 'Spectrogram2']], [4, ['Spectrum3', 'DTerm3', 'Bode3']],
                                      [5, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4']]]) {
             await page.click('#wizbar button:nth-child(' + button + ')')
@@ -1175,7 +1867,7 @@ async function main() {
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаги 0–4 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+        console.log('tunewizard-browser: шаги 0–5 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
         console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
         console.log('  шаг 2: варианты ' + v1.titles.join('; ') + '; рекомендован ' + v1.best_id + '; вердикт «' + v1.verdict + '»')
@@ -1185,6 +1877,10 @@ async function main() {
             ((a.failed.length == 1) ? 'не пройдена ' : 'не пройдены ') + a.failed.join(', ')).join('; ') + '; итог — измерение ненадёжно на всех осях, прогноз ' +
             'недостоверен (правил и прогноза нет); под подменой у тангажа (фильтры шагов 2–3, без ложного «неустойчив») — варианты ' + sub_lines.titles.join('; ') + ', рекомендуется «' +
             sub_lines.recommended.join('; ') + '», бодэ ' + sub_lines.log)
+        console.log('  шаг 5: изменено ' + v5.expected.length + ', без изменений ' + v5.expected_unchanged + '; вердикт «' + v5.verdict + '»; что перелететь — пунктов ' +
+            v5.refly.length)
+        console.log('  прошлый проход: шаг 2 «' + mem_a[2] + '»; шаг 3 «' + mem_c + '»; шаг 3 после «Принять» на шаге 2 «' + mem_d + '»; ось шага 4 под подменой «' +
+            line4.ok + '»')
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

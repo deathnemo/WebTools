@@ -3,7 +3,8 @@
 // и спектрограмма для значений формы, метрики против лога, файл .param (core/params.js) и «Принять».
 // Состояние шага 1 не меняется: state.filters и FFT.H остаются от параметров лога (их рисует шаг 1), а
 // передаточная функция значений формы считается отдельно (filter_transfer) и подставляется в копию-взгляд gyro.
-// Общие помощники шагов (step_…, plot_…) — steps/common.js.
+// Общие помощники шагов (step_…, plot_…) — steps/common.js; строка сравнения с прошлым проходом — memory_show
+// (steps/memory.js).
 
 // Внутреннее состояние шага
 const step2 = {
@@ -258,7 +259,7 @@ function step2_reset() {
         filled: false, fit: null, analysis: null, ctx: null, candidates: null, evaluations: null, ranking: null, current_row: null,
         key: null, gyro_ref: null, selected_id: null, current: null, view_gyro: null, error: null,
     })
-    for (const id of ["verdict2", "warnings2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note",
+    for (const id of ["verdict2", "memory2", "warnings2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note",
                       "metrics2", "notch_file_note"]) {
         document.getElementById(id).hidden = true
     }
@@ -690,14 +691,16 @@ function step2_recalc() {
 }
 
 // Подсказка про второй notch: в логе он выключен, а в значениях включён — на аппарате остальные INS_HNTC2_*
-// появляются только после записи INS_HNTC2_ENABLE = 1 и обновления списка параметров; null — подсказка не нужна
+// появляются только после записи INS_HNTC2_ENABLE = 1 и обновления списка параметров; null — подсказка не нужна.
+// Проверка и текст — из ядра (summary_notch_enabling, summary_notch_enable_hint): тот же пункт есть в «что
+// перелететь» сводки
 function step2_second_notch_hint(values) {
     const enable = notch_param_names()[1].enable
-    if (!(values[enable] > 0) || (state.params.get(enable) > 0)) {
+    const log = state.params.get(enable)
+    if (!summary_notch_enabling(log, values[enable])) {
         return null
     }
-    return "В логе INS_HNTC2_ENABLE = " + param_to_string(state.params.get(enable) ?? 0) + ": на аппарате сначала запишите INS_HNTC2_ENABLE = 1 " +
-        "и обновите список параметров — остальные INS_HNTC2_* появятся только после этого, затем загрузите файл ещё раз."
+    return summary_notch_enable_hint(enable, log)
 }
 
 // «Сохранить .param»: параметры INS_* формы (как save_parameters FilterReview); ESCMSK — только с версии
@@ -754,8 +757,8 @@ async function step2_load_param(input) {
     }
 }
 
-// «Принять»: значения формы, их метрики и отметки сравнения с логом (rank_candidates для пары «лог — принятое»)
-// — в итог мастера, открыть шаг 3
+// «Принять»: значения формы, их метрики и отметки сравнения с логом (rank_candidates для пары «лог — принятое») и
+// отпечаток входов (step_inputs_key — для «устарело» сводки) — в итог мастера, открыть шаг 3
 function step2_accept() {
     step_run(() => {
         if (!step1_ready() || (step2.error != null)) {
@@ -773,6 +776,7 @@ function step2_accept() {
             candidate_id: (match != null) ? match.id : "current",
             metrics: (metrics != null) ? step2_metrics_summary(metrics) : null,
             flags: flags,
+            inputs: step_inputs_key(2),
             evaluated_at: Date.now(),
         }
         step2_render_verdict()
@@ -893,7 +897,7 @@ function step2_redraw_all() {
         document.getElementById(id).disabled = !ready
     }
     if (!ready) {
-        for (const id of ["candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note", "metrics2", "warnings2"]) {
+        for (const id of ["memory2", "candidates2", "candidates2_note", "candidates2_stale", "harmonics2", "harmonics2_note", "metrics2", "warnings2"]) {
             document.getElementById(id).hidden = true
         }
         document.getElementById("cand2_apply").disabled = true
@@ -1163,10 +1167,18 @@ function step2_render_metrics() {
 }
 
 // Вердикт: принятые значения (всегда первыми); без данных «до» — предупреждение; рекомендация или «менять
-// не нужно» с причинами по отвергнутым вариантам; неудача автоподбора — приставкой к обычному тексту
+// не нужно» с причинами по отвергнутым вариантам; неудача автоподбора — приставкой к обычному тексту. Под ним — строка
+// сравнения с прошлым проходом (memory_show, steps/memory.js): при любом исходе вердикта
 function step2_render_verdict() {
+    memory_show(2)
     const accepted = state.steps[2]
     if ((accepted != null) && (step2_key(accepted.accepted) === step2_key(values_from_form()))) {
+        // Принятое считалось для другого интервала, расчёта шага 1 или версии фильтра — его метрики устарели. Признак —
+        // отпечаток входов (step_accepted_stale), как у «устарело» сводки шага 5: шаг и сводка не расходятся
+        if (step_accepted_stale(2)) {
+            step_verdict("verdict2", "warn", "Принято раньше для другого интервала или расчёта шага 1 — проверьте и примите заново.")
+            return
+        }
         const match = step2_match(accepted.accepted)
         const metrics = accepted.metrics
         const name = (match != null) ? "«" + match.title + "»" : "значения формы"
@@ -1177,9 +1189,7 @@ function step2_render_verdict() {
                    "), задержка на " + lag_hz + " Гц " + metrics.current.lag_ms[lag_hz].toFixed(2) + " мс (к логу " +
                    step_signed(metrics.current.lag_ms[lag_hz] - metrics.log.lag_ms[lag_hz], 2) + ")"
         }
-        const flags = accepted.flags
-        const flagged = (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
-        if (flagged) {
+        if (step2_flagged(accepted.flags)) {
             step_verdict("verdict2", "warn", "Принято, но хуже лога: " + step2_accepted_flags_text(accepted) + ". " + name + tail + ".")
         } else {
             step_verdict("verdict2", "ok", "Принято: " + name + tail + ".")
@@ -1241,6 +1251,12 @@ function step2_render_verdict() {
         "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step_signed(e.band_dB - log.band_dB, 2) +
         " дБ к логу, задержка на " + lag_hz + " Гц " + step_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс. " +
         (selected ? "Он выбран — нажмите «Применить вариант», затем «Принять»." : "Выберите его в таблице и нажмите «Применить вариант», затем «Принять».") + stale)
+}
+
+// Отметки варианта против лога (rank_candidates), которые делают его хуже лога: неполная оценка, пики хуже лога,
+// задержка сверх допуска; flags null — сравнения не было, отметок нет. Вердикт шага 2 и сводка шага 5
+function step2_flagged(flags) {
+    return (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
 }
 
 // Отметки принятого набора против лога словами (сохранены в state.steps[2].flags; пики — из сводки метрик)

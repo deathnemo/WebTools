@@ -10,8 +10,9 @@
 // Libraries/Param_Helpers.js (param_to_string), plots.js (register_plot, render_plot, plot), wizard.js (state,
 // set_step, html_escape), steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict,
 // step_gyro_sensor, step_ensure_step1, step_try, step_run, step_find_metadata, step_metadata, step_load_metadata,
-// step_edit_controller, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js (step1, step1_ready,
-// values_from_log, radio_value, SPEC_AXES). От steps/step2.js шаг 3 не зависит: принятое шагом 2 читается из state.steps[2].
+// step_edit_controller, plot_axis, plot_trace_visibility, plot_clear), steps/step1.js (step1, step1_ready,
+// values_from_log, radio_value, SPEC_AXES) и steps/memory.js (memory_show — строка сравнения с прошлым проходом).
+// От steps/step2.js шаг 3 не зависит: принятое шагом 2 читается из state.steps[2].
 
 // Внутреннее состояние шага
 const step3 = {
@@ -236,7 +237,7 @@ function step3_reset() {
     clearTimeout(step3.edit_timer)
     step3.edit_timer = null
     document.getElementById("lpf_form").innerHTML = ""
-    for (const id of ["verdict3", "warnings3", "candidates3", "candidates3_note", "metrics3", "prop_hint"]) {
+    for (const id of ["verdict3", "memory3", "warnings3", "candidates3", "candidates3_note", "metrics3", "prop_hint"]) {
         document.getElementById(id).hidden = true
     }
     for (const id of ["cand3_apply", "lpf_accept"]) {
@@ -742,9 +743,9 @@ function step3_accept_refusal(values) {
     return (parts.length > 0) ? "Принять нельзя — " + parts.join("; ") + "." : null
 }
 
-// «Принять»: значения формы, их метрики и отметки против лога и ключ расчёта — в итог мастера, затем шаг 4 (если
-// доступен). Правки полей сначала досчитываются (щелчок мог прийти раньше их пересчёта). Пустые поля и
-// отрицательные частоты принять нельзя (step3_accept_refusal)
+// «Принять»: значения формы, их метрики и отметки против лога, ключ расчёта и отпечаток входов (step_inputs_key — для
+// «устарело» сводки) — в итог мастера, затем шаг 4 (если доступен). Правки полей сначала досчитываются (щелчок мог
+// прийти раньше их пересчёта). Пустые поля и отрицательные частоты принять нельзя (step3_accept_refusal)
 function step3_accept() {
     step3_flush_edits(true)
     step_run(() => {
@@ -775,6 +776,7 @@ function step3_accept() {
             metrics: compared ? { current: step3_metrics_summary(row.evaluation), log: step3_metrics_summary(log) } : null,
             flags: compared ? (row.flags ?? lowpass_flags(row.evaluation, log)) : null,
             calc_key: step3.key,
+            inputs: step_inputs_key(3),
             evaluated_at: Date.now(),
         }
         step3_redraw_all()
@@ -789,7 +791,7 @@ function step3_redraw_all() {
     const ready = step3_ready() && (step3.candidates != null)
     document.getElementById("lpf_accept").disabled = !(ready && step3.filled)
     if (!ready) {
-        for (const id of ["candidates3", "candidates3_note", "metrics3", "warnings3"]) {
+        for (const id of ["memory3", "candidates3", "candidates3_note", "metrics3", "warnings3"]) {
             document.getElementById(id).hidden = true
         }
         document.getElementById("cand3_apply").disabled = true
@@ -1055,8 +1057,10 @@ function step3_render_warnings() {
 
 // Вердикт: принятые значения (всегда первыми); без размера винта — просьба ввести его; рекомендация «По размеру
 // винта» — что меняется против лога и метрики, с отметками — что хуже; пределы ускорения из лога — формула для
-// справки; notch из лога, если шаг 2 не принят
+// справки; notch из лога, если шаг 2 не принят. Под ним — строка сравнения с прошлым проходом (memory_show): при любом
+// исходе вердикта
 function step3_render_verdict() {
+    memory_show(3)
     const base_note = (state.steps[2] == null) ? " Notch — из лога (шаг 2 не принят)." : ""
     const accepted = state.steps[3]
     if ((accepted != null) && step3.filled && (candidate_key(accepted.accepted) === candidate_key(step3_values_from_form()))) {

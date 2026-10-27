@@ -40,6 +40,8 @@
 <script type="text/javascript" src="core/pid.js"></script>
 <script type="text/javascript" src="core/pidtune.js"></script>
 <script type="text/javascript" src="core/params.js"></script>
+<script type="text/javascript" src="core/summary.js"></script>
+<script type="text/javascript" src="core/passmem.js"></script>
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
 <script type="text/javascript" src="steps/common.js"></script>
@@ -47,6 +49,8 @@
 <script type="text/javascript" src="steps/step2.js"></script>
 <script type="text/javascript" src="steps/step3.js"></script>
 <script type="text/javascript" src="steps/step4.js"></script>
+<script type="text/javascript" src="steps/memory.js"></script>
+<script type="text/javascript" src="steps/step5.js"></script>
 
 <style>
 /* Токены оформления: только тёмная тема «Графит» (общие правила проектов; решение пользователя 24.10.2026) */
@@ -77,7 +81,7 @@ p{margin:0}
 .lede{color:var(--ink-2); font-size:15px; max-width:70ch}
 header.hero{display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--line); padding-bottom:14px}
 section{display:flex; flex-direction:column; gap:14px}
-section > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
+section > .head,.memory0 > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
 
 /* Кнопки */
 button,label.pickbtn{font-family:"IBM Plex Sans",sans-serif; font-size:12px; padding:5px 11px; cursor:pointer;
@@ -236,6 +240,38 @@ tr:last-child td{border-bottom:0}
   .pform p{padding-left:0; text-indent:0}
 }
 
+/* Шаг 0: блок «Прошлый проход» — раскладка и заголовок как у секции; итог строки «что применено»; список проходов для
+   лога без строки контроллера — по ширине подписи, на узком окне — не шире ряда. Ряд без видимых кнопки и списка не
+   занимает места */
+.memory0{display:flex; flex-direction:column; gap:14px}
+.memory0 > .row:not(:has(> :not([hidden]))){display:none}
+.memory0-status{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; white-space:nowrap}
+.memory0-status--applied{color:var(--ok)}
+.memory0-status--other,.memory0-status--absent{color:var(--accent)}
+#memory0_pick_field{flex:0 1 auto; max-width:100%}
+#memory0_pick{max-width:100%; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:6px 8px;
+  border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
+#memory0_pick:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+
+/* Шаг 5 «Сводка»: состояние шага в таблице шагов (как статусы проверок шага 0), отметки принятого, свёрнутый список
+   без изменений, «что перелететь»; шапка печати видна только при печати, .screen-only — только на экране */
+.step5-state{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; font-weight:600; letter-spacing:.06em; white-space:nowrap}
+.step5-state--ok{color:var(--ok)}
+.step5-state--warn{color:var(--accent)}
+.step5-state--off{color:var(--ink-3)}
+#steps5 td:first-child{white-space:nowrap}
+/* Итог шага на узком экране не сжимается в столбик: таблица прокручивается внутри рамки */
+#steps5 td:nth-child(3){min-width:240px}
+#steps5 td small.step5-flags{color:var(--accent); opacity:1}
+details.more > summary{cursor:pointer; width:max-content; max-width:100%; font-size:13px; color:var(--ink-2)}
+details.more > summary:hover{color:var(--ink)}
+details.more > summary:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+details.more > .tablewrap{margin-top:8px}
+.refly{margin:0; padding:12px 16px 12px 36px; border:1px solid var(--line); background:var(--surface); color:var(--ink-2); font-size:13px}
+.refly li + li{margin-top:6px}
+.refly li::marker{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; color:var(--ink-3)}
+.print-head{display:none; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-2); border-bottom:1px solid var(--line); padding-bottom:6px}
+
 /* Графики */
 .plot{width:100%; height:420px; border:1px solid var(--line); background:var(--surface)}
 .plot--tall{height:640px}
@@ -246,8 +282,15 @@ tr:last-child td{border-bottom:0}
   /* Та же специфичность, что у токенов выше: при печати побеждает как более позднее правило */
   :root{--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none; color-scheme:light}
   .wizbar,button,label.pickbtn{display:none!important}
+  /* Печатается показанный шаг: на шаге 5 — только сводка (решение пользователя 25.10.2026), остальные секции скрыты
+     атрибутом hidden. Без вступления; у сводки — шапка печати, без заметки о действии, пояснений для экрана и столбца
+     «Действие» таблицы шагов */
+  .hero .lede,#step5_note,.screen-only{display:none!important}
+  #steps5 th:nth-child(4),#steps5 td:nth-child(4){display:none}
+  .print-head{display:block}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
+  tr{break-inside:avoid}
 }
 </style>
 </head>
@@ -290,6 +333,25 @@ tr:last-child td{border-bottom:0}
   <div class="verdict" id="log_verdict" hidden></div>
   <div class="stats" id="log_info" hidden></div>
   <div class="checks" id="log_checks" hidden></div>
+
+  <div class="memory0" id="memory0" hidden>
+    <div class="head"><span class="eyebrow">Память</span><h2>Прошлый проход</h2></div>
+    <p class="note" id="memory0_head" hidden></p>
+    <div class="verdict" id="memory0_verdict" hidden></div>
+    <div class="tablewrap" id="memory0_table" hidden>
+      <table>
+        <thead><tr><th>Параметр</th><th>Предлагалось</th><th>В логе сейчас</th><th>Шаг</th><th>Итог</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row">
+      <div class="fld" id="memory0_pick_field" hidden>
+        <label for="memory0_pick">Сохранённый проход</label>
+        <select id="memory0_pick"></select>
+      </div>
+      <button type="button" id="memory0_forget" hidden>Забыть проход этого аппарата</button>
+    </div>
+  </div>
 
   <div class="head"><span class="eyebrow">Полёт</span><h2>Крен, тангаж, газ и высота</h2></div>
   <div id="FlightData" class="plot"></div>
@@ -410,6 +472,7 @@ tr:last-child td{border-bottom:0}
   <p class="lede">Мастер считает несколько вариантов настроек notch — как в логе, автоподбор по методу PR #363, их сочетания и, если после лучшего остаётся пик рамы, второй notch — и оценивает каждый по ожидаемому шуму после фильтров и фазовой задержке. Рекомендуется лучший по полосе <span data-rule="band">20–400 Гц</span> из тех, что не хуже лога: ни один пик не растёт больше чем на <span data-rule="peak">3 дБ</span>, задержка на <span data-rule="lag_hz">30 Гц</span> — не больше чем на <span data-rule="lag">0.5 мс</span>.</p>
 
   <div class="verdict" id="verdict2" hidden></div>
+  <p class="note" id="memory2" hidden></p>
   <p class="note" id="warnings2" hidden></p>
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов notch</h2></div>
@@ -558,6 +621,7 @@ tr:last-child td{border-bottom:0}
   </div>
 
   <div class="verdict" id="verdict3" hidden></div>
+  <p class="note" id="memory3" hidden></p>
   <p class="note" id="warnings3" hidden></p>
 
   <div class="head"><span class="eyebrow">Варианты</span><h2>Сравнение вариантов фильтров</h2></div>
@@ -575,7 +639,7 @@ tr:last-child td{border-bottom:0}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="lpf_form"></div>
-    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле и отрицательную частоту принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
+    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле и отрицательную частоту принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>
@@ -640,6 +704,7 @@ tr:last-child td{border-bottom:0}
       </fieldset>
     </div>
     <div class="verdict" id="axis_verdict4" hidden></div>
+    <p class="note" id="memory4" hidden></p>
     <p class="note" id="warnings4" hidden></p>
 
     <div class="head"><span class="eyebrow">Отклик</span><h2>Метрики измеренного отклика</h2></div>
@@ -689,14 +754,56 @@ tr:last-child td{border-bottom:0}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Коэффициенты регулятора скорости</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="pidf_form"></div>
-    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл соберёт сводка.</p>
+    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
   <div class="row">
     <button type="button" id="pidf_accept" disabled>Принять</button>
   </div>
 </section>
 <section data-step="5" hidden>
-  <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Шаг появится на этапе 5</h2></div>
+  <div class="print-head" id="step5_print_head"></div>
+  <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Итог прохода</h2></div>
+  <p class="lede">Что принято на шагах 2–4 и что изменится на аппарате: параметры «было → станет», файл .param только с изменёнными и что перелететь после записи. Устаревшее принятое сводка помечает, но не блокирует.</p>
+
+  <div class="verdict" id="verdict5" hidden></div>
+  <div class="stats" id="tiles5" hidden></div>
+
+  <div class="head"><span class="eyebrow">Шаги</span><h2>Принятое на шагах 2–4</h2></div>
+  <div class="tablewrap cands" id="steps5" hidden>
+    <table>
+      <thead><tr><th>Шаг</th><th>Состояние</th><th>Итог</th><th>Действие</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="head"><span class="eyebrow">Изменения</span><h2>Параметры: было → станет</h2></div>
+  <div class="tablewrap cands" id="changes5" hidden>
+    <table>
+      <thead><tr><th>Параметр</th><th>Было</th><th>Станет</th><th>Шаг</th><th>Пометка</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="note" id="conflicts5" hidden></p>
+  <details class="more" id="unchanged5" hidden>
+    <summary></summary>
+    <div class="tablewrap cands">
+      <table>
+        <thead><tr><th>Параметр</th><th>Значение</th><th>Шаг</th><th>Пометка</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </details>
+
+  <div class="head" id="refly5_head" hidden><span class="eyebrow">Что перелететь</span><h2>Что сделать перед следующим полётом</h2></div>
+  <ol class="refly" id="refly5" hidden></ol>
+
+  <div class="row">
+    <button type="button" id="step5_download" disabled>Скачать .param</button>
+    <button type="button" id="step5_remember" disabled>Запомнить проход</button>
+    <button type="button" id="step5_print">Печать</button>
+  </div>
+  <p class="note" id="step5_note" role="status" hidden></p>
+  <p class="note screen-only">В файл .param попадают только изменённые параметры: что поменяли в Mission Planner после полёта, файл не перезапишет. Маски HMNCS при 8 битах пишутся со знаком, как их хранит прошивка. Память прохода — изменённые параметры и оценки принятых шагов — хранится в этом браузере по аппарату (строке полётного контроллера из лога); она сохраняется при «Скачать .param» и кнопкой «Запомнить проход», если значения вводятся вручную.</p>
 </section>
 
 </div>
