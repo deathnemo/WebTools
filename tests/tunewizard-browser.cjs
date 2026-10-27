@@ -339,6 +339,7 @@ async function main() {
         })
         assert.deepEqual(landing, { links: 1, src: 'images/TuneWizard_Icon.png', loaded: true, heading: 'Мастер настройки', lang: 'ru', after: './PIDReview' },
                          'главная: одна ссылка на мастер с загруженной иконкой, строка «Мастер настройки» на русском сразу после PID Review')
+        assert.deepEqual(problems, [], 'главная: ошибки консоли')
         await page.screenshot({ path: path.join(shots, 'landing.png'), fullPage: true })
         await page.click('a[href="./TuneWizard"]')
         await page.waitForURL(base + '/TuneWizard/', { waitUntil: 'networkidle' })
