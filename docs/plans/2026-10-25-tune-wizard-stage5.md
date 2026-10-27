@@ -136,10 +136,10 @@
 
 **Функции** (`storage` — объект с `getItem`, `setItem`, `removeItem` или `null`):
 
-- `passmem_read(storage)` → `{ passes, error }`: `storage` `null` или исключение — `{ passes: {}, error: "unavailable" }`; ключа нет — `{ passes: {}, error: null }`; JSON не разбирается, нет `passes` или `version !== PASSMEM_VERSION` — `{ passes: {}, error: "corrupt" }`.
+- `passmem_read(storage)` → `{ passes, error }`: `storage` `null` или исключение — `{ passes: {}, error: "unavailable" }`; ключа нет — `{ passes: {}, error: null }`; JSON не разбирается, нет `passes` или `version !== PASSMEM_VERSION` — `{ passes: {}, error: "corrupt" }`; записи, не прошедшие проверку формы (`passmem_valid`), отбрасываются — тогда `"corrupt"` с уцелевшими `passes` (ревью задачи 3).
 - `passmem_write(storage, passes)` → `null` или `"unavailable"` (исключение `setItem`, квота).
-- `passmem_aircraft_key(info, file_name)` → `"fc:" + info.board`, если `board` — непустая строка; иначе `"log:" + [плата из info.fw_string или «—», info.frame ?? «—», file_name].join("·")`.
-- `passmem_record(ctx)` → проход. `ctx = { key, info, file_name, rows, steps, saved_at }`:
+- `passmem_aircraft_key(info, file_name)` → `"fc:" + info.board`, если `board` — непустая строка; иначе `"log:" + [info.board_id ?? «—», info.frame ?? «—», file_name ?? «—»].join("·")` (номер платы APJ — из задачи 4).
+- `passmem_record(ctx)` → проход. `ctx = { key, info, file_name, rows, steps, saved_at, stale, conflicts }` (`stale: { 2, 3, 4 }` и `conflicts` из `summary_rows` — по ревью: оценки устаревшего шага и шага, чьё значение перекрыто, — `null`):
   - `{ key, board: info.board, frame: info.frame, fw: info.fw_string, file_name, saved_at, changed: [{ name, log, value, step }], estimates: { 2, 3, 4 } }`; `changed` — строки итога с `changed`;
   - `estimates[2]` (шаг 2 принят и есть `metrics`) — `{ log: { band_dB, lag30_ms }, accepted: { … } }` из `metrics.log` / `metrics.current` (`lag_ms[30]`);
   - `estimates[3]` — `{ log, accepted }`, каждое `{ gyro_band_dB, dterm_dB: { roll, pitch }, lag30_ms: { roll: { P, D }, pitch: { P, D } } }` из `step3_metrics_summary`;
@@ -149,7 +149,7 @@
 - `passmem_forget(passes, key)` → новый объект без `key`.
 - `passmem_list(passes)` → массив проходов по убыванию `saved_at` (для выбора вручную).
 - `passmem_applied(pass, params, bits)` → `{ rows: [{ name, step, proposed, now, status }], applied, total, same_log }`: `now = params.has ? params.get : null`; `status` — `"applied"` (`summary_same`), `"absent"` (`now` `null`), иначе `"other"`. `same_log` — все `now` равны `log` прохода (`summary_same`) и в проходе есть изменения; имя файла страница сравнивает сама.
-- `passmem_step_status(pass, applied, n)` → `"none"` (шаг `n` в проходе ничего не менял), `"partial"` (не все его изменённые `applied`), `"applied"`.
+- `passmem_step_status(applied, n, axis)` → `"none"` (шаг `n`, на шаге 4 — ось, ничего не менял), иначе накопительно по строкам шагов 2..n−1 и шага/оси (на шаге 4 — без строк с префиксом других осей): `"partial"` (не все `applied`), `"applied"` (ревью задачи 3).
 - `passmem_compare(pass, applied, n, now, axis)` → `null` (`"none"` или нет `estimates[n]`), `{ status: "partial" }`, `{ status: "unreliable" }` (шаг 4: ось ненадёжна в проходе или `now.reliable === false`), `{ status: "ok", was, predicted, now }` — `was` = `estimates[n].log` (на шаге 4 — `measured` и `log` оси), `predicted` = `accepted` (шаг 4 — `prediction`), `now` — как передано (та же форма, что у `estimates[n].log`; шаг 4 — `{ reliable, measured, log }`).
 
 **Тесты** (`tests/tunewizard-passmem.test.cjs`; хранилище — объект над словарём; скрипты — как в задаче 1 плюс `core/passmem.js`):
@@ -172,7 +172,7 @@
 **Файлы:**
 
 - изменить `TuneWizard/steps/step2.js`, `step3.js`, `step4.js` — «Принять»;
-- изменить `TuneWizard/core/log.js` — `info.frame`; тест — `tests/tunewizard.test.cjs`;
+- изменить `TuneWizard/core/log.js` — `info.frame` и `info.board_id`; тест — `tests/tunewizard.test.cjs`;
 - изменить `TuneWizard/steps/common.js` — помощник `step_inputs_key(n)`.
 
 **Что сделать:**
@@ -180,6 +180,7 @@
 - `step_inputs_key(n)` в `common.js` → `summary_inputs_key(n, { start: state.settings.start, end: state.settings.end, fft_key: step1.fft_key, filter_version: state.spectrum.filter_version, steps: state.steps })` (версия фильтра — по ревью задачи 1); парный `step_accepted_stale(n)` → `summary_stale(n, …)` с тем же контекстом.
 - `step2_accept`, `step3_accept`, `step4_accept`: в объект `state.steps[n]` добавить `inputs: step_inputs_key(n)`. Ключ берётся **до** записи `state.steps[n]` (у шага `n` ключ от шагов `< n`, так что порядок не важен, но так понятнее).
 - `log_info`: `frame` — текст после «Frame: » из первого сообщения MSG, которое так начинается (`log.get("MSG", "Message")`; нет MSG или строки — `null`). В тесте — поддельный лог с MSG `["ArduCopter V4.6.3 (92b0cd78)", "Frame: QUAD/X_REV"]` → `"QUAD/X_REV"`; без строки — `null`.
+- `log_info`: `board_id` — номер платы APJ из VER (`version.board_id` от `get_version_and_board`, `null`, если нет) — для запасного ключа памяти (ревью задачи 3).
 - Плитки шага 0 не меняются.
 
 **Проверки:** lint, `npm test`, `npm run test:tunewizard`; в браузерном тесте после каждого «Принять» шагов 2–4 — `state.steps[n].inputs === step_inputs_key(n)` и `step_accepted_stale(n) === false`; в блоке «Устаревание» (шаг 3 принят заново после шага 4) — `step_accepted_stale(4) === true`, `step_accepted_stale(3) === false`.
@@ -217,7 +218,7 @@
 **`steps/memory.js` (часть задачи 5):**
 
 - `memory_storage()` → `window.localStorage` или `null` (доступ в `try/catch`).
-- `memory_save()` → текст для `#step5_note`: `passmem_read` → `passmem_put(passes, passmem_record({ key: passmem_aircraft_key(state.info, state.file_name), info: state.info, file_name: state.file_name, rows, steps: state.steps, saved_at: Date.now() }))` → `passmem_write`; ошибки: `"unavailable"` — «Браузер не даёт сохранить память прохода (приватный режим или запрет хранилища).»; `"corrupt"` при чтении — сохранить заново и добавить «Прежняя память не прочитана — начата заново.»
+- `memory_save()` → текст для `#step5_note`: `passmem_read` → `passmem_put(passes, passmem_record({ key: passmem_aircraft_key(state.info, state.file_name), info: state.info, file_name: state.file_name, rows, steps: state.steps, saved_at: Date.now(), stale: { 2: step_accepted_stale(2), 3: step_accepted_stale(3), 4: step_accepted_stale(4) }, conflicts }))` → `passmem_write` (`rows` и `conflicts` — из `summary_rows(step5_context())`); ошибки: `"unavailable"` — «Браузер не даёт сохранить память прохода (приватный режим или запрет хранилища).»; `"corrupt"` при чтении — сохранить (уцелевшие записи + новая) и добавить «Часть прежней памяти не прочитана — удалена.»
 
 **CSS и печать** (`index.html`): `.print-head{display:none}`; в `@media print` — `.hero .lede,.wizbar,.plot,section[data-step]:not([data-step="5"]){display:none!important}`, `.print-head{display:block}`, `tr{break-inside:avoid}`. Остальной вид — существующие классы (`.stats`, `.verdict`, `.tablewrap`, `.note`).
 
@@ -225,7 +226,7 @@
 
 - открыть шаг 5: вердикт `warn` с упоминанием устаревшего шага 4; в таблице шагов у шага 4 — «устарело» и кнопка «К шагу 4»;
 - строки изменений совпадают с `summary_rows(step5_context()).rows.filter(r => r.changed)` (имена и «станет»); есть `INS_GYRO_FILTER` = 39 от шага 3;
-- скачать `.param` (`page.waitForEvent('download')` + клик `#step5_download`): имя `2026-06-18 18-54-42_anon_tune.param`; `parse_param_file` содержимого (в `page.evaluate`) равен `summary_param_values(rows, bits)`; в `localStorage` есть `tunewizard_v1` с проходом `fc:StellarH7V2 0034002E 35335104 39363630`;
+- скачать `.param` (`page.waitForEvent('download')` + клик `#step5_download`): имя `2026-06-18 18-54-42_anon_tune.param`; `parse_param_file` содержимого (в `page.evaluate`) равен `summary_param_values(rows, bits)`; в `localStorage` есть `tunewizard_v1` с проходом `fc:StellarH7V2 0034002E 35335104 39363630`; в записи `estimates[4] === null` (шаг 4 устарел — сквозная проверка ревью задачи 3), `estimates[2].log.band_dB` и `estimates[3].log.lag30_ms.roll.P` — числа (формы метрик страницы совпадают с ядром);
 - «что перелететь» — последний пункт «Слетайте тем же профилем…»; есть пункт тестового полёта (все оси ненадёжны);
 - печать: `page.emulateMedia({ media: 'print' })` → `.wizbar` и секция шага 0 `display: none`, `#step5_print_head` виден, кнопки скрыты; снимок `step5-print.png`; затем `emulateMedia({ media: 'screen' })`; снимок `step5.png`;
 - проверить ширину страницы без горизонтальной прокрутки, как у шагов 3–4.
@@ -248,9 +249,9 @@
 **`steps/memory.js`:**
 
 - `memory_state = { pass: null, applied: null, key: null }` — выбранный проход для лога (строки сравнения задачи 7 берут его отсюда).
-- `memory_render_step0()`:
+- `memory_render_step0()` (вызов из `load` — под `step_try`, чтобы сбой памяти не ронял загрузку лога; ревью задачи 3):
   - ключ `passmem_aircraft_key(state.info, state.file_name)`; лог со строкой контроллера — проход по ключу; без неё — `select` со списком `passmem_list` («дата · плата · лог»), по умолчанию ничего не выбрано;
-  - прохода нет — блок скрыт; ошибка чтения `"corrupt"` — блок с `warn` «Память прохода не прочитана — начата заново.»; `"unavailable"` — блок скрыт;
+  - прохода нет — блок скрыт (при `"corrupt"` — блок только с `warn` «Часть памяти прохода не прочитана — удалена.»); `"corrupt"` и проход аппарата уцелел — проход показывается как обычно, с той же строкой предупреждения; `"unavailable"` — блок скрыт;
   - проход есть: `#memory0_head` — «Сохранён <дата>, лог <имя>, прошивка <fw>»; `passmem_applied` → таблица (итог: «применено» / «другое значение» / «нет в логе»); вердикт: `same_log` и то же имя файла — `warn` «Это лог прошлого прохода — значения ещё не применялись.»; все применены — `ok` «Применено N из N.»; иначе `warn` «Применено K из N.»
 - `memory_forget()` — `passmem_forget` + запись + скрыть блок, `memory_state.pass = null`.
 - `memory_reset()` — скрыть блок, очистить `memory_state`.
@@ -273,7 +274,7 @@
 **`memory_line(n, now, axis)`** → текст или `null` по `passmem_compare(memory_state.pass, memory_state.applied, n, now, axis)`:
 
 - `null` — строка скрыта;
-- `partial` — «Прошлый проход (<дата>): параметры шага применены не все — сравнивать нечего.»;
+- `partial` — «Прошлый проход (<дата>): параметры шагов 2–N применены не все — сравнивать нечего.» (накопительно: прогноз шага N считался от принятого на шагах до него; ревью задачи 3);
 - `unreliable` — «Прошлый проход (<дата>): измерение ненадёжно — сравнивать нечем.»;
 - `ok`:
   - шаг 2: «Прошлый проход (<дата>): полоса <was> → прогноз <predicted> → в этом логе <now> дБ; задержка на 30 Гц <…> мс. Шум зависит от полёта: газ, манёвры.»;
@@ -281,7 +282,7 @@
   - шаг 4 (ось): «перерегулирование <was> → прогноз <predicted> → в этом логе <now> %; нарастание … мс; запас фазы … °».
 - числа — как в метриках шагов (`toFixed` тех же разрядов).
 
-**Где «в этом логе»:** шаг 2 — `step2.evaluations.log` (`band_dB`, `lag_ms[30]`); шаг 3 — `step3_metrics_summary(step3.evaluations.log)` в форме `estimates[3].log`; шаг 4 — `step4_metrics_summary(axis, null)` (`reliable`, `measured`, `log`). Строка рисуется вместе с вердиктом шага: `step2_render_verdict`, `step3_render_verdict` и `step4_render_axis_verdict` зовут `memory_show(n, axis)` (`axis` — только у шага 4, ось открытой вкладки); нет расчёта — строка скрыта.
+**Где «в этом логе»:** только величины конфигурации лога (ревью задачи 3). Шаг 2 — `step2.evaluations.log` (`band_dB`, `lag_ms[30]`). Шаг 3 — `step3_metrics_summary(step3.evaluations.log)` в форме `estimates[3].log`, но только если notch-база шага 3 — notch лога (`candidate_key(step3.base) === candidate_key(values_from_log())`): после «Принять» на шаге 2 нового прохода оценка «как в логе» считается уже с принятым notch — тогда числа Z нет, вместо него «оценка этого лога видна до «Принять» на шаге 2». Шаг 4 — `step4_metrics_summary(axis, null)`: `measured` всегда; запас фазы и частота среза — только если фильтры для прогноза не отличаются от лога (`!step4_gyro_changed()` и FLTE/FLTD шага 3 не приняты другими), иначе без них. Строка рисуется вместе с вердиктом шага: `step2_render_verdict`, `step3_render_verdict` и `step4_render_axis_verdict` зовут `memory_show(n, axis)` (`axis` — только у шага 4, ось открытой вкладки); нет расчёта — строка скрыта.
 
 **Браузерный тест:** синтетический проход (как в задаче 6) с изменённым параметром шага 2, применённым в логе, и `estimates[2]` → на шаге 2 `#memory2` виден и начинается с «Прошлый проход»; проход с неприменённым параметром шага 3 → `#memory3` — «применены не все»; ось шага 4 (все ненадёжны) → `#memory4` — «измерение ненадёжно». Для синтетики брать значения из `state.params` в `page.evaluate`.
 
