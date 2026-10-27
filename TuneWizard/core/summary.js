@@ -237,7 +237,7 @@ function summary_refly(ctx) {
     if (ctx.reboot_names == null) {
         if (changed.length > 0) {
             add("reboot", "Описания параметров не загрузились, и мастер не знает, какие изменённые параметры " +
-                "действуют только после перезагрузки: после записи перезагрузите полётный контроллер — так надёжнее")
+                "требуют перезагрузки: после записи перезагрузите полётный контроллер — так надёжнее")
         }
     } else {
         const reboot = changed.map((row) => row.name).filter((name) => ctx.reboot_names.includes(name))

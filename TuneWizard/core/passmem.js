@@ -7,6 +7,9 @@
 // Хранилище ядро получает аргументом (storage — объект с getItem, setItem, removeItem, как localStorage, или null):
 // в браузере его даёт страница, в тестах — объект над словарём. Сам localStorage ядро не трогает.
 //
+// Версии формата: формат записи в хранилище меняется только вместе с новой PASSMEM_VERSION. Память чужой версии
+// (в том числе более новой) читается как "corrupt" — память начинается заново, перевода между версиями нет [наше].
+//
 // Нужны глобалы страницы: core/summary.js (summary_same; ему — core/params.js и Libraries/Param_Helpers.js),
 // core/lowpass.js (lowpass_pid_axes), core/pidtune.js (pidtune_axes).
 
@@ -16,10 +19,28 @@ const PASSMEM_KEY = "tunewizard_v1"
 const PASSMEM_VERSION = 1
 const PASSMEM_MAX = 20
 
+// Объект (не null и не массив)
+function passmem_is_object(value) {
+    return (value != null) && (typeof value === "object") && !Array.isArray(value)
+}
+
+// Годна ли запись прохода из хранилища для функций памяти: объект; changed — массив объектов со строковым name и
+// числовым step; saved_at — число или нет (null — тоже нет: так его пишет passmem_record без даты); estimates —
+// объект или нет. Остальные поля функции памяти читают осторожно (?., null)
+function passmem_valid(record) {
+    return passmem_is_object(record) &&
+        Array.isArray(record.changed) &&
+        record.changed.every((change) => passmem_is_object(change) && (typeof change.name === "string") &&
+                                         (typeof change.step === "number")) &&
+        ((record.saved_at == null) || (typeof record.saved_at === "number")) &&
+        ((record.estimates == null) || passmem_is_object(record.estimates))
+}
+
 // Проходы из хранилища → { passes, error }: error null — прочитано (ключа нет — пусто); "unavailable" — хранилища нет
 // или оно бросает (приватный режим, запрет хранилища): страница пишет, что браузер не даёт сохранить память;
-// "corrupt" — JSON не разбирается, другая версия или passes не объект: память игнорируется и будет начата заново.
-// При ошибке passes — {}
+// "corrupt" — JSON не разбирается, другая версия или passes не объект (passes — {}: память будет начата заново), либо
+// отброшены битые записи (passmem_valid; passes — остальные, страница перезапишет память без битых). Битая запись
+// иначе роняла бы загрузку любого лога [наше]
 function passmem_read(storage) {
     if (storage == null) {
         return { passes: {}, error: "unavailable" }
@@ -39,21 +60,31 @@ function passmem_read(storage) {
     } catch {
         return { passes: {}, error: "corrupt" }
     }
-    const passes = data?.passes
-    if ((data?.version !== PASSMEM_VERSION) || (passes == null) || (typeof passes !== "object") || Array.isArray(passes)) {
+    if ((data?.version !== PASSMEM_VERSION) || !passmem_is_object(data.passes)) {
         return { passes: {}, error: "corrupt" }
     }
-    return { passes: passes, error: null }
+    const passes = {}
+    let dropped = false
+    for (const [key, record] of Object.entries(data.passes)) {
+        if (passmem_valid(record)) {
+            passes[key] = record
+        } else {
+            dropped = true
+        }
+    }
+    return { passes: passes, error: dropped ? "corrupt" : null }
 }
 
 // Записать проходы passes (ключ аппарата → проход) в хранилище как { version, passes } → null или "unavailable"
-// (хранилища нет; setItem бросает — приватный режим, квота)
+// (хранилища нет; setItem бросает — приватный режим, квота). Ошибка сериализации — ошибка программы, а не хранилища:
+// она бросает
 function passmem_write(storage, passes) {
     if (storage == null) {
         return "unavailable"
     }
+    const text = JSON.stringify({ version: PASSMEM_VERSION, passes: passes })
     try {
-        storage.setItem(PASSMEM_KEY, JSON.stringify({ version: PASSMEM_VERSION, passes: passes }))
+        storage.setItem(PASSMEM_KEY, text)
     } catch {
         return "unavailable"
     }
@@ -61,18 +92,18 @@ function passmem_write(storage, passes) {
 }
 
 // Ключ аппарата. info — state.info (log_info): board — строка полётного контроллера из MSG (плата и уникальный номер
-// процессора, например «StellarH7V2 0034002E 35335104 39363630»; сохраняется и в обезличенных логах), frame — рама.
+// процессора, например «StellarH7V2 0034002E 35335104 39363630»; сохраняется и в обезличенных логах), board_id — номер
+// платы APJ из VER, frame — рама.
 // Строка контроллера есть (непустая строка) — «fc:<строка>»: тот же аппарат узнаётся в любом логе
-// [решение пользователя 25.10.2026]. Нет — запасной «log:<плата>·<рама>·<имя лога>»: такой проход найдётся только для
-// того же файла, шаг 0 предлагает выбрать проход вручную. Платы на месте запасного ключа нет: в VER.FWS (fw_string) её
-// нет — там «ArduCopter V4.6.3 (<git>)» [код, AP_FWVersionDefine.h], а строка контроллера и есть плата; поэтому «—».
-// Рамы нет (null; до появления info.frame — undefined) — «—»
+// [решение пользователя 25.10.2026]. Нет — запасной «log:<номер платы>·<рама>·<имя лога>»: такой проход найдётся только
+// для того же файла, шаг 0 предлагает выбрать проход вручную. Плата — номер APJ, а не из VER.FWS (fw_string): там её
+// нет, только «ArduCopter V4.6.3 (<git>)» [код, AP_FWVersionDefine.h]. Нет значения (в том числе поля в info) — «—»
 function passmem_aircraft_key(info, file_name) {
     const board = info?.board
     if ((typeof board === "string") && (board !== "")) {
         return "fc:" + board
     }
-    return "log:" + ["—", info?.frame ?? "—", file_name].join("·")
+    return "log:" + [info?.board_id ?? "—", info?.frame ?? "—", file_name ?? "—"].join("·")
 }
 
 // Значение для записи в JSON: undefined → null (JSON.stringify выбросил бы поле)
@@ -80,14 +111,20 @@ function passmem_value(value) {
     return value ?? null
 }
 
+// Число для оценок: не конечное (NaN, ±Infinity, не число, нет) — null. В JSON NaN и бесконечность и так стали бы
+// null: память и хранилище не должны расходиться
+function passmem_number(value) {
+    return Number.isFinite(value) ? value : null
+}
+
 // Оценки шага 2 из state.steps[2].metrics (step2_metrics_summary): полоса и задержка на 30 Гц (старшая из
-// lag_freqs_hz) значений лога (log) и принятых (accepted); шаг не принят или без метрик — null
+// lag_freqs_hz, lowpass_lag_hz) значений лога (log) и принятых (accepted); шаг не принят или без метрик — null
 function passmem_estimates2(step) {
     const metrics = step?.metrics
     if (metrics == null) {
         return null
     }
-    const pick = (e) => ({ band_dB: passmem_value(e?.band_dB), lag30_ms: passmem_value(e?.lag_ms?.[30]) })
+    const pick = (e) => ({ band_dB: passmem_number(e?.band_dB), lag30_ms: passmem_number(e?.lag_ms?.[30]) })
     return { log: pick(metrics.log), accepted: pick(metrics.current) }
 }
 
@@ -102,10 +139,10 @@ function passmem_estimates3(step) {
         const dterm = {}
         const lag = {}
         for (const axis of Object.keys(lowpass_pid_axes)) {
-            dterm[axis] = passmem_value(e?.dterm?.[axis]?.dB)
-            lag[axis] = { P: passmem_value(e?.lag_ms?.[axis]?.P?.[30]), D: passmem_value(e?.lag_ms?.[axis]?.D?.[30]) }
+            dterm[axis] = passmem_number(e?.dterm?.[axis]?.dB)
+            lag[axis] = { P: passmem_number(e?.lag_ms?.[axis]?.P?.[30]), D: passmem_number(e?.lag_ms?.[axis]?.D?.[30]) }
         }
-        return { gyro_band_dB: passmem_value(e?.gyro?.band_dB), dterm_dB: dterm, lag30_ms: lag }
+        return { gyro_band_dB: passmem_number(e?.gyro?.band_dB), dterm_dB: dterm, lag30_ms: lag }
     }
     return { log: pick(metrics.log), accepted: pick(metrics.current) }
 }
@@ -124,27 +161,32 @@ function passmem_estimates4(step) {
         estimates[axis] = (m == null) ? null : {
             reliable: passmem_value(m.reliable),
             measured: (m.measured == null) ? null :
-                { overshoot_pct: passmem_value(m.measured.overshoot_pct), rise_s: passmem_value(m.measured.rise_s) },
-            log: (m.log == null) ? null : { pm_deg: passmem_value(m.log.pm_deg), crossover_hz: passmem_value(m.log.crossover_hz) },
+                { overshoot_pct: passmem_number(m.measured.overshoot_pct), rise_s: passmem_number(m.measured.rise_s) },
+            log: (m.log == null) ? null : { pm_deg: passmem_number(m.log.pm_deg), crossover_hz: passmem_number(m.log.crossover_hz) },
             prediction: (m.prediction == null) ? null : {
-                overshoot_pct: passmem_value(m.prediction.overshoot_pct), rise_s: passmem_value(m.prediction.rise_s),
-                pm_deg: passmem_value(m.prediction.pm_deg), unstable: passmem_value(m.prediction.unstable),
+                overshoot_pct: passmem_number(m.prediction.overshoot_pct), rise_s: passmem_number(m.prediction.rise_s),
+                pm_deg: passmem_number(m.prediction.pm_deg), unstable: passmem_value(m.prediction.unstable),
             },
         }
     }
     return estimates
 }
 
-// Проход для памяти. ctx = { key, info, file_name, rows, steps, saved_at }: key — passmem_aircraft_key; info —
-// state.info; file_name — имя лога; rows — строки итога (summary_rows(…).rows); steps — state.steps; saved_at — дата
-// сохранения, мс (Date.now()).
+// Проход для памяти. ctx = { key, info, file_name, rows, steps, saved_at, stale, conflicts }: key —
+// passmem_aircraft_key; info — state.info; file_name — имя лога; rows и conflicts — строки итога и расхождения
+// (summary_rows(…).rows и .conflicts; conflicts нет — расхождений нет); steps — state.steps; saved_at — дата
+// сохранения, мс (Date.now()); stale — { 2, 3, 4 }: устарело ли принятое шага (step_accepted_stale; нет — не устарело).
 // → { key, board, frame, fw, file_name, saved_at, changed, estimates }:
 // - подпись: board, frame, fw (info.fw_string) — для показа; нет — null;
 // - changed — строки итога с changed: { name, log, value, step } (log null — параметра не было в логе);
-// - estimates — { 2, 3, 4 } для проверки прогноза (passmem_estimates2/3/4); шаг не принят или без метрик — null.
-// Все undefined — null: запись уходит в JSON
+// - estimates — { 2, 3, 4 } для проверки прогноза (passmem_estimates2/3/4); null — шаг не принят, без метрик или его
+//   оценки не для применяемой конфигурации: шаг устарел, или его значение какого-то имени перекрыто другим шагом
+//   (в conflicts есть значение шага n, а used — другой шаг: расхождение INS_GYRO_FILTER) [наше].
+// Все undefined — null, числа оценок — конечные или null: запись уходит в JSON
 function passmem_record(ctx) {
     const info = ctx.info ?? {}
+    const conflicts = ctx.conflicts ?? []
+    const valid = (n) => !ctx.stale?.[n] && !conflicts.some((conflict) => (n in conflict.values) && (conflict.used !== n))
     return {
         key: ctx.key,
         board: passmem_value(info.board),
@@ -156,16 +198,16 @@ function passmem_record(ctx) {
             name: row.name, log: passmem_value(row.log), value: passmem_value(row.value), step: row.step,
         })),
         estimates: {
-            2: passmem_estimates2(ctx.steps[2]),
-            3: passmem_estimates3(ctx.steps[3]),
-            4: passmem_estimates4(ctx.steps[4]),
+            2: valid(2) ? passmem_estimates2(ctx.steps[2]) : null,
+            3: valid(3) ? passmem_estimates3(ctx.steps[3]) : null,
+            4: valid(4) ? passmem_estimates4(ctx.steps[4]) : null,
         },
     }
 }
 
 // Положить проход record в память passes → новый объект (passes не меняется): запись по record.key (проход того же
-// аппарата заменяется). Аппаратов больше PASSMEM_MAX — удаляются проходы с самой старой датой сохранения (saved_at),
-// кроме добавляемого: его только что сохранили, даже если часы компьютера сбиты [наше]
+// аппарата заменяется). Аппаратов больше PASSMEM_MAX — удаляются проходы с самой старой датой сохранения (saved_at;
+// нет даты — самые старые), кроме добавляемого: его только что сохранили, даже если часы компьютера сбиты [наше]
 function passmem_put(passes, record) {
     const next = { ...passes, [record.key]: record }
     let keys = Object.keys(next)
@@ -223,62 +265,59 @@ function passmem_applied(pass, params, bits) {
     }
 }
 
-// Статус набора строк passmem_applied: "none" — строк нет, "applied" — все применены, "partial" — не все
-function passmem_rows_status(rows) {
-    if (rows.length === 0) {
+// Применены ли параметры, от которых зависит прогноз шага n (2–4) прошлого прохода. applied — passmem_applied(pass, …);
+// шаг строки — шаг прохода, который дал значение. axis — ось шага 4 (roll | pitch | yaw); не передана — весь шаг 4.
+// Прогноз шага 3 считался от notch шага 2, шага 4 — от notch шага 2 и фильтров шага 3 [код, шаги мастера], поэтому
+// учитываются изменённые строки шагов 2..n; из строк шага 4 с осью — только этой оси (префикс pidtune_axes[axis].rate):
+// другая ось на неё не влияет [наше].
+// → "none" — шаг n (на шаге 4 с осью — эта ось) в проходе ничего не менял: строки сравнения нет; "partial" — параметры
+//   шагов 2..n применены не все (другое значение или нет в логе); "applied" — все
+function passmem_step_status(applied, n, axis) {
+    const own = applied.rows.filter((row) => (row.step === n) &&
+        ((n !== 4) || (axis == null) || row.name.startsWith(pidtune_axes[axis].rate)))
+    if (own.length === 0) {
         return "none"
     }
+    const rows = applied.rows.filter((row) => row.step < n).concat(own)
     return rows.every((row) => row.status === "applied") ? "applied" : "partial"
-}
-
-// Применён ли шаг n прошлого прохода: "none" — шаг в проходе ничего не менял, "partial" — применены не все его
-// изменённые параметры (другое значение или нет в логе), "applied" — все. applied — passmem_applied(pass, …);
-// строки applied идут по pass.changed, шаг строки — шаг прохода, который дал значение
-function passmem_step_status(pass, applied, n) {
-    return passmem_rows_status(applied.rows.filter((row) => row.step === n))
 }
 
 // Строка сравнения шага n (2–4) с прошлым проходом: «было X → прогноз Y → в этом логе Z»
 // [решение пользователя 25.10.2026]. pass — проход аппарата (null — прохода нет), applied — passmem_applied(pass, …),
 // now — оценка нового лога для варианта «Как в логе» (та же форма, что у estimates[n].log; шаг 4 — { reliable,
 // measured, log } оси по step4_metrics_summary), axis — ось шага 4 (roll | pitch | yaw).
-// → null — строки нет: прохода нет, шаг (на шаге 4 — ось) в проходе ничего не менял, оценок шага нет (принят без
-//   метрик), на шаге 4 — нет записи оси;
-// → { status: "partial" } — применены не все изменённые параметры шага: сравнивать нечего;
-// → { status: "unreliable" } — шаг 4: измерение оси ненадёжно в проходе (reliable не true) или сейчас
-//   (now.reliable === false): сравнивать нечем;
+// → null — строки нет: прохода нет; оценок шага нет (не принят, без метрик, устарел или перекрыт — passmem_record);
+//   на шаге 4 — нет записи оси (или ось не передана); шаг (на шаге 4 — ось) в проходе ничего не менял;
+// → { status: "partial" } — параметры шагов 2..n применены не все (passmem_step_status): сравнивать нечего;
+// → { status: "unreliable" } — шаг 4: измерение оси ненадёжно в проходе или сейчас (reliable не true; now null —
+//   надёжность неизвестна): сравнивать нечем;
 // → { status: "ok", was, predicted, now } — was — оценка лога прошлого прохода (estimates[n].log; шаг 4 — { measured,
 //   log } оси), predicted — прогноз для принятого (estimates[n].accepted; шаг 4 — prediction оси, недостоверен —
-//   null), now — как передано.
-// На шаге 4 «применено» — по изменённым параметрам шага 4 этой оси (префикс pidtune_axes[ось].rate): ось
-// сравнивается, даже если другую ось не применили [наше]
+//   null), now — как передано
 function passmem_compare(pass, applied, n, now, axis) {
     if ((pass == null) || (applied == null)) {
         return null
     }
+    // Оценки для сравнения: шага, на шаге 4 — оси
     const estimates = pass.estimates?.[n] ?? null
-    if (estimates == null) {
+    const record = (n === 4) ? (estimates?.[axis] ?? null) : estimates
+    if (record == null) {
         return null
     }
-    let rows = applied.rows.filter((row) => row.step === n)
+
+    const status = passmem_step_status(applied, n, axis)
+    if (status === "none") {
+        return null
+    }
+    if (status === "partial") {
+        return { status: "partial" }
+    }
     if (n === 4) {
-        const record = estimates[axis] ?? null
-        if (record == null) {
-            return null
-        }
-        rows = rows.filter((row) => row.name.startsWith(pidtune_axes[axis].rate))
-        const status = passmem_rows_status(rows)
-        if (status !== "applied") {
-            return (status === "none") ? null : { status: "partial" }
-        }
-        if ((record.reliable !== true) || (now?.reliable === false)) {
+        if ((record.reliable !== true) || (now?.reliable !== true)) {
             return { status: "unreliable" }
         }
-        return { status: "ok", was: { measured: record.measured, log: record.log }, predicted: record.prediction, now: now }
+        return { status: "ok", was: { measured: record.measured ?? null, log: record.log ?? null },
+                 predicted: record.prediction ?? null, now: now }
     }
-    const status = passmem_rows_status(rows)
-    if (status !== "applied") {
-        return (status === "none") ? null : { status: "partial" }
-    }
-    return { status: "ok", was: estimates.log, predicted: estimates.accepted, now: now }
+    return { status: "ok", was: record.log ?? null, predicted: record.accepted ?? null, now: now }
 }

@@ -1,7 +1,8 @@
 // Тесты памяти прохода мастера настройки (TuneWizard/core/passmem.js): чтение и запись хранилища (версия,
-// испорченный JSON, недоступное хранилище), ключ аппарата и запасной ключ, запись прохода (изменённые параметры,
-// оценки шагов 2–4), предел числа аппаратов, «забыть» и список, «применено / другое значение / нет в логе»,
-// «лог прошлого прохода», статус шага и условия строки сравнения (всё применено, частично, ось ненадёжна).
+// испорченный JSON, битые записи, недоступное хранилище), ключ аппарата и запасной ключ, запись прохода (изменённые
+// параметры, оценки шагов 2–4; устаревшие и перекрытые шаги без оценок), предел числа аппаратов, «забыть» и список,
+// «применено / другое значение / нет в логе», «лог прошлого прохода», статус шага (накопительно по шагам 2–n) и
+// условия строки сравнения (всё применено, частично, ось ненадёжна), совместимость с записанным форматом v1.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-summary.test.cjs).
 const test = require('node:test')
@@ -159,9 +160,11 @@ function fake_steps() {
     return steps
 }
 
-// Проход по ROWS и fake_steps (или переданным steps)
-function fake_pass({ steps = fake_steps(), rows = ROWS, key = 'fc:' + BOARD, saved_at = 1000 } = {}) {
-    return passmem_record({ key: key, info: INFO, file_name: LOG_NAME, rows: rows, steps: steps, saved_at: saved_at })
+// Проход по ROWS и fake_steps (или переданным steps); stale и conflicts — как у страницы (step_accepted_stale,
+// summary_rows(…).conflicts), по умолчанию нет
+function fake_pass({ steps = fake_steps(), rows = ROWS, key = 'fc:' + BOARD, saved_at = 1000, stale, conflicts } = {}) {
+    return passmem_record({ key: key, info: INFO, file_name: LOG_NAME, rows: rows, steps: steps, saved_at: saved_at,
+                            stale: stale, conflicts: conflicts })
 }
 
 // ---------------------------------------------------------------- хранилище
@@ -212,11 +215,45 @@ test('passmem_read: хранилища нет или оно бросает — "
     assert.deepEqual(passmem_read(throwing_storage({ get: true })), unavailable)
 })
 
+test('passmem_read: битые записи отбрасываются, остальные читаются; что-то отброшено — "corrupt"', () => {
+    const good = fake_pass({ key: 'c' })
+    const text = (passes) => JSON.stringify({ version: PASSMEM_VERSION, passes: passes })
+    assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ a: null, b: { key: 'b' }, c: good }) })),
+        { passes: { c: good }, error: 'corrupt' })
+
+    // Каждый вид порчи по отдельности
+    const broken = {
+        array: [good],
+        number: 5,
+        no_changed: { ...good, changed: undefined },
+        changed_object: { ...good, changed: {} },
+        changed_null_item: { ...good, changed: [null] },
+        name_number: { ...good, changed: [{ ...good.changed[0], name: 7 }] },
+        no_name: { ...good, changed: [{ log: 1, value: 2, step: 2 }] },
+        step_string: { ...good, changed: [{ ...good.changed[0], step: '2' }] },
+        saved_at_string: { ...good, saved_at: '1000' },
+        estimates_array: { ...good, estimates: [] },
+        estimates_number: { ...good, estimates: 1 },
+    }
+    for (const [what, record] of Object.entries(broken)) {
+        assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ c: good, x: record }) })),
+            { passes: { c: good }, error: 'corrupt' }, what)
+    }
+
+    // Без saved_at и estimates, с пустым changed — запись годна
+    const minimal = { key: 'm', changed: [] }
+    assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ m: minimal }) })), { passes: { m: minimal }, error: null })
+})
+
 test('passmem_write: setItem бросает (квота) или хранилища нет — "unavailable"', () => {
     assert.equal(passmem_write(throwing_storage({ set: true }), {}), 'unavailable')
     assert.equal(passmem_write(null, {}), 'unavailable')
     // Без исключения — null
     assert.equal(passmem_write(throwing_storage(), {}), null)
+})
+
+test('passmem_write: ошибка сериализации — ошибка программы, бросает, а не "unavailable"', () => {
+    assert.throws(() => passmem_write(fake_storage(), { a: { key: 'a', saved_at: 1n } }), TypeError)
 })
 
 // ---------------------------------------------------------------- ключ аппарата
@@ -235,6 +272,15 @@ test('passmem_aircraft_key: без строки контроллера — за�
     assert.equal(passmem_aircraft_key({ board: null, fw_string: INFO.fw_string }, LOG_NAME), 'log:—·—·' + LOG_NAME)
     // Разные логи без строки контроллера — разные ключи
     assert.notEqual(passmem_aircraft_key({ board: null }, 'a.bin'), passmem_aircraft_key({ board: null }, 'b.bin'))
+    // info нет, имени файла нет — «—»
+    assert.equal(passmem_aircraft_key(null, LOG_NAME), 'log:—·—·' + LOG_NAME)
+    assert.equal(passmem_aircraft_key({ board: null, frame: 'QUAD/X_REV' }, null), 'log:—·QUAD/X_REV·—')
+    assert.equal(passmem_aircraft_key({ board: null }, undefined), 'log:—·—·—')
+})
+
+test('passmem_aircraft_key: плата в запасном ключе — номер платы APJ из VER (board_id); при строке контроллера не нужен', () => {
+    assert.equal(passmem_aircraft_key({ board: null, board_id: 1503, frame: 'QUAD/X_REV' }, LOG_NAME), 'log:1503·QUAD/X_REV·' + LOG_NAME)
+    assert.equal(passmem_aircraft_key({ ...INFO, board_id: 1503 }, LOG_NAME), 'fc:' + BOARD)
 })
 
 // ---------------------------------------------------------------- запись прохода
@@ -257,6 +303,8 @@ test('passmem_record: подпись прохода и изменённые — 
 })
 
 test('passmem_record: оценки шага 2 — полоса и задержка на 30 Гц лога и принятого', () => {
+    // Поле lag30_ms — часть формата: задержка на старшей частоте шагов 2–3
+    assert.equal(lowpass_lag_hz(), 30)
     assert.deepEqual(fake_pass().estimates[2], {
         log: { band_dB: -40.25, lag30_ms: 2.71 },
         accepted: { band_dB: -42.5, lag30_ms: 2.43 },
@@ -318,6 +366,61 @@ test('passmem_record: undefined — null (запись уходит в JSON бе
     assert.deepEqual(JSON.parse(JSON.stringify(fake_pass())), fake_pass())
 })
 
+test('passmem_record: NaN и бесконечность в оценках — null (в JSON они и так станут null: память = хранилище)', () => {
+    const steps = fake_steps()
+    steps[2].metrics.log.band_dB = NaN
+    steps[3].metrics.current.gyro.band_dB = Infinity
+    steps[3].metrics.log.lag_ms.pitch.P[30] = -Infinity
+    steps[4].axes.roll.metrics.log.pm_deg = NaN
+    steps[4].axes.roll.metrics.prediction.overshoot_pct = Infinity
+    const pass = fake_pass({ steps: steps })
+    assert.equal(pass.estimates[2].log.band_dB, null)
+    assert.equal(pass.estimates[3].accepted.gyro_band_dB, null)
+    assert.equal(pass.estimates[3].log.lag30_ms.pitch.P, null)
+    assert.equal(pass.estimates[4].roll.log.pm_deg, null)
+    assert.equal(pass.estimates[4].roll.prediction.overshoot_pct, null)
+    assert.deepEqual(JSON.parse(JSON.stringify(pass)), pass)
+})
+
+test('passmem_record: info null — подпись null; нет метрик оси шага 4 — null вместо оси', () => {
+    const steps = fake_steps()
+    delete steps[4].axes.yaw
+    const pass = passmem_record({ key: 'k', info: null, file_name: LOG_NAME, rows: [], steps: steps, saved_at: 5 })
+    assert.equal(pass.board, null)
+    assert.equal(pass.frame, null)
+    assert.equal(pass.fw, null)
+    assert.equal(pass.estimates[4].yaw, null)
+    assert.notEqual(pass.estimates[4].roll, null)
+})
+
+test('passmem_record: устаревший шаг — без оценок: прогноз считался не для применяемой конфигурации', () => {
+    const pass = fake_pass({ stale: { 2: false, 3: true, 4: false } })
+    assert.equal(pass.estimates[3], null)
+    assert.notEqual(pass.estimates[2], null)
+    assert.notEqual(pass.estimates[4], null)
+    // Изменённые пишутся как есть: «применено» на шаге 0 от устаревания не зависит
+    assert.deepEqual(pass.changed, fake_pass().changed)
+    assert.deepEqual(Object.values(fake_pass({ stale: { 2: true, 3: true, 4: true } }).estimates), [null, null, null])
+})
+
+test('passmem_record: значение шага перекрыто другим шагом (расхождение INS_GYRO_FILTER) — оценки этого шага null', () => {
+    // Расхождение — как его даёт summary_rows: шаг 2 принял INS_GYRO_FILTER 40, шаг 3 — 42, в файл идёт шаг 3
+    const steps = fake_steps()
+    steps[2].accepted.INS_GYRO_FILTER = 40
+    steps[3].accepted.INS_GYRO_FILTER = 42
+    const { conflicts } = summary_rows({ params: fake_params({ INS_GYRO_FILTER: 40 }), steps: steps,
+        names: { 2: ['INS_GYRO_FILTER'], 3: ['INS_GYRO_FILTER'], 4: [] }, filter_version: 2, bits: 8 })
+    assert.deepEqual(conflicts, [{ name: 'INS_GYRO_FILTER', values: { 2: 40, 3: 42 }, used: 3 }])
+
+    const pass = fake_pass({ steps: steps, conflicts: conflicts })
+    assert.equal(pass.estimates[2], null)
+    // Шаг 3 дал значение в файл — его оценки остаются
+    assert.notEqual(pass.estimates[3], null)
+    assert.notEqual(pass.estimates[4], null)
+    // Расхождений нет — оценки всех шагов
+    assert.notEqual(fake_pass({ steps: steps, conflicts: [] }).estimates[2], null)
+})
+
 // ---------------------------------------------------------------- проходы
 
 // Проход с ключом key и датой saved_at (подпись — как у fake_pass)
@@ -367,6 +470,30 @@ test('passmem_put: добавляемый проход не вытесняетс
     assert.equal('k0' in next, false)
 })
 
+test('passmem_put: проход без даты сохранения — самый старый, вытесняется первым', () => {
+    let passes = {}
+    for (let i = 0; i < PASSMEM_MAX; i++) {
+        passes = passmem_put(passes, pass_at('k' + i, 1000 + i))
+    }
+    const no_date = { ...passes.k5 }
+    delete no_date.saved_at
+    const next = passmem_put({ ...passes, k5: no_date }, pass_at('new', 5000))
+    assert.equal(Object.keys(next).length, PASSMEM_MAX)
+    assert.equal('k5' in next, false)
+    assert.equal('k0' in next, true)
+})
+
+test('passmem_put: аппаратов больше PASSMEM_MAX + 1 — вытесняются несколько самых старых подряд', () => {
+    // Память с 23 проходами (например, от версии с другим пределом): после добавления остаются 20 —
+    // добавленный и 19 самых новых
+    const passes = Object.fromEntries(Array.from({ length: 23 }, (_, i) => ['k' + i, pass_at('k' + i, 1000 + i)]))
+    const next = passmem_put(passes, pass_at('new', 5000))
+    assert.equal(Object.keys(next).length, PASSMEM_MAX)
+    assert.deepEqual(['k0', 'k1', 'k2', 'k3'].filter((key) => key in next), [])
+    assert.equal('k4' in next, true)
+    assert.equal('new' in next, true)
+})
+
 test('passmem_forget: новый объект без ключа; нет такого ключа — копия', () => {
     const passes = { a: pass_at('a', 1), b: pass_at('b', 2) }
     assert.deepEqual(Object.keys(passmem_forget(passes, 'a')), ['b'])
@@ -411,7 +538,7 @@ test('passmem_applied: применено (0.7 против 0.699999988, мас�
 
 test('passmem_applied: same_log — все значения как «было» прошлого прохода (лог ещё не применялся)', () => {
     assert.equal(passmem_applied(fake_pass(), fake_params(PASS_LOG), 8).same_log, true)
-    // Значения лога — как float32 и маска со знаком: тоже «было»
+    // Значение лога не float32 (0.135, а «было» — Math.fround(0.135)): сравнение как float32 — тоже «было»
     assert.equal(passmem_applied(fake_pass(), fake_params({ ...PASS_LOG, ATC_RAT_RLL_P: 0.135 }), 8).same_log, true)
     // Одно значение другое — уже не лог прошлого прохода
     assert.equal(passmem_applied(fake_pass(), fake_params({ ...PASS_LOG, INS_HNTCH_FREQ: 75 }), 8).same_log, false)
@@ -438,32 +565,44 @@ function pass_and_applied(log, steps = fake_steps()) {
     return { pass: pass, applied: passmem_applied(pass, fake_params(log), 8) }
 }
 
-test('passmem_step_status: шаг ничего не менял — "none"; не все его изменённые применены — "partial"; все — "applied"', () => {
-    const rows = ROWS.filter((row) => row.step !== 3)
-    const pass = fake_pass({ rows: rows })
+// Оценки «в этом логе» для строки сравнения: шаг 2 и надёжная ось шага 4
+const NOW2 = { band_dB: -42, lag30_ms: 2.5 }
+const NOW4 = { reliable: true, measured: { rise_s: 0.05, overshoot_pct: 9 }, log: { pm_deg: 54, crossover_hz: 12 } }
+
+test('passmem_step_status: шаг (ось) ничего не менял — "none"; параметры шагов 2–n применены не все — "partial"; все — "applied"', () => {
+    // Шаг 3 ничего не менял
+    const pass = fake_pass({ rows: ROWS.filter((row) => row.step !== 3) })
     const all = passmem_applied(pass, fake_params(APPLIED_LOG), 8)
-    assert.equal(passmem_step_status(pass, all, 2), 'applied')
-    assert.equal(passmem_step_status(pass, all, 3), 'none')
-    assert.equal(passmem_step_status(pass, all, 4), 'applied')
+    assert.equal(passmem_step_status(all, 2), 'applied')
+    assert.equal(passmem_step_status(all, 3), 'none')
+    assert.equal(passmem_step_status(all, 4), 'applied')
+    assert.equal(passmem_step_status(all, 4, 'roll'), 'applied')
+    assert.equal(passmem_step_status(all, 4, 'yaw'), 'none')
 
-    const partly = passmem_applied(pass, fake_params({ ...APPLIED_LOG, INS_HNTCH_FREQ: 80 }), 8)
-    assert.equal(passmem_step_status(pass, partly, 2), 'partial')
-    assert.equal(passmem_step_status(pass, partly, 4), 'applied')
+    // Шаг 2 применён не весь — "partial" и у шага 4: его прогноз считался от notch шага 2; шаг 3 — по-прежнему "none"
+    const step2_not = passmem_applied(pass, fake_params({ ...APPLIED_LOG, INS_HNTCH_FREQ: 80 }), 8)
+    assert.equal(passmem_step_status(step2_not, 2), 'partial')
+    assert.equal(passmem_step_status(step2_not, 3), 'none')
+    assert.equal(passmem_step_status(step2_not, 4), 'partial')
+    assert.equal(passmem_step_status(step2_not, 4, 'roll'), 'partial')
 
-    // Нет в логе — тоже не применено
+    // Параметра шага 4 нет в логе — не применён; на шаг 2 и другую ось это не влияет
     const absent = { ...APPLIED_LOG }
     delete absent.ATC_RAT_PIT_D
-    assert.equal(passmem_step_status(pass, passmem_applied(pass, fake_params(absent), 8), 4), 'partial')
+    const pitch_absent = passmem_applied(pass, fake_params(absent), 8)
+    assert.equal(passmem_step_status(pitch_absent, 2), 'applied')
+    assert.equal(passmem_step_status(pitch_absent, 4), 'partial')
+    assert.equal(passmem_step_status(pitch_absent, 4, 'roll'), 'applied')
+    assert.equal(passmem_step_status(pitch_absent, 4, 'pitch'), 'partial')
 })
 
 test('passmem_compare: шаги 2–3 — всё применено → ok с was (лог прохода), predicted (принятое) и now', () => {
     const { pass, applied } = pass_and_applied(APPLIED_LOG)
-    const now2 = { band_dB: -42, lag30_ms: 2.5 }
-    assert.deepEqual(passmem_compare(pass, applied, 2, now2), {
-        status: 'ok', was: pass.estimates[2].log, predicted: pass.estimates[2].accepted, now: now2,
+    assert.deepEqual(passmem_compare(pass, applied, 2, NOW2), {
+        status: 'ok', was: pass.estimates[2].log, predicted: pass.estimates[2].accepted, now: NOW2,
     })
-    assert.deepEqual(passmem_compare(pass, applied, 2, now2).was, { band_dB: -40.25, lag30_ms: 2.71 })
-    assert.deepEqual(passmem_compare(pass, applied, 2, now2).predicted, { band_dB: -42.5, lag30_ms: 2.43 })
+    assert.deepEqual(passmem_compare(pass, applied, 2, NOW2).was, { band_dB: -40.25, lag30_ms: 2.71 })
+    assert.deepEqual(passmem_compare(pass, applied, 2, NOW2).predicted, { band_dB: -42.5, lag30_ms: 2.43 })
 
     const now3 = { gyro_band_dB: -51, dterm_dB: { roll: -31, pitch: -30 }, lag30_ms: { roll: { P: 3.2, D: 4.1 }, pitch: { P: 3.3, D: 4.2 } } }
     assert.deepEqual(passmem_compare(pass, applied, 3, now3), {
@@ -471,16 +610,21 @@ test('passmem_compare: шаги 2–3 — всё применено → ok с wa
     })
 })
 
-test('passmem_compare: применено не всё изменённое шага — partial; другой шаг на это не влияет', () => {
-    const { pass, applied } = pass_and_applied({ ...APPLIED_LOG, INS_HNTCH_HMNCS: 3 })
-    assert.deepEqual(passmem_compare(pass, applied, 2, { band_dB: -42, lag30_ms: 2.5 }), { status: 'partial' })
-    assert.equal(passmem_compare(pass, applied, 3, {}).status, 'ok')
+test('passmem_compare: «применено» накопительно — шаг 2 не применён, шаг 3 применён → шаг 3 partial; не применён шаг 3 — шаг 2 ok', () => {
+    // Прогноз шага 3 считался от notch шага 2
+    const step2_not = pass_and_applied({ ...APPLIED_LOG, INS_HNTCH_HMNCS: 3 })
+    assert.deepEqual(passmem_compare(step2_not.pass, step2_not.applied, 2, NOW2), { status: 'partial' })
+    assert.deepEqual(passmem_compare(step2_not.pass, step2_not.applied, 3, {}), { status: 'partial' })
+
+    // Более поздний шаг на ранний не влияет
+    const step3_not = pass_and_applied({ ...APPLIED_LOG, ATC_RAT_RLL_FLTD: 20 })
+    assert.equal(passmem_compare(step3_not.pass, step3_not.applied, 2, NOW2).status, 'ok')
+    assert.deepEqual(passmem_compare(step3_not.pass, step3_not.applied, 3, {}), { status: 'partial' })
 })
 
 test('passmem_compare: шаг ничего не менял, оценок шага нет или прохода нет — null', () => {
     // Шаг 3 принят с оценками, но ничего не изменил
-    const rows = ROWS.filter((row) => row.step !== 3)
-    const pass = fake_pass({ rows: rows })
+    const pass = fake_pass({ rows: ROWS.filter((row) => row.step !== 3) })
     const applied = passmem_applied(pass, fake_params(APPLIED_LOG), 8)
     assert.equal(passmem_compare(pass, applied, 3, {}), null)
 
@@ -495,45 +639,95 @@ test('passmem_compare: шаг ничего не менял, оценок шаг�
     assert.equal(passmem_compare(null, null, 2, {}), null)
 })
 
-test('passmem_compare: шаг 4 — ось надёжна, всё по оси применено → ok с измерением и логом оси, прогнозом и now', () => {
+test('passmem_compare: шаг 4 — ось надёжна, всё применено → ok с измерением и логом оси, прогнозом и now', () => {
     const { pass, applied } = pass_and_applied(APPLIED_LOG)
-    const now = { reliable: true, measured: { rise_s: 0.05, overshoot_pct: 9 }, log: { pm_deg: 54, crossover_hz: 12 } }
-    assert.deepEqual(passmem_compare(pass, applied, 4, now, 'roll'), {
+    assert.deepEqual(passmem_compare(pass, applied, 4, NOW4, 'roll'), {
         status: 'ok',
         was: { measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 } },
         predicted: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false },
-        now: now,
+        now: NOW4,
     })
 })
 
-test('passmem_compare: шаг 4 — ось ненадёжна в проходе или сейчас — unreliable', () => {
+test('passmem_compare: шаг 4 — ось ненадёжна в проходе или сейчас (в том числе надёжность сейчас неизвестна) — unreliable', () => {
     const { pass, applied } = pass_and_applied(APPLIED_LOG)
-    const reliable_now = { reliable: true, measured: { rise_s: 0.05, overshoot_pct: 9 }, log: { pm_deg: 54, crossover_hz: 12 } }
     // Тангаж ненадёжен в проходе (значение введено вручную), хотя сейчас надёжен
-    assert.deepEqual(passmem_compare(pass, applied, 4, reliable_now, 'pitch'), { status: 'unreliable' })
+    assert.deepEqual(passmem_compare(pass, applied, 4, NOW4, 'pitch'), { status: 'unreliable' })
     // Крен надёжен в проходе, но ненадёжен сейчас
     assert.deepEqual(passmem_compare(pass, applied, 4, { reliable: false, measured: null, log: null }, 'roll'), { status: 'unreliable' })
+    // Надёжность сейчас неизвестна (нет расчёта, нет поля) — тоже сравнивать нечем
+    assert.deepEqual(passmem_compare(pass, applied, 4, null, 'roll'), { status: 'unreliable' })
+    assert.deepEqual(passmem_compare(pass, applied, 4, { measured: null, log: null }, 'roll'), { status: 'unreliable' })
 })
 
-test('passmem_compare: шаг 4 — «применено» по параметрам оси; изменения другой оси и шага 3 с тем же префиксом не влияют', () => {
-    const now = { reliable: true, measured: { rise_s: 0.05, overshoot_pct: 9 }, log: { pm_deg: 54, crossover_hz: 12 } }
-    // Тангаж не применён, ATC_RAT_RLL_FLTD (шаг 3, префикс крена) — тоже: крен всё равно ok
-    const pitch_not = pass_and_applied({ ...APPLIED_LOG, ATC_RAT_PIT_D: Math.fround(0.0036), ATC_RAT_RLL_FLTD: 20 })
-    assert.equal(passmem_compare(pitch_not.pass, pitch_not.applied, 4, now, 'roll').status, 'ok')
-    assert.deepEqual(passmem_compare(pitch_not.pass, pitch_not.applied, 4, now, 'pitch'), { status: 'partial' })
+test('passmem_compare: шаг 4 — «применено» по шагам 2–3 и параметрам оси; изменения другой оси не влияют', () => {
+    // Тангаж не применён — крен всё равно ok, тангаж partial
+    const pitch_not = pass_and_applied({ ...APPLIED_LOG, ATC_RAT_PIT_D: Math.fround(0.0036) })
+    assert.equal(passmem_compare(pitch_not.pass, pitch_not.applied, 4, NOW4, 'roll').status, 'ok')
+    assert.deepEqual(passmem_compare(pitch_not.pass, pitch_not.applied, 4, NOW4, 'pitch'), { status: 'partial' })
     // Шаг 4 в целом применён не весь
-    assert.equal(passmem_step_status(pitch_not.pass, pitch_not.applied, 4), 'partial')
+    assert.equal(passmem_step_status(pitch_not.applied, 4), 'partial')
+
+    // Не применён ATC_RAT_RLL_FLTD (шаг 3): прогноз шага 4 считался от фильтров шага 3 — крен partial
+    const fltd_not = pass_and_applied({ ...APPLIED_LOG, ATC_RAT_RLL_FLTD: 20 })
+    assert.deepEqual(passmem_compare(fltd_not.pass, fltd_not.applied, 4, NOW4, 'roll'), { status: 'partial' })
+    // Не применён шаг 2 — тоже
+    const step2_not = pass_and_applied({ ...APPLIED_LOG, INS_HNTCH_FREQ: 80 })
+    assert.deepEqual(passmem_compare(step2_not.pass, step2_not.applied, 4, NOW4, 'roll'), { status: 'partial' })
 
     // Крен не применён — partial, даже если ось надёжна
     const roll_not = pass_and_applied({ ...APPLIED_LOG, ATC_RAT_RLL_P: Math.fround(0.135) })
-    assert.deepEqual(passmem_compare(roll_not.pass, roll_not.applied, 4, now, 'roll'), { status: 'partial' })
+    assert.deepEqual(passmem_compare(roll_not.pass, roll_not.applied, 4, NOW4, 'roll'), { status: 'partial' })
 
-    // Рыскание шаг 4 не менял — строки нет, хотя ось надёжна и оценки есть
-    assert.equal(passmem_compare(pitch_not.pass, pitch_not.applied, 4, now, 'yaw'), null)
+    // Рыскание шаг 4 не менял — строки нет, хотя ось надёжна, оценки есть, а шаг 3 не применён
+    assert.equal(passmem_compare(fltd_not.pass, fltd_not.applied, 4, NOW4, 'yaw'), null)
 })
 
-test('passmem_compare: шаг 4 — нет записи оси в оценках — null', () => {
+test('passmem_compare: шаг 4 — нет записи оси в оценках или ось не передана — null', () => {
     const { pass, applied } = pass_and_applied(APPLIED_LOG)
+    assert.equal(passmem_compare(pass, applied, 4, NOW4), null)
     pass.estimates[4].roll = null
-    assert.equal(passmem_compare(pass, applied, 4, { reliable: true, measured: null, log: null }, 'roll'), null)
+    assert.equal(passmem_compare(pass, applied, 4, NOW4, 'roll'), null)
+})
+
+// Проход формата v1, записанный руками (не через passmem_record): страховка совместимости — сохранённая в браузере
+// память должна читаться и после правок кода, пока PASSMEM_VERSION не сменилась
+const V1_TEXT = '{"version":1,"passes":{"fc:StellarH7V2 0034002E 35335104 39363630":{' +
+    '"key":"fc:StellarH7V2 0034002E 35335104 39363630","board":"StellarH7V2 0034002E 35335104 39363630",' +
+    '"frame":"QUAD/X_REV","fw":"ArduCopter V4.6.3 (3fc7011a)","file_name":"2026-06-18 18-54-42_anon.bin",' +
+    '"saved_at":1761400000000,' +
+    '"changed":[{"name":"INS_HNTCH_FREQ","log":80,"value":75,"step":2},' +
+    '{"name":"INS_HNTCH_HMNCS","log":3,"value":128,"step":2},' +
+    '{"name":"ATC_RAT_RLL_P","log":0.135,"value":0.7,"step":4}],' +
+    '"estimates":{' +
+    '"2":{"log":{"band_dB":-40.25,"lag30_ms":2.71},"accepted":{"band_dB":-42.5,"lag30_ms":2.43}},' +
+    '"3":null,' +
+    '"4":{"roll":{"reliable":true,"measured":{"overshoot_pct":12.5,"rise_s":0.055},"log":{"pm_deg":48,"crossover_hz":11.2},' +
+    '"prediction":{"overshoot_pct":8.5,"rise_s":0.05,"pm_deg":55,"unstable":false}},' +
+    '"pitch":{"reliable":false,"measured":null,"log":null,"prediction":null},"yaw":null}}}}}'
+
+test('совместимость: записанная руками JSON-строка v1 → passmem_read → passmem_applied → passmem_compare', () => {
+    const { passes, error } = passmem_read(fake_storage({ [PASSMEM_KEY]: V1_TEXT }))
+    assert.equal(error, null)
+    const pass = passes[passmem_aircraft_key(INFO, 'другой лог.bin')]
+    assert.equal(pass.file_name, LOG_NAME)
+    assert.deepEqual(passmem_list(passes).map((p) => p.key), ['fc:' + BOARD])
+
+    // Новый лог: всё применено (float32 и маска со знаком)
+    const applied = passmem_applied(pass, fake_params({ INS_HNTCH_FREQ: 75, INS_HNTCH_HMNCS: -128, ATC_RAT_RLL_P: 0.699999988 }), 8)
+    assert.deepEqual([applied.applied, applied.total, applied.same_log], [3, 3, false])
+    assert.deepEqual(passmem_compare(pass, applied, 2, NOW2),
+        { status: 'ok', was: { band_dB: -40.25, lag30_ms: 2.71 }, predicted: { band_dB: -42.5, lag30_ms: 2.43 }, now: NOW2 })
+    assert.equal(passmem_compare(pass, applied, 3, {}), null)
+    assert.deepEqual(passmem_compare(pass, applied, 4, NOW4, 'roll'), {
+        status: 'ok',
+        was: { measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 } },
+        predicted: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false },
+        now: NOW4,
+    })
+    assert.equal(passmem_compare(pass, applied, 4, NOW4, 'pitch'), null)
+    assert.equal(passmem_compare(pass, applied, 4, NOW4, 'yaw'), null)
+
+    // Тот же лог, что в проходе — «лог прошлого прохода»
+    assert.equal(passmem_applied(pass, fake_params({ INS_HNTCH_FREQ: 80, INS_HNTCH_HMNCS: 3, ATC_RAT_RLL_P: 0.135 }), 8).same_log, true)
 })
