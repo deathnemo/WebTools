@@ -4,8 +4,9 @@
 // Источники: [решение пользователя 25.10.2026]; [наше] — решение мастера; [код] — исходники ArduPilot и шагов мастера.
 //
 // Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
-// (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()), совет
-// тестового полёта (step4_test_flight_short) и поиск записи в метаданных параметров (step_find_metadata).
+// (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()) и имён, от которых
+// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short) и поиск записи в метаданных
+// параметров (step_find_metadata).
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, mask_unsigned, mask_signed; ему —
 // Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
@@ -153,14 +154,18 @@ function summary_file_name(log_name) {
 
 // Отпечаток входов шага n (2–4) для «устарело»: строка JSON [start, end, fft_key, filter_version, изменения].
 // ctx — вход summary_rows ({ params, steps, names, filter_version, bits }) плюс интервал анализа (start, end —
-// state.settings.start/end) и ключ FFT шага 1 (fft_key — step1.fft_key); нет значения (undefined) — null.
+// state.settings.start/end), ключ FFT шага 1 (fft_key — step1.fft_key) и необязательный depends — { шаг: [имена] }:
+// имена, от которых зависит расчёт шага; нет значения (undefined) — null.
 // Изменения — действующие отличия от лога принятого на шагах 2..n−1: строки summary_rows только по этим шагам с
 // changed, пары [имя, значение] с именами по алфавиту (как candidate_key), значения как есть. Отличия, а не принятое
 // целиком: шаг n считал от действующих значений, а они при «не принят» и «принят как в логе» одни и те же. Иначе
 // принятие шага 3 «Как в логе» после шага 4 делало бы шаг 4 ложно устаревшим (ключ расчёта шага 4 обходит это так же —
 // step4_calc_key). «Изменён» — тот же, что у итога и .param: float32, маски, включаемый notch; поля выключенного notch
 // с умолчаниями, которых нет в логе, — не изменение; INS_GYRO_FILTER шагов 2 и 3 — одна строка с действующим значением
-// (от последнего принявшего шага).
+// (от последнего принявшего шага). Есть depends[n] — в изменения идут только эти имена: прочие расчёт шага n не
+// меняют и устаревшим его делать не должны. Страница даёт список шагу 4 (step_depends4_names: notch, INS_GYRO_FILTER,
+// FLTE и FLTD — то же, что в его ключе расчёта step4_calc_key), иначе новое «Принять» шага 3 с другим FLTT или
+// пределом ускорения делало бы шаг 4 устаревшим в сводке, а сам шаг 4 — нет; у шагов 2–3 списка нет — все изменения.
 // Ключ FFT и версия фильтра — только у шагов 2–3: они всегда считают шаг 1 до «Принять» (версия фильтра меняет и
 // форму шага 2: ниже 4 ESCMSK — 0); у шага 4 на их месте null. Ключ FFT: шаг 4 можно принять, не открывая шаг 1, и
 // ключ, появившийся позже, давал бы ложное «устарело». Версия фильтра: шаг 4 зависит от неё только через фильтры
@@ -173,9 +178,10 @@ function summary_inputs_key(n, ctx) {
     for (let k = 2; k < n; k++) {
         steps[k] = ctx.steps[k]
     }
+    const depends = ctx.depends?.[n] ?? null
     const values = {}
     for (const row of summary_rows({ ...ctx, steps: steps }).rows) {
-        if (row.changed) {
+        if (row.changed && ((depends == null) || depends.includes(row.name))) {
             values[row.name] = row.value
         }
     }
@@ -208,6 +214,13 @@ function summary_period(text) {
     return /[.!?]$/.test(text) ? text : text + "."
 }
 
+// Продолжение фразы после тире: первая буква — строчная, если text начинается обычным словом (первая буква заглавная,
+// вторая — строчная: «Включите бит …» → «включите бит …»). Имена параметров и сокращения («MOT_HOVER_LEARN = 2»,
+// «ESC …») и текст не с буквы — как есть
+function summary_lower_first(text) {
+    return /^\p{Lu}\p{Ll}/u.test(text) ? text.charAt(0).toLowerCase() + text.slice(1) : text
+}
+
 // «Что перелететь»: пункты [{ source, text }] по порядку, каждый текст — фраза с точкой (summary_period)
 // [решение пользователя 25.10.2026]. ctx = { checks, rows, reboot_names, unreliable_axes, test_flight }:
 // - checks — проверки шага 0 (state.checks: { status, title, fix }; null — проверок нет);
@@ -219,7 +232,8 @@ function summary_period(text) {
 //   не нажимали [наше];
 // - test_flight — совет тестового полёта (step4_test_flight_short).
 // Пункты:
-// 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия);
+// 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия), fix — продолжение
+//    фразы: первая буква обычного слова строчная (summary_lower_first);
 // 2. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
 //    summary_notch_enable_hint;
 // 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
@@ -234,7 +248,7 @@ function summary_refly(ctx) {
 
     for (const check of ctx.checks ?? []) {
         if (((check.status === "warn") || (check.status === "fail")) && ((check.fix ?? "") !== "")) {
-            add("check", check.title + " — " + check.fix)
+            add("check", check.title + " — " + summary_lower_first(check.fix))
         }
     }
 

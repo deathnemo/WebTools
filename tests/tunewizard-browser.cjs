@@ -1258,7 +1258,7 @@ async function main() {
         assert.deepEqual(v5.steps.map((row) => [row.cells[0], row.cells[1], row.button]),
                          [['Шаг 2Гармонический notch', 'устарело', 'К шагу 2'], ['Шаг 3Низкочастотные фильтры', 'принят', null], ['Шаг 4PID по осям', 'устарело', 'К шагу 4']],
                          'таблица шагов: устаревшие — с кнопкой перехода')
-        assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или принятое на шагах 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
+        assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или фильтры шагов 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
                      v5.steps[2].cells[2])
         assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-]?[\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
         // Изменения — изменённые строки итога (имя, «станет», шаг); INS_GYRO_FILTER — 39 от шага 3, расхождение с шагом 2
@@ -1280,6 +1280,18 @@ async function main() {
         assert.deepEqual(await visible_steps(page), ['4'], '«К шагу 4» открывает шаг 4')
         await page.click('#wizbar button:nth-child(6)')
         assert.deepEqual(await visible_steps(page), ['5'])
+        // «К шагу 2»: форма шага 2 — принятое, но оно устарело (принято на другом интервале) — вердикт шага 2 не «Принято…»
+        // со старыми метриками, а «Принято раньше…», как «устарело» сводки
+        await page.click('#steps5 button[data-goto="2"]')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['2'], '«К шагу 2» открывает шаг 2')
+        const stale2 = await page.evaluate(() => ({ form: step2_key(values_from_form()) === step2_key(state.steps[2].accepted), stale: step_accepted_stale(2),
+                                                    text: document.getElementById('verdict2').textContent, cls: document.getElementById('verdict2').className }))
+        assert.deepEqual([stale2.form, stale2.stale], [true, true], 'в форме шага 2 — принятое, и оно устарело')
+        assert.match(stale2.text, /^Принято раньше для другого интервала или расчёта шага 1 — проверьте и примите заново\.$/, stale2.text)
+        assert.match(stale2.cls, /verdict--warn/, '«Принято раньше» — предупреждение')
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
 
         // «Скачать .param»: только изменённые параметры итога (устаревшее не блокирует), затем память прохода
         const [download5] = await Promise.all([page.waitForEvent('download'), page.click('#step5_download')])
@@ -1291,7 +1303,7 @@ async function main() {
             const parsed = parse_param_file(text)
             return { names: Object.keys(parsed).sort(), expected: Object.keys(expected).sort(),
                      same: Object.keys(expected).every((name) => Math.fround(parsed[name]) === Math.fround(expected[name])),
-                     count_text: step5_count(Object.keys(parsed).length, step5_param_forms) }
+                     count_text: step_plural(Object.keys(parsed).length, step5_param_forms) }
         }, fs.readFileSync(await download5.path(), 'utf8'))
         assert.deepEqual(file5.names, file5.expected, 'в .param — изменённые параметры итога')
         assert.equal(file5.same, true, 'значения .param — значения итога (маски HMNCS — как summary_param_values)')
@@ -1470,7 +1482,8 @@ async function main() {
                 stored: Object.keys(JSON.parse(localStorage.getItem('tunewizard_v1') ?? '{"passes":{}}').passes),
             }
         })
-        const pass0 = await page.evaluate((key) => ({ changed: JSON.parse(localStorage.getItem('tunewizard_v1')).passes[key].changed, fw: state.info.fw_string }), fc_key)
+        const pass0 = await page.evaluate((key) => ({ record: JSON.parse(localStorage.getItem('tunewizard_v1')).passes[key], fw: state.info.fw_string }), fc_key)
+        pass0.changed = pass0.record.changed
         const m0 = await memory0()
         assert.equal(m0.visible, true, 'проход аппарата есть — блок «Прошлый проход» виден')
         assert.match(m0.head, /^Сохранён \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}, лог /, m0.head)
@@ -1729,6 +1742,25 @@ async function main() {
                      now: { band: e2.band_dB.toFixed(2), lag: e2.lag_ms[30].toFixed(2), gyro: e3.gyro.band_dB.toFixed(2), dterm_roll: e3.dterm.roll.dB.toFixed(2),
                             dterm_roll_was: (e3.dterm.roll.dB + 1.25).toFixed(2) } }
         })
+
+        // Лог прошлого прохода: в памяти снова проход, сохранённый на шаге 5 из этого же лога (значения лога равны «было»,
+        // имя файла то же — значения ещё не применялись). Строк сравнения на шагах 2–4 нет, хотя по условиям строки шаг 3
+        // написал бы «применены не все — сравнивать нечего» (шум: шаг 0 уже говорит, что это лог прошлого прохода)
+        const own = await page.evaluate((record) => {
+            passmem_write(localStorage, passmem_put(passmem_read(localStorage).passes, record))
+            memory_render_step0()
+            return { pass: memory_state.pass?.key ?? null, pass_log: memory_is_pass_log(memory_state.pass, memory_state.applied),
+                     verdict: document.getElementById('memory0_verdict').textContent,
+                     compare3: passmem_compare(memory_state.pass, memory_state.applied, 3, null)?.status ?? null }
+        }, pass0.record)
+        assert.deepEqual(own, { pass: fc_key, pass_log: true, verdict: 'Это лог прошлого прохода — значения ещё не применялись.', compare3: 'partial' },
+                         'проход этого лога из шага 5: по условиям строки шаг 3 — «применены не все»')
+        for (const n of [2, 3, 4]) {
+            await page.click('#wizbar button:nth-child(' + (n + 1) + ')')
+            await wait_overlay(page)
+            assert.equal((await memory_lines())[n], null, 'лог прошлого прохода — строки сравнения шага ' + n + ' нет')
+        }
+        await page.click('#wizbar button:nth-child(1)')
 
         // Шаг 2 прошлого прохода применён (значение лога = предложенному): «было → прогноз → в этом логе» с числами оценки
         // «Как в логе» этого лога и оговоркой про шум; шаг 3 в проходе не принят — строки нет

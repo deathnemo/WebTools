@@ -25,7 +25,7 @@
 // core/gyro.js (find_start_index, find_end_index), Libraries/Array_Math.js (complex_abs, array_add),
 // Libraries/Param_Helpers.js (param_to_string),
 // plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape),
-// steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
+// steps/common.js (step_signed, step_plural, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, step_pointer, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js
 // (values_from_log), steps/memory.js (memory_show — строка сравнения оси с прошлым проходом). Принятое шагами 2–3
@@ -90,12 +90,9 @@ function step4_fixed(value, digits) {
     return Number.isFinite(value) ? value.toFixed(digits) : "—"
 }
 
-// Число окон с существительным в нужной форме: «1 окно», «553 окна», «811 окон»
+// Число окон с существительным в нужной форме (step_plural): «1 окно», «553 окна», «811 окон»
 function step4_windows_text(n) {
-    const last = n % 10
-    const teen = (n % 100 >= 11) && (n % 100 <= 14)
-    const word = teen ? "окон" : ((last == 1) ? "окно" : (((last >= 2) && (last <= 4)) ? "окна" : "окон"))
-    return n + " " + word
+    return step_plural(n, ["окно", "окна", "окон"])
 }
 
 // Имена параметров формы по порядку: ATC_RAT_RLL/PIT/YAW_P/I/D
@@ -477,17 +474,27 @@ function step4_mark_changed() {
 
 // ---------- Расчёт ----------
 
-// Значения фильтров гироскопа лога (values_from_log шага 1: INS_GYRO_FILTER, SCHED_LOOP_RATE, INS_HNTCH_*, INS_HNTC2_*)
-// как float32 — так их хранит прошивка, и принятое шагами 2–3 сравнивается с ними без ложных отличий
-function step4_gyro_old() {
+// Значения фильтров гироскопа лога: values_from_log шага 1 (INS_GYRO_FILTER, INS_HNTCH_*, INS_HNTC2_*) без
+// SCHED_LOOP_RATE. Частота контура — не фильтр: load_filters её не читает, а модель регулятора считается на частоте
+// контура лога. Поэтому SCHED_LOOP_RATE, принятый на шаге 2, не меняет ни поправку, ни ключ расчёта шага 4 и его
+// принятое устаревшим не делает — как в отпечатке входов сводки (step_depends4_names); заметка о нём —
+// step4_render_warnings
+function step4_gyro_log() {
     const values = values_from_log()
-    return Object.fromEntries(Object.entries(values).map(([name, value]) => [name, Math.fround(value)]))
+    delete values.SCHED_LOOP_RATE
+    return values
+}
+
+// Значения фильтров гироскопа лога (step4_gyro_log) как float32 — так их хранит прошивка, и принятое шагами 2–3
+// сравнивается с ними без ложных отличий
+function step4_gyro_old() {
+    return Object.fromEntries(Object.entries(step4_gyro_log()).map(([name, value]) => [name, Math.fround(value)]))
 }
 
 // Фильтры гироскопа для прогноза: notch, принятые на шаге 2 (иначе лога), и INS_GYRO_FILTER, принятый на шаге 3 (иначе
 // шага 2 или лога); имена — те же, что у step4_gyro_old
 function step4_gyro_new() {
-    const old = values_from_log()
+    const old = step4_gyro_log()
     const base = state.steps[2]?.accepted ?? old
     const gyro = state.steps[3]?.accepted?.INS_GYRO_FILTER ?? base.INS_GYRO_FILTER
     const values = {}
@@ -511,7 +518,8 @@ function step4_new_filters(axis, log_filters) {
 // FLTE/FLTD — для регуляторов вариантов); если фильтры гироскопа менялись, ещё и расчёт шага 1 (по его окнам
 // считается поправка). Фильтры — действующие значения, без принятого шагом 3 — значения лога (lowpass_log_values, как
 // их показывает форма шага 3), float32: принятие шага 3 с фильтрами лога ключ не меняет и не даёт ложного «Принято
-// раньше…» (ревью задачи 7)
+// раньше…» (ревью задачи 7). Те же имена принятого на шагах 2–3 — в отпечатке входов шага 4 для сводки
+// (step_depends4_names): шаг и сводка видят устаревание одинаково
 function step4_calc_key() {
     const old = step4_gyro_old()
     const now = step4_gyro_new()
@@ -1651,7 +1659,7 @@ function step4_render_candidates() {
                    " % (при D > 0); «Свой» — после правки формы. Изменённые значения — " + pidtune_rules.round_digits + " значащие цифры.")
         if (res.predict_ok) {
             // Фильтры гироскопа — только то, что входит в поправку (load_filters): INS_GYRO_FILTER и параметры notch.
-            // SCHED_LOOP_RATE из values_from_log фильтры не меняет; принятый на шаге 2 — заметка step4_render_warnings
+            // SCHED_LOOP_RATE в них нет (step4_gyro_log); принятый на шаге 2 — заметка step4_render_warnings
             const gyro_changes = []
             const gyro_old = step4_gyro_old()
             const gyro_new = step4_gyro_new()

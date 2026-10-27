@@ -1,13 +1,15 @@
-// Тесты общего модуля шагов мастера настройки (TuneWizard/steps/common.js) без браузера: число со знаком, запись
-// значения параметра и ячейка таблицы, перехват ошибок действия в вердикт, вложенный step_run под оверлеем внешнего,
-// досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна загрузка, флаг сбоя), флаг нажатой
-// кнопки мыши, каркас механизма правок полей, контекст итога и отпечаток входов принятого шага (и «устарело» без лога).
+// Тесты общего модуля шагов мастера настройки (TuneWizard/steps/common.js) без браузера: число со знаком, число со
+// словом в нужной форме, запись значения параметра и ячейка таблицы, перехват ошибок действия в вердикт, вложенный
+// step_run под оверлеем внешнего, досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна
+// загрузка, флаг сбоя), флаг нажатой кнопки мыши, каркас механизма правок полей, контекст итога (с именами, от которых
+// зависит шаг 4) и отпечаток входов принятого шага (и «устарело» без лога).
 // Скрипт классический (общая глобальная область), поэтому загружается как на странице — через vm.runInThisContext
 // (как в tests/tunewizard-core.test.cjs). Глобалы страницы, которые он зовёт (document, window, fetch, loading_call,
 // state, html_escape, step1, step1_ready, step1_prepare, step2_param_names, step4_param_names), — заглушки ниже; модуль
 // обращается к ним только при вызове.
 // param_to_string — настоящий, из Libraries/Param_Helpers.js; summary_inputs_key и summary_stale (core/summary.js, с его
-// зависимостями), lowpass_param_names (core/lowpass.js) и hmncs_bits (core/params.js) — настоящие, в порядке страницы.
+// зависимостями: notch_param_names, pidtune_axes), lowpass_param_names (core/lowpass.js) и hmncs_bits (core/params.js) —
+// настоящие, в порядке страницы.
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -71,6 +73,15 @@ test('step_signed: знак у положительных и отрицател�
     assert.equal(step_signed(-0.004, 2), '0.00')
     assert.equal(step_signed(0.04, 1), '0.0')
     assert.equal(step_signed(-0.05, 1), '-0.1')
+})
+
+test('step_plural: число со словом — формы для 1, 2–4 и 5+, 11–14 — как 5+', () => {
+    const windows = ['окно', 'окна', 'окон']
+    assert.deepEqual([0, 1, 2, 4, 5, 11, 12, 14, 21, 22, 25, 101, 111, 112, 553, 811].map((n) => step_plural(n, windows)),
+        ['0 окон', '1 окно', '2 окна', '4 окна', '5 окон', '11 окон', '12 окон', '14 окон', '21 окно', '22 окна', '25 окон',
+         '101 окно', '111 окон', '112 окон', '553 окна', '811 окон'])
+    const params = ['параметр', 'параметра', 'параметров']
+    assert.deepEqual([1, 3, 12].map((n) => step_plural(n, params)), ['1 параметр', '3 параметра', '12 параметров'])
 })
 
 test('step_try: ошибка — «Ошибка шага N: …» в вердикт и в консоль, наружу не бросается', (t) => {
@@ -316,7 +327,7 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
 
     // Параметры лога с интерфейсом log_params; 8-битная маска HMNCS первого notch записана со знаком (−128 — гармоника 8)
     const log = { INS_GYRO_FILTER: 40, SCHED_LOOP_RATE: 400, INS_HNTCH_ENABLE: 1, INS_HNTCH_FREQ: 80, INS_HNTCH_HMNCS: -128,
-                  INS_HNTC2_ENABLE: 0, ATC_RAT_RLL_FLTD: 20, ATC_RAT_RLL_P: Math.fround(0.135) }
+                  INS_HNTC2_ENABLE: 0, INS_ACCEL_FILTER: 20, ATC_RAT_RLL_FLTT: 20, ATC_RAT_RLL_FLTD: 20, ATC_RAT_RLL_P: Math.fround(0.135) }
     // Принятое шага: по всем именам шага — значение из changes, иначе из лога, иначе 0
     const accepted_of = (names, changes = {}) => Object.fromEntries(names.map((name) => [name, (name in changes) ? changes[name] : (log[name] ?? 0)]))
     state.params = { get: (name) => log[name] ?? null, has: (name) => name in log }
@@ -349,6 +360,12 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
         ['state.params', () => { log.INS_HNTCH_FREQ = 75 }, () => { log.INS_HNTCH_FREQ = 80 }, [false, true, true]],
         ['state.steps[2].accepted', () => { state.steps[2].accepted.INS_HNTCH_FREQ = 70 }, () => { state.steps[2].accepted.INS_HNTCH_FREQ = 75 }, [false, true, true]],
         ['state.steps[3].accepted', () => { state.steps[3].accepted.INS_GYRO_FILTER = 39 }, () => { state.steps[3].accepted.INS_GYRO_FILTER = 42 }, [false, false, true]],
+        // Шаг 4 зависит только от фильтров (step_depends4_names): FLTD шага 3 — да, FLTT и INS_ACCEL_FILTER шага 3 и
+        // SCHED_LOOP_RATE шага 2 — нет (у шага 3 списка нет: SCHED_LOOP_RATE его устаревшим делает)
+        ['state.steps[3].accepted (FLTD)', () => { state.steps[3].accepted.ATC_RAT_RLL_FLTD = 25 }, () => { state.steps[3].accepted.ATC_RAT_RLL_FLTD = 20 }, [false, false, true]],
+        ['state.steps[3].accepted (FLTT)', () => { state.steps[3].accepted.ATC_RAT_RLL_FLTT = 30 }, () => { state.steps[3].accepted.ATC_RAT_RLL_FLTT = 20 }, [false, false, false]],
+        ['state.steps[3].accepted (INS_ACCEL_FILTER)', () => { state.steps[3].accepted.INS_ACCEL_FILTER = 15 }, () => { state.steps[3].accepted.INS_ACCEL_FILTER = 20 }, [false, false, false]],
+        ['state.steps[2].accepted (SCHED_LOOP_RATE)', () => { state.steps[2].accepted.SCHED_LOOP_RATE = 800 }, () => { state.steps[2].accepted.SCHED_LOOP_RATE = 400 }, [false, true, false]],
     ]
     for (const [field, change, restore, stale] of cases) {
         change()
@@ -368,9 +385,18 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
     const ctx = step_summary_context()
     assert.equal(ctx.filter_version, 2)
     assert.equal(ctx.bits, 8, 'версия фильтра 2, в логе нет INS_RAW_LOG_OPT — маска HMNCS 8 бит')
+    assert.equal(step_hmncs_bits(), ctx.bits, 'размер маски — один помощник у итога и блока «Прошлый проход»')
     assert.equal(ctx.steps, state.steps)
     assert.equal(ctx.params, state.params)
     assert.deepEqual([ctx.start, ctx.end, ctx.fft_key], [10, 100, 'batch:1'])
+    // Имена, от которых зависит шаг 4, — только у шага 4: поля обоих notch, INS_GYRO_FILTER, FLTE и FLTD трёх осей; без
+    // SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER, пределов ускорения и коэффициентов
+    assert.deepEqual(Object.keys(ctx.depends), ['4'])
+    assert.deepEqual([...ctx.depends[4]].sort(), [...notch_param_names().flatMap((notch) => Object.values(notch)), 'INS_GYRO_FILTER',
+        'ATC_RAT_RLL_FLTE', 'ATC_RAT_RLL_FLTD', 'ATC_RAT_PIT_FLTE', 'ATC_RAT_PIT_FLTD', 'ATC_RAT_YAW_FLTE', 'ATC_RAT_YAW_FLTD'].sort())
+    for (const name of ['SCHED_LOOP_RATE', 'ATC_RAT_RLL_FLTT', 'INS_ACCEL_FILTER', 'ATC_ACCEL_R_MAX', 'ATC_ACC_R_MAX', 'ATC_RAT_RLL_P']) {
+        assert.ok(!ctx.depends[4].includes(name), name)
+    }
 })
 
 test('step_accepted_stale: без лога и для непринятого шага — false', () => {

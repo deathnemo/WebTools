@@ -7,7 +7,7 @@
 // Нужны глобалы страницы: core/summary.js (summary_*), core/candidates.js (candidate_rules), core/pidtune.js
 // (pidtune_axes), Libraries/FileSaver.js (saveAs), wizard.js (state, set_step, STEP_TITLES, html_escape),
 // steps/common.js (step_summary_context, step_accepted_stale, step_tile, step_verdict, step_value_text, step_signed,
-// step_try, step_metadata, step_metadata_failed, step_load_metadata, step_find_metadata), steps/step2.js
+// step_plural, step_try, step_metadata, step_metadata_failed, step_load_metadata, step_find_metadata), steps/step2.js
 // (step2_flagged, step2_accepted_flags_text), steps/step3.js (step3_summary_text, step3_flagged, step3_flags_text),
 // steps/step4.js (step4, step4_axis_list, step4_ready, step4_stale, step4_fixed, step4_test_flight_short) и
 // steps/memory.js (memory_save). Все они нужны только при вызове.
@@ -21,25 +21,18 @@ const step5_state = {
 // Шаги, принятое которых сводит итог
 const step5_steps = [2, 3, 4]
 
-// Формы слова «параметр» для step5_count
+// Формы слова «параметр» для step_plural
 const step5_param_forms = ["параметр", "параметра", "параметров"]
 
-// Что после «Принять» могло сделать принятое шага устаревшим — входы отпечатка (summary_inputs_key) словами
+// Что после «Принять» могло сделать принятое шага устаревшим — входы отпечатка (summary_inputs_key) словами; у шага 4
+// из принятого на шагах 2–3 — только фильтры (step_depends4_names)
 const step5_stale_inputs = {
     2: "интервал анализа или расчёт шага 1",
     3: "интервал анализа, расчёт шага 1 или принятое на шаге 2",
-    4: "интервал анализа или принятое на шагах 2–3",
+    4: "интервал анализа или фильтры шагов 2–3",
 }
 
 // ---------- Подписи ----------
-
-// Число со словом в нужной форме: forms — для 1, 2–4 и 5+ («1 параметр», «3 параметра», «12 параметров»)
-function step5_count(n, forms) {
-    const last = n % 10
-    const teen = (n % 100 >= 11) && (n % 100 <= 14)
-    const form = teen ? forms[2] : ((last == 1) ? forms[0] : (((last >= 2) && (last <= 4)) ? forms[1] : forms[2]))
-    return n + " " + form
-}
 
 // Фраза с заглавной буквы
 function step5_capital(text) {
@@ -220,7 +213,7 @@ function step5_download() {
         const name = summary_file_name(state.file_name)
         saveAs(new Blob([text], { type: "text/plain;charset=utf-8" }), name)
         const count = Object.keys(summary_param_values(rows, ctx.bits)).length
-        step5_note("Файл " + name + ": " + step5_count(count, step5_param_forms) + ". " + memory_save())
+        step5_note("Файл " + name + ": " + step_plural(count, step5_param_forms) + ". " + memory_save())
     }, "verdict5", "шага 5")
 }
 
@@ -337,7 +330,7 @@ function step5_render_verdict(changed, accepted, stale, unreliable) {
     if (unreliable.length > 0) {
         issues.push(step5_unreliable_text(unreliable))
     }
-    const count = step5_count(changed.length, step5_param_forms)
+    const count = step_plural(changed.length, step5_param_forms)
     if (issues.length > 0) {
         const head = (changed.length > 0) ? "Изменено " + count : "Принятые значения совпадают с логом"
         step_verdict("verdict5", "warn", head + ", но проверьте: " + issues.join("; ") + ".")
@@ -395,7 +388,7 @@ function step5_render_changes(rows, conflicts) {
     note.hidden = conflicts.length == 0
 
     const details = document.getElementById("unchanged5")
-    details.querySelector("summary").textContent = "Без изменений — " + step5_count(unchanged.length, step5_param_forms)
+    details.querySelector("summary").textContent = "Без изменений — " + step_plural(unchanged.length, step5_param_forms)
     details.querySelector("tbody").innerHTML = unchanged.map((row) => '<tr>' + cell(row.name) + cell(step_value_text(row.value)) + cell(String(row.step)) +
                                                                        '<td>' + html_escape(row.note ?? "") + '</td></tr>').join("")
     details.hidden = unchanged.length == 0

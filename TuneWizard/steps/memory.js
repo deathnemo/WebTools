@@ -4,9 +4,9 @@
 // Формат, ключ аппарата, запись, «применено» и условия строки сравнения — ядро core/passmem.js; здесь — только
 // состояние и текст страницы. Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 4.
 //
-// Нужны глобалы страницы: core/passmem.js (passmem_*), core/summary.js (summary_rows), core/params.js (hmncs_bits),
-// core/candidates.js (candidate_key), core/lowpass.js (lowpass_pid_axes), wizard.js (state, html_escape),
-// steps/common.js (step_summary_context, step_accepted_stale, step_try, step_verdict, step_value_text), steps/step1.js
+// Нужны глобалы страницы: core/passmem.js (passmem_*), core/summary.js (summary_rows), core/candidates.js
+// (candidate_key), core/lowpass.js (lowpass_pid_axes, lowpass_lag_hz), wizard.js (state, html_escape), steps/common.js
+// (step_summary_context, step_hmncs_bits, step_accepted_stale, step_try, step_verdict, step_value_text), steps/step1.js
 // (values_from_log), steps/step2.js (step2), steps/step3.js (step3, step3_metrics_summary, step3_axis_names) и
 // steps/step4.js (step4, step4_metrics_summary). Все они нужны только при вызове.
 
@@ -211,14 +211,18 @@ function memory_show_none() {
     }
 }
 
+// Загружен ли лог прошлого прохода: значения лога равны «было» прохода (passmem_applied: same_log) и имя файла то же —
+// значения ещё не применялись. pass и applied — проход и passmem_applied по нему (applied null — нет)
+function memory_is_pass_log(pass, applied) {
+    return (applied?.same_log === true) && (pass.file_name === state.file_name)
+}
+
 // Показать проход pass: подпись (дата, лог, прошивка), таблица «что применено» (passmem_applied по параметрам лога и
-// размеру маски HMNCS — как в step_summary_context; шаг перед итогом, как в изменениях шага 5) и вердикт: лог
-// прошлого прохода (значения лога равны «было» прохода и имя файла то же) — значения ещё не применялись; применено
-// всё — ok; иначе — предупреждение «K из N». Кнопка «Забыть» — про аппарат лога или про выбранный в списке проход. Проход и
-// «применено» — в memory_state
+// размеру маски HMNCS — step_hmncs_bits, как у итога; шаг перед итогом, как в изменениях шага 5) и вердикт: лог
+// прошлого прохода (memory_is_pass_log) — значения ещё не применялись; применено всё — ok; иначе — предупреждение
+// «K из N». Кнопка «Забыть» — про аппарат лога или про выбранный в списке проход. Проход и «применено» — в memory_state
 function memory_show_pass(pass) {
-    const bits = hmncs_bits(state.params, state.spectrum.filter_version ?? 1)
-    const applied = passmem_applied(pass, state.params, bits)
+    const applied = passmem_applied(pass, state.params, step_hmncs_bits())
 
     memory_head("Сохранён " + memory_date_text(pass.saved_at) + ", лог " + (pass.file_name ?? "—") + ", прошивка " + (pass.fw ?? "—"))
     const cell = (text) => '<td class="num">' + html_escape(text) + '</td>'
@@ -229,7 +233,7 @@ function memory_show_pass(pass) {
 
     let status = "warn"
     let text = "Применено " + applied.applied + " из " + applied.total + "."
-    if (applied.same_log && (pass.file_name === state.file_name)) {
+    if (memory_is_pass_log(pass, applied)) {
         text = "Это лог прошлого прохода — значения ещё не применялись."
     } else if (applied.applied === applied.total) {
         status = "ok"
@@ -382,13 +386,13 @@ function memory_values(compare, pick, with_now) {
 
 // Величины шагов 2–4 словами — { with_now, body } (with_now — есть ли в цепочках «в этом логе»; body — текст после
 // «было → прогноз[ → в этом логе]: ») или null — величин нет.
-// Шаг 2: полоса и задержка на 30 Гц (поля lag30_ms памяти), оговорка про шум
+// Шаг 2: полоса и задержка на старшей частоте задержки (lowpass_lag_hz, 30 Гц; поля lag30_ms памяти), оговорка про шум
 function memory_text2(compare) {
     const with_now = compare.now != null
     const chain = (pick, units) => memory_chain(memory_values(compare, pick, with_now), 2, units)
     const parts = [
         memory_part("полоса", chain((e) => e?.band_dB, " дБ")),
-        memory_part("задержка на 30 Гц", chain((e) => e?.lag30_ms, " мс")),
+        memory_part("задержка на " + lowpass_lag_hz() + " Гц", chain((e) => e?.lag30_ms, " мс")),
     ].filter((part) => part != null)
     if (parts.length == 0) {
         return null
@@ -396,8 +400,9 @@ function memory_text2(compare) {
     return { with_now: with_now, body: parts.join("; ") + "." + (with_now ? " " + memory_noise_note : "") }
 }
 
-// Шаг 3: шум гироскопа, шум D крена и тангажа, задержка путей P и D на 30 Гц; оси без чисел не пишутся. Оценки этого
-// лога нет (now null — notch-база не лога) — цепочки без «в этом логе» и пояснение вместо оговорки про шум
+// Шаг 3: шум гироскопа, шум D крена и тангажа, задержка путей P и D на старшей частоте задержки (lowpass_lag_hz,
+// 30 Гц; поля lag30_ms памяти); оси без чисел не пишутся. Оценки этого лога нет (now null — notch-база не лога) —
+// цепочки без «в этом логе» и пояснение вместо оговорки про шум
 function memory_text3(compare) {
     const with_now = compare.now != null
     const chain = (pick, units) => memory_chain(memory_values(compare, pick, with_now), 2, units)
@@ -411,7 +416,7 @@ function memory_text3(compare) {
     const parts = [
         memory_part("шум гироскопа", chain((e) => e?.gyro_band_dB, " дБ")),
         by_axis("шум D", (e, axis) => e?.dterm_dB?.[axis], " дБ"),
-        (lag.length > 0) ? "задержка на 30 Гц: " + lag.join(", ") : null,
+        (lag.length > 0) ? "задержка на " + lowpass_lag_hz() + " Гц: " + lag.join(", ") : null,
     ].filter((part) => part != null)
     if (parts.length == 0) {
         return null
@@ -485,13 +490,15 @@ function memory_line(n, now, axis) {
 }
 
 // Строка сравнения шага n (2–4) в #memory<n>: текст memory_line по оценке нового лога из расчёта шага (memory_now);
-// прохода нет, нет расчёта или строки — скрыта. axis — ось открытой вкладки шага 4. Ошибка памяти не роняет вердикт и
-// графики шага (функцию зовут вердикты): строка скрыта, ошибка — в консоль
+// прохода нет, нет расчёта или строки — скрыта. Загружен лог прошлого прохода (memory_is_pass_log) — тоже скрыта: его
+// значения ещё не применялись, и «применены не все — сравнивать нечего» была бы шумом, а шаг 0 уже говорит об этом.
+// axis — ось открытой вкладки шага 4. Ошибка памяти не роняет вердикт и графики шага (функцию зовут вердикты): строка
+// скрыта, ошибка — в консоль
 function memory_show(n, axis) {
     const box = document.getElementById("memory" + n)
     box.hidden = true
     box.textContent = ""
-    if (memory_state.pass == null) {
+    if ((memory_state.pass == null) || memory_is_pass_log(memory_state.pass, memory_state.applied)) {
         return
     }
     try {

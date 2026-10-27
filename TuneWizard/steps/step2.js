@@ -1173,6 +1173,12 @@ function step2_render_verdict() {
     memory_show(2)
     const accepted = state.steps[2]
     if ((accepted != null) && (step2_key(accepted.accepted) === step2_key(values_from_form()))) {
+        // Принятое считалось для другого интервала, расчёта шага 1 или версии фильтра — его метрики устарели. Признак —
+        // отпечаток входов (step_accepted_stale), как у «устарело» сводки шага 5: шаг и сводка не расходятся
+        if (step_accepted_stale(2)) {
+            step_verdict("verdict2", "warn", "Принято раньше для другого интервала или расчёта шага 1 — проверьте и примите заново.")
+            return
+        }
         const match = step2_match(accepted.accepted)
         const metrics = accepted.metrics
         const name = (match != null) ? "«" + match.title + "»" : "значения формы"

@@ -1,8 +1,9 @@
 // Тесты итога прохода мастера настройки (TuneWizard/core/summary.js): сравнение значений как float32 и масок,
 // строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER, ESCMSK по версии фильтра,
 // включаемый notch, параметры без лога, ненадёжные оси шага 4), значения и текст .param из изменённых, имя
-// файла, отпечаток входов принятого шага (по действующим отличиям от лога) и «устарело», «что перелететь» (проверки
-// шага 0, включаемый notch, перезагрузка, тестовый полёт, повтор) и имена с перезагрузкой по метаданным.
+// файла, отпечаток входов принятого шага (по действующим отличиям от лога, у шага 4 — только по его фильтрам) и
+// «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы, включаемый notch, перезагрузка, тестовый
+// полёт, повтор) и имена с перезагрузкой по метаданным.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pidtune.test.cjs).
 const test = require('node:test')
@@ -68,6 +69,10 @@ const STEP2_NAMES = ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...notch_param_names(
 const STEP3_NAMES = lowpass_param_names(fake_params(BASE_LOG))
 const STEP4_NAMES = Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
 const NAMES = { 2: STEP2_NAMES, 3: STEP3_NAMES, 4: STEP4_NAMES }
+// Имена, от которых зависит шаг 4, — как их собирает страница (step_depends4_names в steps/common.js; состав проверяет
+// tests/tunewizard-common.test.cjs): поля notch, INS_GYRO_FILTER, FLTE и FLTD осей
+const DEPENDS4 = [...notch_param_names().flatMap((n) => Object.values(n)), 'INS_GYRO_FILTER',
+    ...Object.values(pidtune_axes).flatMap((axis) => [axis.rate + 'FLTE', axis.rate + 'FLTD'])]
 
 // Принятое шага: по всем именам шага — значение из changes, иначе из лога, иначе 0. Упрощение: форма шага 2
 // для отсутствующих в логе полей берёт умолчания (values_from_log), а не 0 — итогу это не важно
@@ -525,6 +530,54 @@ test('summary_inputs_key: у шага 2 не зависит от шага 3, у 
     assert.equal(summary_stale(4, step4), true)
 })
 
+test('summary_inputs_key: depends[n] — в изменения шага n только эти имена; у шагов без списка — все изменения', () => {
+    const ctx = { ...inputs_ctx(accepted_steps()), depends: { 4: ['INS_HNTCH_FREQ'] } }
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx))[4], [['INS_HNTCH_FREQ', 75]])
+    // Список шага 4 ключ шага 3 не трогает
+    assert.equal(summary_inputs_key(3, ctx), summary_inputs_key(3, inputs_ctx(accepted_steps())))
+    // Пустой список — изменений нет; списка нет (undefined, null, нет у шага) — все
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, { ...ctx, depends: { 4: [] } }))[4], [])
+    for (const depends of [undefined, null, {}]) {
+        assert.equal(summary_inputs_key(4, { ...ctx, depends: depends }), summary_inputs_key(4, inputs_ctx(accepted_steps())), JSON.stringify(depends))
+    }
+})
+
+test('summary_stale: шаг 4 со списком фильтров — новое «Принять» шага 3 с другими пределами ускорения, FLTT и INS_ACCEL_FILTER его не делает устаревшим, с другим FLTD — делает; SCHED_LOOP_RATE шага 2 — тоже нет', () => {
+    // Шаги 2–4 приняты по порядку при том же списке, что даёт страница
+    const all = accepted_steps()
+    const ctx = { ...inputs_ctx(), depends: { 4: DEPENDS4 } }
+    for (const n of [2, 3, 4]) {
+        ctx.steps[n] = { ...all[n], inputs: summary_inputs_key(n, ctx) }
+    }
+    assert.deepEqual([2, 3, 4].map((n) => summary_stale(n, ctx)), [false, false, false])
+
+    // Шаг 3 принят заново: пределы ускорения (имена лога), FLTT всех осей и INS_ACCEL_FILTER другие
+    const accel = STEP3_NAMES.filter((name) => name.startsWith('ATC_ACC'))
+    assert.equal(accel.length, 3, 'пределы ускорения трёх осей: ' + accel.join(', '))
+    const unrelated = { INS_ACCEL_FILTER: 15, ATC_RAT_RLL_FLTT: 30, ATC_RAT_PIT_FLTT: 30, ATC_RAT_YAW_FLTT: 5,
+                        ...Object.fromEntries(accel.map((name) => [name, BASE_LOG[name] / 2])) }
+    ctx.steps[3] = { accepted: { ...ctx.steps[3].accepted, ...unrelated } }
+    ctx.steps[3].inputs = summary_inputs_key(3, ctx)
+    assert.equal(summary_rows(ctx).rows.filter((row) => (row.name in unrelated) && row.changed).length, Object.keys(unrelated).length,
+        'в итоге они изменены')
+    assert.equal(summary_stale(4, ctx), false, 'прогноз шага 4 от них не зависит — не устарел')
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx))[4], [['ATC_RAT_RLL_FLTD', 25], ['INS_GYRO_FILTER', 45], ['INS_HNTCH_FREQ', 75]])
+    // Без списка те же изменения сделали бы шаг 4 устаревшим
+    assert.equal(summary_stale(4, { ...ctx, depends: undefined }), true)
+
+    // Другой FLTD тангажа — регулятор вариантов шага 4 другой: устарел
+    ctx.steps[3] = { ...ctx.steps[3], accepted: { ...ctx.steps[3].accepted, ATC_RAT_PIT_FLTD: 30 } }
+    assert.equal(summary_stale(4, ctx), true, 'другой FLTD — шаг 4 устарел')
+    ctx.steps[3] = { ...ctx.steps[3], accepted: { ...ctx.steps[3].accepted, ATC_RAT_PIT_FLTD: BASE_LOG.ATC_RAT_PIT_FLTD } }
+    assert.equal(summary_stale(4, ctx), false, 'FLTD вернули — снова не устарел')
+
+    // Шаг 2 принят заново с другим SCHED_LOOP_RATE: шаг 3 устарел (у него списка нет), шаг 4 — нет: модель регулятора
+    // считается на частоте контура лога
+    ctx.steps[2] = { ...ctx.steps[2], accepted: { ...ctx.steps[2].accepted, SCHED_LOOP_RATE: 800 } }
+    ctx.steps[2].inputs = summary_inputs_key(2, ctx)
+    assert.deepEqual([2, 3, 4].map((n) => summary_stale(n, ctx)), [false, true, false])
+})
+
 // ---------------------------------------------------------------- что перелететь
 
 // Подсказка о включаемом втором notch при INS_HNTC2_ENABLE = 0 в логе — дословно текст step2_second_notch_hint
@@ -568,6 +621,18 @@ test('summary_period: точка, если фраза не кончается н
     assert.equal(summary_period('Почему?'), 'Почему?')
 })
 
+test('summary_lower_first: обычное слово — со строчной; имена параметров, сокращения и текст не с буквы — как есть', () => {
+    assert.equal(summary_lower_first('Включите бит PID'), 'включите бит PID')
+    assert.equal(summary_lower_first('Повисите не меньше 30 с'), 'повисите не меньше 30 с')
+    assert.equal(summary_lower_first('Batch: INS_LOG_BAT_MASK = 1'), 'batch: INS_LOG_BAT_MASK = 1')
+    assert.equal(summary_lower_first('MOT_HOVER_LEARN = 2 (обучение с сохранением)'), 'MOT_HOVER_LEARN = 2 (обучение с сохранением)')
+    assert.equal(summary_lower_first('ESC-телеметрия'), 'ESC-телеметрия')
+    assert.equal(summary_lower_first('проверьте крепление'), 'проверьте крепление')
+    assert.equal(summary_lower_first('2–3 минуты'), '2–3 минуты')
+    assert.equal(summary_lower_first('Я'), 'Я')
+    assert.equal(summary_lower_first(''), '')
+})
+
 test('summary_notch_enable_hint: текст подсказки шага 2 дословно; ENABLE нет в логе — 0; префикс — имя без ENABLE', () => {
     assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', 0), HNTC2_ENABLE_HINT)
     assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', null), HNTC2_ENABLE_HINT)
@@ -587,9 +652,9 @@ test('summary_refly: тексты пунктов — законченные фр
     const ctx = refly_ctx({ checks: checks, steps: steps, reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'],
         unreliable_axes: ['roll', 'pitch'] })
     assert.deepEqual(summary_refly(ctx), [
-        { source: 'check', text: 'Сообщения PID — Включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter ' +
+        { source: 'check', text: 'Сообщения PID — включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter ' +
             'пишет PID с частотой 10 Гц.' },
-        { source: 'check', text: 'Вибрации — Проверьте крепление автопилота.' },
+        { source: 'check', text: 'Вибрации — проверьте крепление автопилота.' },
         { source: 'notch', text: HNTC2_ENABLE_HINT },
         { source: 'reboot', text: 'После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' +
             'SCHED_LOOP_RATE, INS_HNTCH_HMNCS.' },
@@ -621,9 +686,13 @@ test('summary_refly: проверки warn и fail с fix — по порядк�
     ]
     const items = summary_refly(refly_ctx({ checks: checks }))
     assert.deepEqual(sources_of(items), ['check', 'check'])
-    // Какой проверке принадлежит пункт — по её fix в тексте
-    assert.deepEqual(items.map((item) => checks.find((c) => (c.fix ?? '') !== '' && item.text.includes(c.fix)).id),
+    // Какой проверке принадлежит пункт — по её fix в тексте (первая буква обычного слова — строчная)
+    assert.deepEqual(items.map((item) => checks.find((c) => (c.fix ?? '') !== '' && item.text.includes(summary_lower_first(c.fix))).id),
         ['pid_log', 'hover_throttle'])
+    assert.equal(items[0].text, 'Сообщения PID — включите бит ATTITUDE_FAST.')
+    // fix с имени параметра — как есть
+    const learn = [{ id: 'hover_throttle', status: 'warn', title: 'Газ висения', text: 'расхождение', fix: 'MOT_HOVER_LEARN = 2 (обучение с сохранением)' }]
+    assert.deepEqual(summary_refly(refly_ctx({ checks: learn })).map((item) => item.text), ['Газ висения — MOT_HOVER_LEARN = 2 (обучение с сохранением).'])
 })
 
 test('summary_refly: включение второго notch — пункт с подсказкой для INS_HNTC2_ENABLE', () => {
