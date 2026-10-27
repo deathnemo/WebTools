@@ -13,12 +13,14 @@
 // аппарата лога (passmem_aircraft_key; null — лог не загружен)
 const memory_state = { pass: null, applied: null, key: null }
 
-// Внутреннее состояние блока шага 0: list — проходы списка выбора на момент загрузки лога (лог без строки
-// контроллера), corrupt — память прочитана не целиком: строка предупреждения остаётся в вердикте и после выбора прохода
-const memory_step0 = { list: [], corrupt: false }
+// Внутреннее состояние блока шага 0: pick — лог без строки контроллера (проход выбирается из списка), list — проходы
+// списка (на момент загрузки лога, без забытых), warning — строка предупреждения о неполной памяти (memory_corrupt_texts;
+// null — память прочитана целиком): она остаётся в вердикте и после выбора прохода
+const memory_step0 = { pick: false, list: [], warning: null }
 
-// Строка предупреждения: часть памяти не прочитана (битые записи, испорченный JSON, другая версия)
-const memory_corrupt_text = "Часть памяти прохода не прочитана — удалена."
+// Строка предупреждения: часть памяти не прочитана (битые записи, испорченный JSON, другая версия) — и удалена
+// (уцелевшее переписано в хранилище) или осталась (запись не удалась)
+const memory_corrupt_texts = { removed: "Часть памяти прохода не прочитана — удалена.", kept: "Часть памяти прохода не прочитана." }
 
 // Итог строки таблицы «Прошлый проход» по status из passmem_applied
 const memory_status_text = { applied: "применено", other: "другое значение", absent: "нет в логе" }
@@ -87,7 +89,7 @@ function memory_reset() {
     document.querySelector("#memory0_table tbody").innerHTML = ""
     document.getElementById("memory0_pick").replaceChildren()
     Object.assign(memory_state, { pass: null, applied: null, key: null })
-    Object.assign(memory_step0, { list: [], corrupt: false })
+    Object.assign(memory_step0, { pick: false, list: [], warning: null })
 }
 
 // Дата сохранения прохода: «27.10.2026, 14:05»; нет даты — «—»
@@ -101,15 +103,22 @@ function memory_pass_label(pass) {
     return [memory_date_text(pass.saved_at), (device !== "") ? device : "—", pass.file_name ?? "—"].join(" · ")
 }
 
-// Блок «Прошлый проход» после загрузки лога. Лог со строкой контроллера (state.info.board — непустая строка) — проход
-// этого аппарата по ключу; без неё — список сохранённых проходов (passmem_list), по умолчанию ничего не выбрано.
-// Прохода нет (список пуст) — блок скрыт; хранилища нет ("unavailable") — тоже. Память прочитана не целиком
-// ("corrupt") — уцелевшие записи переписываются в хранилище без битых (иначе предупреждение было бы при каждой загрузке
-// и не было бы правдой «удалена»), в вердикте — строка предупреждения, а без прохода блок показывает только её.
+// Есть ли что показать у прохода: проход без изменённых параметров сравнивать не с чем — как прохода нет
+function memory_has_changes(pass) {
+    return (pass != null) && (pass.changed.length > 0)
+}
+
+// Блок «Прошлый проход» после загрузки лога. Ключ аппарата лога (memory_state.key) — сразу: он зависит только от лога.
+// Лог со строкой контроллера (state.info.board — непустая строка) — проход этого аппарата по ключу; без неё — список
+// сохранённых проходов (passmem_list, memory_show_list). Прохода нет (список пуст) — блок скрыт; хранилища нет
+// ("unavailable") — тоже. Память прочитана не целиком ("corrupt") — уцелевшие записи переписываются в хранилище без
+// битых (иначе предупреждение было бы при каждой загрузке), в вердикте — строка предупреждения («удалена» — только
+// если запись удалась), а без прохода блок показывает только её.
 // Блок показан до разбора памяти: ошибку (load вызывает функцию под step_try) видно вердиктом блока. Нужен
 // загруженный лог
 function memory_render_step0() {
     memory_reset()
+    memory_state.key = passmem_aircraft_key(state.info, state.file_name)
     const box = document.getElementById("memory0")
     box.hidden = false
     const storage = memory_storage()
@@ -118,31 +127,22 @@ function memory_render_step0() {
         box.hidden = true
         return
     }
-    memory_state.key = passmem_aircraft_key(state.info, state.file_name)
-    memory_step0.corrupt = read.error === "corrupt"
-    if (memory_step0.corrupt) {
-        passmem_write(storage, read.passes)
+    if (read.error === "corrupt") {
+        memory_step0.warning = (passmem_write(storage, read.passes) == null) ? memory_corrupt_texts.removed : memory_corrupt_texts.kept
     }
 
     const board = state.info.board
     if ((typeof board === "string") && (board !== "")) {
         const pass = read.passes[memory_state.key] ?? null
-        if (pass != null) {
+        if (memory_has_changes(pass)) {
             memory_show_pass(pass)
-            return
+        } else {
+            memory_show_empty()
         }
-    } else {
-        const list = passmem_list(read.passes)
-        if (list.length > 0) {
-            memory_show_list(list)
-            return
-        }
-    }
-    if (memory_step0.corrupt) {
-        step_verdict("memory0_verdict", "warn", memory_corrupt_text)
         return
     }
-    box.hidden = true
+    memory_step0.pick = true
+    memory_show_list(passmem_list(read.passes).filter(memory_has_changes))
 }
 
 // Подпись блока (#memory0_head)
@@ -152,15 +152,35 @@ function memory_head(text) {
     head.hidden = false
 }
 
-// Список выбора для лога без строки контроллера: проходы list по убыванию даты, по умолчанию ничего не выбрано —
-// прохода нет, пока его не выберут (memory_show_none)
+// Прохода для показа нет: блок только с предупреждением о неполной памяти, а без него — скрыт
+function memory_show_empty() {
+    memory_state.pass = null
+    memory_state.applied = null
+    for (const id of ["memory0_head", "memory0_table", "memory0_pick_field", "memory0_forget"]) {
+        document.getElementById(id).hidden = true
+    }
+    if (memory_step0.warning != null) {
+        step_verdict("memory0_verdict", "warn", memory_step0.warning)
+        document.getElementById("memory0").hidden = false
+    } else {
+        document.getElementById("memory0").hidden = true
+    }
+}
+
+// Список выбора для лога без строки контроллера: проходы list по убыванию даты. Проход с тем же запасным ключом, что
+// у лога (та же плата, рама и имя файла), выбран сразу, иначе ничего не выбрано. Список пуст — memory_show_empty
 function memory_show_list(list) {
     memory_step0.list = list
+    if (list.length == 0) {
+        memory_show_empty()
+        return
+    }
     const select = document.getElementById("memory0_pick")
     select.replaceChildren(new Option("— не выбран —", ""), ...list.map((pass) => new Option(memory_pass_label(pass), pass.key)))
-    select.value = ""
+    select.value = list.some((pass) => pass.key === memory_state.key) ? memory_state.key : ""
     document.getElementById("memory0_pick_field").hidden = false
-    memory_show_none()
+    document.getElementById("memory0").hidden = false
+    memory_pick_changed()
 }
 
 // Выбор в списке: проход по ключу или снова «не выбран»
@@ -182,17 +202,18 @@ function memory_show_none() {
     memory_head("В логе нет строки полётного контроллера — проход этого аппарата не узнать. Выберите сохранённый проход из списка.")
     document.getElementById("memory0_table").hidden = true
     document.getElementById("memory0_forget").hidden = true
-    if (memory_step0.corrupt) {
-        step_verdict("memory0_verdict", "warn", memory_corrupt_text)
+    if (memory_step0.warning != null) {
+        step_verdict("memory0_verdict", "warn", memory_step0.warning)
     } else {
         document.getElementById("memory0_verdict").hidden = true
     }
 }
 
 // Показать проход pass: подпись (дата, лог, прошивка), таблица «что применено» (passmem_applied по параметрам лога и
-// размеру маски HMNCS — как в step_summary_context) и вердикт: лог прошлого прохода (значения лога равны «было»
-// прохода и имя файла то же) — значения ещё не применялись; применено всё — ok; иначе — предупреждение «K из N».
-// Проход и «применено» — в memory_state
+// размеру маски HMNCS — как в step_summary_context; столбцы — как в изменениях шага 5) и вердикт: лог прошлого прохода
+// (значения лога равны «было» прохода и имя файла то же) — значения ещё не применялись; применено всё — ok; иначе —
+// предупреждение «K из N». Кнопка «Забыть» — про аппарат лога или про выбранный в списке проход. Проход и
+// «применено» — в memory_state
 function memory_show_pass(pass) {
     const bits = hmncs_bits(state.params, state.spectrum.filter_version ?? 1)
     const applied = passmem_applied(pass, state.params, bits)
@@ -200,8 +221,8 @@ function memory_show_pass(pass) {
     memory_head("Сохранён " + memory_date_text(pass.saved_at) + ", лог " + (pass.file_name ?? "—") + ", прошивка " + (pass.fw ?? "—"))
     const cell = (text) => '<td class="num">' + html_escape(text) + '</td>'
     const table = document.getElementById("memory0_table")
-    table.querySelector("tbody").innerHTML = applied.rows.map((row) => '<tr>' + cell(row.name) + cell(String(row.step)) + cell(step_value_text(row.proposed)) +
-        cell(step_value_text(row.now)) + '<td class="memory0-status memory0-status--' + row.status + '">' + html_escape(memory_status_text[row.status]) + '</td></tr>').join("")
+    table.querySelector("tbody").innerHTML = applied.rows.map((row) => '<tr>' + cell(row.name) + cell(step_value_text(row.proposed)) + cell(step_value_text(row.now)) +
+        cell(String(row.step)) + '<td class="memory0-status memory0-status--' + row.status + '">' + html_escape(memory_status_text[row.status]) + '</td></tr>').join("")
     table.hidden = false
 
     let status = "warn"
@@ -211,20 +232,34 @@ function memory_show_pass(pass) {
     } else if (applied.applied === applied.total) {
         status = "ok"
     }
-    if (memory_step0.corrupt) {
+    if (memory_step0.warning != null) {
         status = "warn"
-        text += " " + memory_corrupt_text
+        text += " " + memory_step0.warning
     }
     step_verdict("memory0_verdict", status, text)
-    document.getElementById("memory0_forget").hidden = false
+    const forget = document.getElementById("memory0_forget")
+    forget.textContent = memory_step0.pick ? "Забыть выбранный проход" : "Забыть проход этого аппарата"
+    forget.hidden = false
 
     memory_state.pass = pass
     memory_state.applied = applied
 }
 
-// «Забыть проход этого аппарата»: показанный проход — из памяти браузера по его ключу, блок скрыт, прохода для лога
-// больше нет. Память перечитывается: после загрузки лога её мог переписать шаг 5. Хранилища нет или запись не
-// удалась — блок остаётся, в вердикте — ошибка
+// Фокус после «Забыть» (кнопка скрыта): список проходов, если он виден, иначе поле выбора лога
+function memory_focus_after_forget() {
+    const select = document.getElementById("memory0_pick")
+    if (select.checkVisibility()) {
+        select.focus()
+    } else {
+        document.getElementById("fileItem").focus()
+    }
+}
+
+// «Забыть»: показанный проход — из памяти браузера по его ключу. Память перечитывается: после загрузки лога её мог
+// переписать шаг 5. Удаляется только показанная запись (та же дата сохранения): заменённую новым проходом не трогать —
+// блок остаётся с предупреждением, проход для сравнения шагов 2–4 — показанный [наше]. Записи уже нет — забывать
+// нечего. Лог со строкой контроллера — дальше прохода нет (memory_show_empty); список — он показывается заново без
+// забытого. Хранилища нет или запись не удалась — блок остаётся, в вердикте — ошибка
 function memory_forget() {
     const pass = memory_state.pass
     if (pass == null) {
@@ -232,11 +267,26 @@ function memory_forget() {
     }
     const storage = memory_storage()
     const read = passmem_read(storage)
-    if ((read.error === "unavailable") || (passmem_write(storage, passmem_forget(read.passes, pass.key)) != null)) {
-        step_verdict("memory0_verdict", "fail", "Проход не забыт: браузер не даёт изменить память прохода (приватный режим, запрет или переполнение хранилища).")
+    const failed = "Проход не забыт: браузер не даёт изменить память прохода (приватный режим, запрет или переполнение хранилища)."
+    if (read.error === "unavailable") {
+        step_verdict("memory0_verdict", "fail", failed)
         return
     }
-    document.getElementById("memory0").hidden = true
-    memory_state.pass = null
-    memory_state.applied = null
+    const stored = read.passes[pass.key] ?? null
+    if ((stored != null) && (stored.saved_at !== pass.saved_at)) {
+        step_verdict("memory0_verdict", "warn", "Проход уже заменён сохранённым на шаге 5 — он остаётся.")
+        document.getElementById("memory0_forget").hidden = true
+        memory_focus_after_forget()
+        return
+    }
+    if ((stored != null) && (passmem_write(storage, passmem_forget(read.passes, pass.key)) != null)) {
+        step_verdict("memory0_verdict", "fail", failed)
+        return
+    }
+    if (memory_step0.pick) {
+        memory_show_list(memory_step0.list.filter((p) => p.key !== pass.key))
+    } else {
+        memory_show_empty()
+    }
+    memory_focus_after_forget()
 }
