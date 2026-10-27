@@ -124,6 +124,13 @@ function step1_untouched(page) {
     }))
 }
 
+// Сразу после «Принять» шага n (2–4): в state.steps[n].inputs — отпечаток входов текущего состояния (step_inputs_key),
+// и принятое не устарело (step_accepted_stale)
+async function assert_accepted_fresh(page, n) {
+    const fresh = await page.evaluate((n) => ({ inputs: state.steps[n].inputs === step_inputs_key(n), stale: step_accepted_stale(n) }), n)
+    assert.deepEqual(fresh, { inputs: true, stale: false }, 'шаг ' + n + ': отпечаток входов принятого — от текущего состояния')
+}
+
 // Сводка шага 3: строки таблицы вариантов (подписи, рекомендованные, текст строки по id), выбранная строка, вердикт
 function step3_summary(page) {
     return page.evaluate(() => {
@@ -302,6 +309,9 @@ async function main() {
         assert.match(await page.title(), /Мастер настройки: /)
         assert.match(await page.locator('#log_verdict').getAttribute('class'), /verdict--(ok|warn|fail)/)
         assert.ok((await page.locator('#log_info .stat').count()) >= 9, 'плитки сведений')
+        // Рама из MSG «Frame: …» и номер платы APJ из VER — для подписи и запасного ключа аппарата памяти прохода
+        assert.deepEqual(await page.evaluate(() => ({ frame: state.info.frame, board_id: state.info.board_id })), { frame: 'QUAD/X_REV', board_id: 1503 },
+                         'рама и номер платы тестового лога')
         const count = await page.locator('#log_checks .check').count()
         assert.ok(count >= 7 && count <= 9, 'от 7 до 9 проверок (clipping и газ висения зависят от лога)')
         const titles = await page.evaluate(() => [...document.querySelectorAll('#log_checks .check h3')].map((h) => h.textContent))
@@ -619,6 +629,10 @@ async function main() {
         assert.ok((accepted.metrics != null) && Number.isFinite(accepted.metrics.current.band_dB) && Number.isFinite(accepted.metrics.current.lag_ms[30]), 'метрики принятого')
         assert.ok((accepted.flags != null) && Array.isArray(accepted.flags.worse_peaks), 'отметки принятого против лога')
         assert.match(await page.textContent('#verdict2'), /^Принято/, 'вердикт шага 2 — «Принято»')
+        await assert_accepted_fresh(page, 2)
+        // Версия фильтра шага 1 — в отпечатке (четвёртый элемент) числом: опечатка в поле контекста дала бы null
+        const fv_in_key = await page.evaluate(() => ({ key: JSON.parse(step_inputs_key(2))[3], version: state.spectrum.filter_version }))
+        assert.ok(Number.isInteger(fv_in_key.key) && (fv_in_key.key === fv_in_key.version), 'версия фильтра в отпечатке шага 2: ' + JSON.stringify(fv_in_key))
 
         // Принять вариант, который хуже лога: вердикт warn «Принято, но хуже лога»
         await page.click('#wizbar button:nth-child(3)')
@@ -637,6 +651,7 @@ async function main() {
         assert.ok((flagged.flags.worse_peaks.length > 0) || flagged.flags.lag_over, 'отметки принятого: ' + JSON.stringify(flagged.flags))
         assert.match(flagged.cls, /verdict--warn/, 'принятое хуже лога — предупреждение')
         assert.match(flagged.text, /^Принято, но хуже лога: /, flagged.text)
+        await assert_accepted_fresh(page, 2)
 
         // Шаг 3: варианты низкочастотных фильтров, размер винта, графики, «Принять». Notch-база — принятое на шаге 2
         // (выше принят вариант хуже лога), интервал сдвинут на 20 с, поэтому числа сравниваются с «Как в логе» того же
@@ -795,6 +810,7 @@ async function main() {
         assert.ok((accepted3.metrics != null) && (accepted3.flags != null), 'метрики и отметки принятого')
         const verdict3_prop = await page.textContent('#verdict3')
         assert.match(verdict3_prop, /^Принято/, verdict3_prop)
+        await assert_accepted_fresh(page, 3)
 
         // Правка поля формы и сразу «Принять» (щелчок раньше пересчёта правки): принимаются значения формы — «Свой»
         await page.click('#wizbar button:nth-child(4)')
@@ -808,6 +824,7 @@ async function main() {
         assert.equal(custom3.accepted.INS_GYRO_FILTER, 38, 'правка и сразу «Принять» — значение формы')
         assert.equal(custom3.candidate_id, 'custom', 'правка вручную — вариант «custom»')
         assert.match(await page.textContent('#verdict3'), /^Принято/, 'вердикт шага 3 — «Принято»')
+        await assert_accepted_fresh(page, 3)
 
         // Скриншот шага 3: принятые свои значения, строка «Свой» выбрана
         await page.click('#wizbar button:nth-child(4)')
@@ -1032,6 +1049,9 @@ async function main() {
         const acc4 = await page.evaluate(() => state.steps[4])
         assert.equal(acc4.accepted.ATC_RAT_RLL_P, Math.fround(0.125), 'правка и сразу «Принять» — значение формы')
         assert.deepEqual([acc4.axes.roll.candidate_id, acc4.axes.pitch.candidate_id, acc4.axes.yaw.candidate_id], ['custom', 'log', 'log'], 'у крена «Свой», у остальных — лог')
+        await assert_accepted_fresh(page, 4)
+        // Шаги 2–3 приняты на интервале, сдвинутом на 20 с, а интервал с тех пор вернули — их принятое устарело
+        assert.deepEqual(await page.evaluate(() => [step_accepted_stale(2), step_accepted_stale(3)]), [true, true], 'после смены интервала шаги 2–3 устарели')
         await page.click('#wizbar button:nth-child(5)')
         await wait_overlay(page)
         const e1 = await step4_summary(page)
@@ -1073,6 +1093,7 @@ async function main() {
         assert.deepEqual(await visible_steps(page), ['5'], '«Принять» с новым окном открывает шаг 5')
         const acc_w = await page.evaluate(() => ({ window: step4.window, key_window: JSON.parse(state.steps[4].calc_key)[2], yaw_p: state.steps[4].accepted.ATC_RAT_YAW_P }))
         assert.deepEqual(acc_w, { window: 1024, key_window: 1024, yaw_p: Math.fround(0.25) }, 'окно FFT 1024 и сразу «Принять» — принято с новым окном')
+        await assert_accepted_fresh(page, 4)
         await page.click('#wizbar button:nth-child(5)')
         await wait_overlay(page)
         assert.equal(await page.inputValue('#step4_window'), '1024', 'в поле — окно 1024')
@@ -1091,6 +1112,9 @@ async function main() {
         const stale4 = await step4_summary(page)
         assert.match(stale4.verdict, /^Принято раньше для другого интервала, окна FFT, набора или фильтров шагов 2–3/, stale4.verdict)
         assert.match(stale4.verdict_class, /verdict--warn/, '«Принято раньше» — предупреждение')
+        // Отпечаток входов: принятое шага 4 устарело (сменилось принятое шага 3), шага 3 — нет
+        await assert_accepted_fresh(page, 3)
+        assert.equal(await page.evaluate(() => step_accepted_stale(4)), true, 'шаг 3 принят заново — принятое шага 4 устарело')
 
         // Графики шага 4 на крене: данные, фон --surface, ширина как у контейнера (проверка после перезагрузки страницы
         // в конце строже: снимки выше уже включили autosize), скриншот
@@ -1104,6 +1128,24 @@ async function main() {
         }
         await assert_plot_widths(page, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4'])
         await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
+        await page.click('#wizbar button:nth-child(1)')
+
+        // Версия фильтра — во входах шагов 2–3: другая версия на шаге 1 («Пересчитать», FFT тот же) делает принятое шага 3
+        // устаревшим, возврат версии — снова актуальным. Шаг 2 уже устарел из-за интервала, у него — место версии в отпечатке
+        await page.click('#wizbar button:nth-child(2)')
+        await wait_overlay(page)
+        const log_fv = await page.evaluate(() => state.spectrum.filter_version)
+        const other_fv = (log_fv < 4) ? log_fv + 1 : 3
+        const fft_key = await page.evaluate(() => step1.fft_key)
+        await page.check('#spec_fv_' + other_fv)
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        const fv_stale = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: JSON.parse(step_inputs_key(2))[3], stale3: step_accepted_stale(3) }))
+        assert.deepEqual(fv_stale, { version: other_fv, fft_key: fft_key, key2: other_fv, stale3: true }, 'другая версия фильтра — принятое шага 3 устарело')
+        await page.check('#spec_fv_' + log_fv)
+        await page.click('#spec_recalc')
+        await wait_overlay(page)
+        assert.equal(await page.evaluate(() => step_accepted_stale(3)), false, 'версию фильтра вернули — принятое шага 3 снова актуально')
         await page.click('#wizbar button:nth-child(1)')
 
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):

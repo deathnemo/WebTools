@@ -742,9 +742,9 @@ function step3_accept_refusal(values) {
     return (parts.length > 0) ? "Принять нельзя — " + parts.join("; ") + "." : null
 }
 
-// «Принять»: значения формы, их метрики и отметки против лога и ключ расчёта — в итог мастера, затем шаг 4 (если
-// доступен). Правки полей сначала досчитываются (щелчок мог прийти раньше их пересчёта). Пустые поля и
-// отрицательные частоты принять нельзя (step3_accept_refusal)
+// «Принять»: значения формы, их метрики и отметки против лога, ключ расчёта и отпечаток входов (step_inputs_key — для
+// «устарело» сводки) — в итог мастера, затем шаг 4 (если доступен). Правки полей сначала досчитываются (щелчок мог
+// прийти раньше их пересчёта). Пустые поля и отрицательные частоты принять нельзя (step3_accept_refusal)
 function step3_accept() {
     step3_flush_edits(true)
     step_run(() => {
@@ -775,6 +775,7 @@ function step3_accept() {
             metrics: compared ? { current: step3_metrics_summary(row.evaluation), log: step3_metrics_summary(log) } : null,
             flags: compared ? (row.flags ?? lowpass_flags(row.evaluation, log)) : null,
             calc_key: step3.key,
+            inputs: step_inputs_key(3),
             evaluated_at: Date.now(),
         }
         step3_redraw_all()

@@ -1,10 +1,12 @@
 // Тесты общего модуля шагов мастера настройки (TuneWizard/steps/common.js) без браузера: число со знаком, запись
 // значения параметра и ячейка таблицы, перехват ошибок действия в вердикт, вложенный step_run под оверлеем внешнего,
-// досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна загрузка), флаг нажатой кнопки мыши
-// и каркас механизма правок полей. Скрипт классический (общая глобальная область), поэтому загружается как на
-// странице — через vm.runInThisContext (как в tests/tunewizard-core.test.cjs). Глобалы страницы, которые он зовёт
-// (document, window, fetch, loading_call, state, html_escape, step1, step1_ready, step1_prepare), — заглушки ниже;
-// модуль обращается к ним только при вызове. param_to_string — настоящий, из Libraries/Param_Helpers.js.
+// досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна загрузка), флаг нажатой кнопки мыши,
+// каркас механизма правок полей и отпечаток входов принятого шага. Скрипт классический (общая глобальная область),
+// поэтому загружается как на странице — через vm.runInThisContext (как в tests/tunewizard-core.test.cjs). Глобалы
+// страницы, которые он зовёт (document, window, fetch, loading_call, state, html_escape, step1, step1_ready,
+// step1_prepare), — заглушки ниже; модуль обращается к ним только при вызове. param_to_string — настоящий, из
+// Libraries/Param_Helpers.js; summary_inputs_key и summary_stale — настоящие, из core/summary.js (с его зависимостями,
+// в порядке страницы).
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -35,7 +37,10 @@ globalThis.step1 = { error: null }
 globalThis.step1_ready = () => false
 globalThis.step1_prepare = () => false
 
-for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/steps/common.js']) {
+// В порядке index.html: core/summary.js и то, что ему нужно (Param_Helpers.js, filters.js, pid.js и pidtune.js,
+// params.js), затем общий модуль шагов
+for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js',
+                    'TuneWizard/core/params.js', 'TuneWizard/core/summary.js', 'TuneWizard/steps/common.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
 }
@@ -280,4 +285,47 @@ test('step_edit_controller: набор — пересчёт после пауз�
     // Второй контроллер — тот же флаг и те же обработчики
     step_edit_controller({ edit_timer: null, edit_postponed: false }, { delay_ms: 400, flush: () => {} })
     assert.equal(doc_handlers.pointerdown.length, 1)
+})
+
+test('step_inputs_key, step_accepted_stale: отпечаток входов из состояния страницы — интервал, ключ FFT и версия фильтра шага 1, принятое шагов', () => {
+    state.settings = { start: 10, end: 100 }
+    state.spectrum = { filter_version: 2 }
+    state.steps = []
+    step1.fft_key = 'batch:1'
+    assert.deepEqual(JSON.parse(step_inputs_key(2)), [10, 100, 'batch:1', 2, []])
+    for (const n of [2, 3, 4]) {
+        assert.equal(step_accepted_stale(n), false, 'шаг ' + n + ' не принят — не устарел')
+    }
+
+    // «Принять» по шагам: отпечаток — до записи state.steps[n], у шага n — от принятого шагов < n
+    state.steps[2] = { accepted: { INS_HNTCH_FREQ: 80, INS_HNTCH_ATT: 33 } }
+    state.steps[2].inputs = step_inputs_key(2)
+    state.steps[3] = { accepted: { INS_GYRO_FILTER: 42 }, inputs: step_inputs_key(3) }
+    state.steps[4] = { accepted: { ATC_RAT_RLL_P: 0.125 }, inputs: step_inputs_key(4) }
+    assert.deepEqual(JSON.parse(state.steps[3].inputs), [10, 100, 'batch:1', 2, [[['INS_HNTCH_ATT', 33], ['INS_HNTCH_FREQ', 80]]]])
+    assert.deepEqual(JSON.parse(state.steps[4].inputs), [10, 100, null, null, [[['INS_HNTCH_ATT', 33], ['INS_HNTCH_FREQ', 80]], [['INS_GYRO_FILTER', 42]]]])
+    const fresh = () => [2, 3, 4].map((n) => step_accepted_stale(n))
+    assert.deepEqual(fresh(), [false, false, false], 'сразу после «Принять» — не устарело')
+
+    // Каждое поле состояния входит в отпечаток: опечатка в имени дала бы undefined → null, и смена прошла бы незаметно.
+    // [поле, сменить, вернуть, устарело ли у шагов 2, 3, 4]
+    const cases = [
+        ['state.settings.start', () => { state.settings.start = 20 }, () => { state.settings.start = 10 }, [true, true, true]],
+        ['state.settings.end', () => { state.settings.end = 90 }, () => { state.settings.end = 100 }, [true, true, true]],
+        ['step1.fft_key', () => { step1.fft_key = 'batch:3' }, () => { step1.fft_key = 'batch:1' }, [true, true, false]],
+        ['state.spectrum.filter_version', () => { state.spectrum.filter_version = 4 }, () => { state.spectrum.filter_version = 2 }, [true, true, false]],
+        ['state.steps[2].accepted', () => { state.steps[2].accepted.INS_HNTCH_ATT = 40 }, () => { state.steps[2].accepted.INS_HNTCH_ATT = 33 }, [false, true, true]],
+        ['state.steps[3].accepted', () => { state.steps[3].accepted.INS_GYRO_FILTER = 39 }, () => { state.steps[3].accepted.INS_GYRO_FILTER = 42 }, [false, false, true]],
+    ]
+    for (const [field, change, restore, stale] of cases) {
+        change()
+        assert.deepEqual(fresh(), stale, field + ': устаревание шагов 2, 3, 4')
+        restore()
+        assert.deepEqual(fresh(), [false, false, false], field + ': вернули — не устарело')
+    }
+
+    // Принятое без отпечатка — устарело
+    delete state.steps[3].inputs
+    assert.equal(step_accepted_stale(3), true)
+    step1.fft_key = null
 })

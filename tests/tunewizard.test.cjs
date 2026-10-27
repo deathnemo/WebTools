@@ -196,6 +196,24 @@ test('log_info: аппарат, длительность, окно полёта,
     assert.equal(info.messages.pid, true)
 })
 
+test('log_info: рама — текст после «Frame: » из первого такого MSG; нет строки или MSG — null', () => {
+    const frame_of = (messages) => core_log.log_info(fake_log({ messages }), copter_version).frame
+    assert.equal(frame_of({ MSG: { Message: ['ArduCopter V4.6.3 (92b0cd78)', 'Frame: QUAD/X_REV'] } }), 'QUAD/X_REV')
+    // Первая из нескольких; строка без «Frame: » в начале не считается
+    assert.equal(frame_of({ MSG: { Message: ['Old Frame: HEXA/X', 'Frame: QUAD/X', 'Frame: HEXA/X'] } }), 'QUAD/X')
+    assert.equal(frame_of({ MSG: { Message: ['ArduCopter V4.6.3 (92b0cd78)', 'RCOut: PWM:1-4'] } }), null)
+    // MSG объявлен без строк: поля нет, get возвращает undefined
+    assert.equal(frame_of({ MSG: {} }), null)
+    assert.equal(frame_of({}), null)
+})
+
+test('log_info: номер платы APJ — board_id из get_version_and_board; нет — null', () => {
+    const log = fake_log()
+    assert.equal(core_log.log_info(log, { ...copter_version, board_id: 1503 }).board_id, 1503)
+    assert.equal(core_log.log_info(log, copter_version).board_id, null)
+    assert.equal(core_log.log_info(log).board_id, null)
+})
+
 test('log_info: без полёта и без ATT', () => {
     const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6], AOut: [0, 0, 0] } } })
     const info = core_log.log_info(log, { build_type: 3 })

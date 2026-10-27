@@ -979,8 +979,8 @@ function step4_metrics_summary(axis, row) {
 }
 
 // «Принять»: значения формы, по каждой оси — строка формы (вариант или «custom»), её отметки и сводка метрик, ключ
-// расчёта — в итог мастера, затем шаг 5. Правки полей сначала досчитываются. Пустые и отрицательные значения
-// принять нельзя (step4_accept_refusal)
+// расчёта и отпечаток входов (step_inputs_key — для «устарело» сводки) — в итог мастера, затем шаг 5. Правки полей
+// сначала досчитываются. Пустые и отрицательные значения принять нельзя (step4_accept_refusal)
 function step4_accept() {
     step4_flush_window(false)
     step4_flush_edits(true)
@@ -1012,7 +1012,7 @@ function step4_accept() {
                 metrics: step4_metrics_summary(axis, row),
             }
         }
-        state.steps[4] = { accepted: values, axes: axes, calc_key: step4.key, evaluated_at: Date.now() }
+        state.steps[4] = { accepted: values, axes: axes, calc_key: step4.key, inputs: step_inputs_key(4), evaluated_at: Date.now() }
         step4_redraw_all()
         set_step(5)
     }, "verdict4", "шага 4")

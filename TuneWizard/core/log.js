@@ -213,7 +213,19 @@ function vibe_summary(log) {
     }
 }
 
-// Сводная информация о логе. version — результат get_version_and_board(log) из Libraries/LogHelpers.js
+// Рама из сообщений MSG: текст после «Frame: » первого сообщения, которое так начинается («Frame: QUAD/X_REV» —
+// класс и тип рамы, AP_Motors::get_frame_and_type_string). Нет MSG (или в нём нет строк) или такой строки — null
+function log_frame(log) {
+    if (!("MSG" in log.messageTypes)) {
+        return null
+    }
+    const prefix = "Frame: "
+    const message = log.get("MSG", "Message")?.find((text) => text.startsWith(prefix))
+    return (message != null) ? message.slice(prefix.length) : null
+}
+
+// Сводная информация о логе. version — результат get_version_and_board(log) из Libraries/LogHelpers.js.
+// board — строка полётного контроллера из MSG, board_id — номер платы APJ из VER, frame — рама (log_frame); нет — null
 function log_info(log, version = {}) {
     const messages = log_messages(log)
 
@@ -247,6 +259,8 @@ function log_info(log, version = {}) {
         build_type: version.build_type ?? null,
         fw_string: version.fw_string ?? null,
         board: version.flight_controller ?? null,
+        board_id: version.board_id ?? null,
+        frame: log_frame(log),
         filter_version: version.filter_version ?? null,
         time_start,
         time_end,

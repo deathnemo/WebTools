@@ -1,15 +1,17 @@
 // Общий модуль шагов мастера: помощники, которые одинаковы у нескольких шагов — подписи, плитки и ячейки таблиц,
-// вердикт, досчёт расчёта шага 1, запуск действий с перехватом ошибок, «Открыть в …», описания параметров из
-// метаданных, флаг нажатой кнопки мыши и каркас механизма правок полей шагов 3–4 (step_…), куски графиков (plot_…).
+// вердикт, досчёт расчёта шага 1, отпечаток входов принятого шага и «устарело», запуск действий с перехватом ошибок,
+// «Открыть в …», описания параметров из метаданных, флаг нажатой кнопки мыши и каркас механизма правок полей шагов 3–4
+// (step_…), куски графиков (plot_…).
 // Состояние модуля — глубина вложенности step_run (step_run_state), загрузка метаданных (step_metadata_state) и флаг
 // указателя с подписчиками (step_pointer).
 //
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
-// core/spectrum.js (find_instance), plots.js (plot, render_plot), Libraries/LoadingOverlay.js (loading_call),
-// Libraries/Param_Helpers.js (param_to_string). Все они нужны только при вызове, поэтому модуль подключается перед
-// steps/step1.js. Обработчики указателя ставятся при первой подписке (step_on_pointer_release), а не при загрузке этого
-// модуля; шаги 3 и 4 подписываются при загрузке своих скриптов (step3_edits, step4_edits), поэтому на странице
-// обработчики фактически стоят с её загрузки, а тест модуля под Node обходится без них.
+// core/spectrum.js (find_instance), core/summary.js (summary_inputs_key, summary_stale), plots.js (plot, render_plot),
+// Libraries/LoadingOverlay.js (loading_call), Libraries/Param_Helpers.js (param_to_string). Все они нужны только при
+// вызове, поэтому модуль подключается перед steps/step1.js. Обработчики указателя ставятся при первой подписке
+// (step_on_pointer_release), а не при загрузке этого модуля; шаги 3 и 4 подписываются при загрузке своих скриптов
+// (step3_edits, step4_edits), поэтому на странице обработчики фактически стоят с её загрузки, а тест модуля под Node
+// обходится без них.
 
 // ---------- Подписи ----------
 
@@ -62,6 +64,35 @@ function step_ensure_step1() {
         return null
     }
     return step1.error ?? "Расчёт спектра шага 1 не готов"
+}
+
+// ---------- Отпечаток входов принятого ----------
+// Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 2.4. Устаревшее принятое предупреждается,
+// не блокирует [решение пользователя 25.10.2026]
+
+// Контекст отпечатка (summary_inputs_key, summary_stale) из состояния страницы: интервал анализа, ключ FFT и версия
+// фильтра шага 1, принятое шагов. Один построитель на оба помощника ниже — чтобы ключ при «Принять» и проверка
+// «устарело» не разошлись
+function step_inputs_context() {
+    return {
+        start: state.settings.start,
+        end: state.settings.end,
+        fft_key: step1.fft_key,
+        filter_version: state.spectrum.filter_version,
+        steps: state.steps,
+    }
+}
+
+// Отпечаток входов шага n (2–4) по текущему состоянию — «Принять» шагов 2–4 кладёт его в state.steps[n].inputs.
+// Брать до записи state.steps[n]: отпечаток шага n — от принятого шагов < n
+function step_inputs_key(n) {
+    return summary_inputs_key(n, step_inputs_context())
+}
+
+// Устарело ли принятое шага n (2–4): отпечаток, сохранённый при «Принять», не совпал с текущим (summary_stale).
+// Не принят — false
+function step_accepted_stale(n) {
+    return summary_stale(n, step_inputs_context())
 }
 
 // ---------- Действия ----------

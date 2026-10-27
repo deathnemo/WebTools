@@ -756,8 +756,8 @@ async function step2_load_param(input) {
     }
 }
 
-// «Принять»: значения формы, их метрики и отметки сравнения с логом (rank_candidates для пары «лог — принятое»)
-// — в итог мастера, открыть шаг 3
+// «Принять»: значения формы, их метрики и отметки сравнения с логом (rank_candidates для пары «лог — принятое») и
+// отпечаток входов (step_inputs_key — для «устарело» сводки) — в итог мастера, открыть шаг 3
 function step2_accept() {
     step_run(() => {
         if (!step1_ready() || (step2.error != null)) {
@@ -775,6 +775,7 @@ function step2_accept() {
             candidate_id: (match != null) ? match.id : "current",
             metrics: (metrics != null) ? step2_metrics_summary(metrics) : null,
             flags: flags,
+            inputs: step_inputs_key(2),
             evaluated_at: Date.now(),
         }
         step2_render_verdict()
