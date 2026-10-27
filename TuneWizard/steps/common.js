@@ -1,9 +1,9 @@
 // Общий модуль шагов мастера: помощники, которые одинаковы у нескольких шагов — подписи, плитки и ячейки таблиц,
-// вердикт, досчёт расчёта шага 1, отпечаток входов принятого шага и «устарело», запуск действий с перехватом ошибок,
-// «Открыть в …», описания параметров из метаданных, флаг нажатой кнопки мыши и каркас механизма правок полей шагов 3–4
-// (step_…), куски графиков (plot_…).
-// Состояние модуля — глубина вложенности step_run (step_run_state), загрузка метаданных (step_metadata_state) и флаг
-// указателя с подписчиками (step_pointer).
+// вердикт, досчёт расчёта шага 1, контекст итога, отпечаток входов принятого шага и «устарело», запуск действий
+// с перехватом ошибок, «Открыть в …», описания параметров из метаданных, флаг нажатой кнопки мыши и каркас механизма
+// правок полей шагов 3–4 (step_…), куски графиков (plot_…).
+// Состояние модуля — глубина вложенности step_run (step_run_state), загрузка метаданных и её сбой
+// (step_metadata_state) и флаг указателя с подписчиками (step_pointer).
 //
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
 // steps/step2.js (step2_param_names), steps/step4.js (step4_param_names), core/spectrum.js (find_instance),
@@ -27,7 +27,7 @@ function step_value_text(value) {
     return Number.isFinite(value) ? param_to_string(value) : "—"
 }
 
-// Плитка с пояснением третьей строкой (sub; пусто — без неё); mod — модификатор "bad" | "good" | null
+// Плитка с пояснением третьей строкой (sub; пусто — без неё); mod — модификатор "bad" | "good" | "accent" | null
 function step_tile(key, value, sub, mod) {
     return '<div class="stat' + (mod ? " stat--" + mod : "") + '"><span class="stat__k">' + html_escape(key) + '</span><span class="stat__v">' +
         html_escape(value) + '</span>' + (sub ? '<span class="stat__s">' + html_escape(sub) + '</span>' : "") + '</div>'
@@ -67,19 +67,20 @@ function step_ensure_step1() {
     return step1.error ?? "Расчёт спектра шага 1 не готов"
 }
 
-// ---------- Отпечаток входов принятого ----------
-// Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 2.4. Устаревшее принятое предупреждается,
-// не блокирует [решение пользователя 25.10.2026]
+// ---------- Контекст итога и отпечаток входов принятого ----------
+// Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, разделы 2.2 и 2.4. Устаревшее принятое
+// предупреждается, не блокирует [решение пользователя 25.10.2026]
 
-// Контекст отпечатка (summary_inputs_key, summary_stale) из состояния страницы: вход итога summary_rows (параметры
-// лога, принятое шагов, имена параметров шагов, версия фильтра и размер маски HMNCS) плюс интервал анализа и ключ FFT
-// шага 1. Версия фильтра одна — state.spectrum.filter_version: и в ключе шагов 2–3, и для правила ESCMSK и размера
-// маски в summary_rows. Один построитель на оба помощника ниже — чтобы ключ при «Принять» и проверка «устарело» не
-// разошлись. Нужен загруженный лог (state.params). Функции имён и hmncs_bits — из core/lowpass.js, core/params.js,
+// Контекст итога и отпечатка из состояния страницы: вход summary_rows (параметры лога, принятое шагов, имена
+// параметров шагов, версия фильтра и размер маски HMNCS) плюс интервал анализа и ключ FFT шага 1 — для
+// summary_inputs_key и summary_stale. Один построитель на сводку шага 5 (step5_context) и отпечаток (помощники ниже) —
+// чтобы ключ при «Принять», проверка «устарело» и «изменён» в сводке не разошлись: версия фильтра одна —
+// state.spectrum.filter_version, и в ключе шагов 2–3, и для правила ESCMSK и размера маски в summary_rows. Нужен
+// загруженный лог (state.params): без него бросает. Функции имён и hmncs_bits — из core/lowpass.js, core/params.js,
 // steps/step2.js и steps/step4.js: все они загружены к любому вызову.
 // Известное ограничение: step1.fft_key — ключ последнего расчёта шага 1, поэтому смена окна FFT на шаге 0 без
 // пересчёта шага 1 не делает принятое устаревшим, пока шаг 1 не пересчитан
-function step_inputs_context() {
+function step_summary_context() {
     return {
         start: state.settings.start,
         end: state.settings.end,
@@ -95,13 +96,16 @@ function step_inputs_context() {
 // Отпечаток входов шага n (2–4) по текущему состоянию — «Принять» шагов 2–4 кладёт его в state.steps[n].inputs.
 // Порядок не важен: ключ шага n — от шагов < n; берётся до записи state.steps[n] для ясности
 function step_inputs_key(n) {
-    return summary_inputs_key(n, step_inputs_context())
+    return summary_inputs_key(n, step_summary_context())
 }
 
 // Устарело ли принятое шага n (2–4): отпечаток, сохранённый при «Принять», не совпал с текущим (summary_stale).
-// Не принят — false
+// Не принят — false сразу, без контекста: без лога (после reset) построитель контекста бросает
 function step_accepted_stale(n) {
-    return summary_stale(n, step_inputs_context())
+    if (state.steps[n] == null) {
+        return false
+    }
+    return summary_stale(n, step_summary_context())
 }
 
 // ---------- Действия ----------
@@ -158,8 +162,9 @@ function step_open_in(path, on_blocked) {
 // Формы шагов 3 и 4 строятся своим кодом (не Libraries/ParameterMetadata.js) и берут описания из одной загрузки
 // ../FilterReview/params.json. Шаг 2 грузит метаданные сам, через load_param_inputs
 
-// Загрузка метаданных: промис (один запрос на страницу) и пришедший объект (null — ещё нет или не загрузились)
-const step_metadata_state = { promise: null, data: null }
+// Загрузка метаданных: промис (один запрос на страницу), пришедший объект (null — ещё нет или не загрузились) и сбой
+// загрузки (failed: true — не загрузились; data null при failed false — ещё грузятся или загрузка не начата)
+const step_metadata_state = { promise: null, data: null, failed: false }
 
 // Описание параметра name в метаданных obj — тем же префиксным обходом, что recursive_search в
 // Libraries/ParameterMetadata.js; null — описания нет
@@ -184,8 +189,15 @@ function step_metadata() {
     return step_metadata_state.data
 }
 
-// Загрузить метаданные один раз на страницу → промис с объектом или null (не загрузились: предупреждение в консоль,
-// в формах остаются имена полей). Повторный вызов возвращает тот же промис
+// Не загрузились ли метаданные: step_metadata() даёт null и пока они грузятся, и после сбоя — сводке шага 5 это
+// разные случаи («что перелететь»: пока грузятся, пункта о перезагрузке нет; после сбоя — общий пункт)
+function step_metadata_failed() {
+    return step_metadata_state.failed
+}
+
+// Загрузить метаданные один раз на страницу → промис с объектом или null (не загрузились: флаг сбоя
+// step_metadata_failed, предупреждение в консоль, в формах остаются имена полей). Повторный вызов возвращает тот же
+// промис
 function step_load_metadata() {
     if (step_metadata_state.promise == null) {
         step_metadata_state.promise = fetch("../FilterReview/params.json")
@@ -200,6 +212,7 @@ function step_load_metadata() {
                 return data
             })
             .catch((e) => {
+                step_metadata_state.failed = true
                 console.warn("Описания параметров (FilterReview/params.json) не загрузились, в формах шагов 3 и 4 только имена полей — " + e.message)
                 return null
             })

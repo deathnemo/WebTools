@@ -209,6 +209,9 @@ function on_show_step(n) {
     if ((n === 4) && (typeof step4_show === "function")) {
         step4_show()
     }
+    if ((n === 5) && (typeof step5_show === "function")) {
+        step5_show()
+    }
 }
 
 function set_step(n) {
@@ -258,6 +261,9 @@ function init_wizard() {
     }
     if (typeof step4_init === "function") {
         step4_init()
+    }
+    if (typeof step5_init === "function") {
+        step5_init()
     }
     set_step(0)
 }
@@ -335,6 +341,9 @@ function reset() {
     }
     if (typeof step4_reset === "function") {
         step4_reset()
+    }
+    if (typeof step5_reset === "function") {
+        step5_reset()
     }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {

@@ -49,6 +49,8 @@
 <script type="text/javascript" src="steps/step2.js"></script>
 <script type="text/javascript" src="steps/step3.js"></script>
 <script type="text/javascript" src="steps/step4.js"></script>
+<script type="text/javascript" src="steps/memory.js"></script>
+<script type="text/javascript" src="steps/step5.js"></script>
 
 <style>
 /* Токены оформления: только тёмная тема «Графит» (общие правила проектов; решение пользователя 24.10.2026) */
@@ -238,6 +240,25 @@ tr:last-child td{border-bottom:0}
   .pform p{padding-left:0; text-indent:0}
 }
 
+/* Шаг 5 «Сводка»: состояние шага в таблице шагов (как статусы проверок шага 0), отметки принятого, свёрнутый список
+   без изменений, «что перелететь»; шапка печати видна только при печати */
+.step5-state{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; font-weight:600; letter-spacing:.06em; white-space:nowrap}
+.step5-state--ok{color:var(--ok)}
+.step5-state--warn{color:var(--accent)}
+.step5-state--off{color:var(--ink-3)}
+#steps5 td:first-child{white-space:nowrap}
+/* Итог шага на узком экране не сжимается в столбик: таблица прокручивается внутри рамки */
+#steps5 td:nth-child(3){min-width:240px}
+#steps5 td small.step5-flags{color:var(--accent); opacity:1}
+details.more > summary{cursor:pointer; width:max-content; max-width:100%; font-size:13px; color:var(--ink-2)}
+details.more > summary:hover{color:var(--ink)}
+details.more > summary:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+details.more > .tablewrap{margin-top:8px}
+.refly{margin:0; padding:12px 16px 12px 36px; border:1px solid var(--line); background:var(--surface); color:var(--ink-2); font-size:13px}
+.refly li + li{margin-top:6px}
+.refly li::marker{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; color:var(--ink-3)}
+.print-head{display:none; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--ink-2); border-bottom:1px solid var(--line); padding-bottom:6px}
+
 /* Графики */
 .plot{width:100%; height:420px; border:1px solid var(--line); background:var(--surface)}
 .plot--tall{height:640px}
@@ -248,8 +269,12 @@ tr:last-child td{border-bottom:0}
   /* Та же специфичность, что у токенов выше: при печати побеждает как более позднее правило */
   :root{--bg:#fff; --surface:#fff; --surface-2:#fff; --sunk:#fff; --ink:#111; --ink-2:#333; --ink-3:#666; --line:#bbb; --line-soft:#ddd; --shadow:none; color-scheme:light}
   .wizbar,button,label.pickbtn{display:none!important}
+  /* Печать — только сводка шага 5 (решение пользователя 25.10.2026): без вступления, навигации, других шагов и графиков */
+  .hero .lede,.wizbar,.plot,section[data-step]:not([data-step="5"]){display:none!important}
+  .print-head{display:block}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
+  tr{break-inside:avoid}
 }
 </style>
 </head>
@@ -698,7 +723,49 @@ tr:last-child td{border-bottom:0}
   </div>
 </section>
 <section data-step="5" hidden>
-  <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Шаг появится на этапе 5</h2></div>
+  <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Итог прохода</h2></div>
+  <p class="lede">Что принято на шагах 2–4 и что изменится на аппарате: параметры «было → станет», файл .param только с изменёнными и что перелететь после записи. Устаревшее принятое сводка помечает, но не блокирует.</p>
+  <div class="print-head" id="step5_print_head"></div>
+
+  <div class="verdict" id="verdict5" hidden></div>
+  <div class="stats" id="tiles5" hidden></div>
+
+  <div class="head"><span class="eyebrow">Шаги</span><h2>Принятое на шагах 2–4</h2></div>
+  <div class="tablewrap cands" id="steps5" hidden>
+    <table>
+      <thead><tr><th>Шаг</th><th>Состояние</th><th>Итог</th><th>Действие</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="head"><span class="eyebrow">Изменения</span><h2>Параметры: было → станет</h2></div>
+  <div class="tablewrap cands" id="changes5" hidden>
+    <table>
+      <thead><tr><th>Параметр</th><th>Было</th><th>Станет</th><th>Шаг</th><th>Пометка</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="note" id="conflicts5" hidden></p>
+  <details class="more" id="unchanged5" hidden>
+    <summary></summary>
+    <div class="tablewrap cands">
+      <table>
+        <thead><tr><th>Параметр</th><th>Значение</th><th>Шаг</th><th>Пометка</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </details>
+
+  <div class="head" id="refly5_head" hidden><span class="eyebrow">Что перелететь</span><h2>После записи параметров</h2></div>
+  <ol class="refly" id="refly5" hidden></ol>
+
+  <div class="row">
+    <button type="button" id="step5_download" disabled>Скачать .param</button>
+    <button type="button" id="step5_remember" disabled>Запомнить проход</button>
+    <button type="button" id="step5_print">Печать</button>
+  </div>
+  <p class="note" id="step5_note" hidden></p>
+  <p class="note">В файл .param попадают только изменённые параметры: что поменяли в Mission Planner после полёта, файл не перезапишет. Маски HMNCS при 8 битах пишутся со знаком, как их хранит прошивка. Память прохода — изменённые параметры и оценки принятых шагов — хранится в этом браузере по аппарату (строке полётного контроллера из лога); она сохраняется при «Скачать .param» и кнопкой «Запомнить проход», если значения вводятся вручную.</p>
 </section>
 
 </div>

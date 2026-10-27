@@ -242,6 +242,39 @@ function step4_plots(page) {
     })))
 }
 
+// Сводка шага 5: вердикт, плитки, строки таблицы шагов (ячейки и кнопка), изменённые и неизменённые строки,
+// расхождения, «что перелететь», кнопки и устаревшие шаги; ожидаемое из ядра — строки summary_rows(step5_context())
+// (изменённые: имя, «станет», шаг) и имена, которым по метаданным нужна перезагрузка
+function step5_summary(page) {
+    return page.evaluate(() => {
+        const cells = (tr) => [...tr.children].map((td) => td.textContent)
+        const rows = summary_rows(step5_context()).rows
+        const changed = rows.filter((row) => row.changed)
+        return {
+            verdict: document.getElementById('verdict5').textContent,
+            verdict_class: document.getElementById('verdict5').className,
+            tiles: [...document.querySelectorAll('#tiles5 .stat')].map((tile) => ({ key: tile.querySelector('.stat__k').textContent,
+                value: tile.querySelector('.stat__v').textContent, sub: tile.querySelector('.stat__s')?.textContent ?? null })),
+            steps: [...document.querySelectorAll('#steps5 tbody tr')].map((tr) => ({ cells: cells(tr), button: tr.querySelector('button')?.textContent ?? null })),
+            changes: [...document.querySelectorAll('#changes5 tbody tr')].map(cells),
+            expected: changed.map((row) => [row.name, step_value_text(row.value), String(row.step)]),
+            unchanged_summary: document.querySelector('#unchanged5 summary').textContent,
+            unchanged: document.querySelectorAll('#unchanged5 tbody tr').length,
+            expected_unchanged: rows.length - changed.length,
+            conflicts: document.getElementById('conflicts5').hidden ? null : document.getElementById('conflicts5').textContent,
+            refly: [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent),
+            reboot: summary_reboot_names(changed.map((row) => row.name), step_metadata(), step_find_metadata),
+            disabled: ['step5_download', 'step5_remember'].map((id) => document.getElementById(id).disabled),
+            stale: [2, 3, 4].map((n) => step_accepted_stale(n)),
+        }
+    })
+}
+
+// Ширина содержимого страницы и окна: без горизонтальной прокрутки первая не больше второй
+function page_fits(page) {
+    return page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth])
+}
+
 // Ключ значений формы и ключ значений варианта id — одинаковые, если вариант применён
 function form_matches_variant(page, id) {
     return page.evaluate((id) => step2_key(values_from_form()) === step2_key(step2_rows().find((r) => r.id === id).values), id)
@@ -649,6 +682,23 @@ async function main() {
         assert.match(flagged.cls, /verdict--warn/, 'принятое хуже лога — предупреждение')
         assert.match(flagged.text, /^Принято, но хуже лога: /, flagged.text)
         await assert_accepted_fresh(page, 2)
+        // Память прохода, пока принятое шага 2 актуально: его оценки — числа (формы метрик страницы step2_metrics_summary
+        // и ядра passmem_estimates2 совпадают), шаги 3–4 не приняты — null. Запись убирается: сводка шага 5 ниже проверяет
+        // запись, сделанную «Скачать .param»
+        const mem2 = await page.evaluate(() => {
+            const text = memory_save()
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            localStorage.removeItem('tunewizard_v1')
+            return { text: text, keys: Object.keys(data.passes), estimates: data.passes[passmem_aircraft_key(state.info, state.file_name)].estimates }
+        })
+        assert.equal(mem2.text, 'Память прохода сохранена.')
+        assert.deepEqual(mem2.keys, ['fc:StellarH7V2 0034002E 35335104 39363630'], 'проход — по строке контроллера')
+        for (const part of ['log', 'accepted']) {
+            for (const field of ['band_dB', 'lag30_ms']) {
+                assert.ok(Number.isFinite(mem2.estimates[2][part][field]), 'оценка шага 2 ' + part + '.' + field + ' — число: ' + JSON.stringify(mem2.estimates[2]))
+            }
+        }
+        assert.deepEqual([mem2.estimates[3], mem2.estimates[4]], [null, null], 'шаги 3–4 не приняты — оценок нет')
 
         // Шаг 3: варианты низкочастотных фильтров, размер винта, графики, «Принять». Notch-база — принятое на шаге 2
         // (выше принят вариант хуже лога), интервал сдвинут на 20 с, поэтому числа сравниваются с «Как в логе» того же
@@ -1127,6 +1177,119 @@ async function main() {
         await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
 
+        // Шаг 5 «Сводка» после устаревания: шаг 2 принят на сдвинутом интервале, а интервал вернули — устарел; шаг 3 принят
+        // заново (INS_GYRO_FILTER 39) — актуален; шаг 4 устарел из-за нового принятого шага 3; у шага 4 все оси без
+        // надёжного измерения. Метаданные параметров уже загружены шагами 3–4 — пункт о перезагрузке считается по ним
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'], 'открыт шаг 5')
+        await page.waitForFunction(() => step_metadata() != null, null, { timeout: 30000 })
+        const v5 = await step5_summary(page)
+        assert.deepEqual(v5.stale, [true, false, true], 'устарели шаги 2 и 4, шаг 3 актуален')
+        assert.match(v5.verdict_class, /verdict--warn/, 'сводка — предупреждение')
+        assert.match(v5.verdict, /^Изменено \d+ параметр\S*, но проверьте: принятое шагов 2, 4 устарело — примите их заново;/, v5.verdict)
+        assert.match(v5.verdict, /; оси шага 4 без надёжного измерения: крен, тангаж, рыскание — нужен тестовый полёт\.$/, v5.verdict)
+        assert.deepEqual(v5.tiles.map((tile) => [tile.key, tile.value]), [['Аппарат', 'StellarH7V2'], ['Лог', path.basename(log_path)],
+                         ['Изменено', String(v5.expected.length)], ['Приняты шаги', '2, 3, 4']], 'плитки сводки')
+        assert.equal(v5.tiles[0].sub, 'QUAD/X_REV · 0034002E 35335104 39363630', 'аппарат: плата — значением, рама и номер процессора — подписью')
+        assert.equal(v5.tiles[3].sub, 'устарело: 2, 4')
+        assert.deepEqual(v5.steps.map((row) => [row.cells[0], row.cells[1], row.button]),
+                         [['Шаг 2Гармонический notch', 'устарело', 'К шагу 2'], ['Шаг 3Низкочастотные фильтры', 'принят', null], ['Шаг 4PID по осям', 'устарело', 'К шагу 4']],
+                         'таблица шагов: устаревшие — с кнопкой перехода')
+        assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или принятое на шагах 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
+                     v5.steps[2].cells[2])
+        assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-][\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
+        // Изменения — изменённые строки итога (имя, «станет», шаг); INS_GYRO_FILTER — 39 от шага 3, расхождение с шагом 2
+        assert.deepEqual(v5.changes.map((cells) => [cells[0], cells[2], cells[3]]), v5.expected, 'строки изменений — изменённые строки итога')
+        assert.ok(v5.expected.some(([name, value, step]) => (name === 'INS_GYRO_FILTER') && (value === '39') && (step === '3')), 'INS_GYRO_FILTER = 39 от шага 3')
+        assert.match(v5.conflicts, /^INS_GYRO_FILTER: шаг 2 — [\d.]+, шаг 3 — 39, в файл идёт шаг 3\.$/, v5.conflicts)
+        assert.equal(v5.unchanged, v5.expected_unchanged, 'неизменённые — в свёрнутом списке')
+        assert.match(v5.unchanged_summary, new RegExp('^Без изменений — ' + v5.expected_unchanged + ' параметр'), v5.unchanged_summary)
+        // Что перелететь: тестовый полёт (все оси ненадёжны), перезагрузка — по метаданным, последним — «слетайте тем же профилем»
+        assert.match(v5.refly[v5.refly.length - 1], /^Слетайте тем же профилем/, 'последний пункт: ' + v5.refly.join(' | '))
+        assert.ok(v5.refly.some((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт: Acro')), 'пункт тестового полёта: ' + v5.refly.join(' | '))
+        assert.equal(v5.refly.some((text) => text.startsWith('После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' + v5.reboot.join(', '))),
+                     v5.reboot.length > 0, 'пункт о перезагрузке — по метаданным: ' + JSON.stringify(v5.reboot))
+        assert.deepEqual(v5.disabled, [false, false], 'изменения есть — «Скачать .param» и «Запомнить проход» доступны')
+
+        // «К шагу 4» открывает шаг 4
+        await page.click('#steps5 button[data-goto="4"]')
+        await wait_overlay(page)
+        assert.deepEqual(await visible_steps(page), ['4'], '«К шагу 4» открывает шаг 4')
+        await page.click('#wizbar button:nth-child(6)')
+        assert.deepEqual(await visible_steps(page), ['5'])
+
+        // «Скачать .param»: только изменённые параметры итога (устаревшее не блокирует), затем память прохода
+        const [download5] = await Promise.all([page.waitForEvent('download'), page.click('#step5_download')])
+        const file5_name = path.basename(log_path).replace(/\.[^.]*$/, '') + '_tune.param'
+        assert.equal(download5.suggestedFilename(), file5_name, 'имя файла — имя лога + _tune.param')
+        const file5 = await page.evaluate((text) => {
+            const ctx = step5_context()
+            const expected = summary_param_values(summary_rows(ctx).rows, ctx.bits)
+            const parsed = parse_param_file(text)
+            return { names: Object.keys(parsed).sort(), expected: Object.keys(expected).sort(),
+                     same: Object.keys(expected).every((name) => Math.fround(parsed[name]) === Math.fround(expected[name])),
+                     count_text: step5_count(Object.keys(parsed).length, step5_param_forms) }
+        }, fs.readFileSync(await download5.path(), 'utf8'))
+        assert.deepEqual(file5.names, file5.expected, 'в .param — изменённые параметры итога')
+        assert.equal(file5.same, true, 'значения .param — значения итога (маски HMNCS — как summary_param_values)')
+        assert.equal(file5.names.length, v5.expected.length, 'неизменённое в файл не попало')
+        assert.equal(await page.textContent('#step5_note'), 'Файл ' + file5_name + ': ' + file5.count_text + '. Память прохода сохранена.', 'заметка о файле и памяти')
+        // Память прохода: проход аппарата по строке контроллера; оценки устаревших шагов (2 и 4; у шага 2 ещё и значение
+        // INS_GYRO_FILTER перекрыто шагом 3) — null, актуального шага 3 — числа
+        const mem5 = await page.evaluate(() => {
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            return { version: data.version, keys: Object.keys(data.passes), pass: data.passes['fc:StellarH7V2 0034002E 35335104 39363630'] ?? null }
+        })
+        assert.equal(mem5.version, 1)
+        assert.deepEqual(mem5.keys, ['fc:StellarH7V2 0034002E 35335104 39363630'], 'в памяти — проход этого аппарата')
+        assert.deepEqual([mem5.pass.board, mem5.pass.frame, mem5.pass.file_name], ['StellarH7V2 0034002E 35335104 39363630', 'QUAD/X_REV', path.basename(log_path)])
+        assert.deepEqual(mem5.pass.changed.map((change) => change.name).sort(), file5.names, 'в проходе — изменённые параметры')
+        assert.deepEqual([mem5.pass.estimates[2], mem5.pass.estimates[4]], [null, null], 'оценки устаревших шагов 2 и 4 — null')
+        const est3 = mem5.pass.estimates[3]
+        assert.ok([est3.log.gyro_band_dB, est3.accepted.gyro_band_dB, est3.log.lag30_ms.roll.P, est3.log.lag30_ms.pitch.D, est3.log.dterm_dB.roll].every(Number.isFinite),
+                  'оценки актуального шага 3 — числа: ' + JSON.stringify(est3))
+        // «Запомнить проход» — та же память без файла
+        await page.click('#step5_remember')
+        assert.equal(await page.textContent('#step5_note'), 'Память прохода сохранена.')
+
+        // «Печать»: шапка печати с логом, аппаратом и датой, затем диалог печати (здесь — заглушка window.print)
+        await page.evaluate(() => {
+            window.__print_calls = 0
+            window.print = () => { window.__print_calls++ }
+        })
+        await page.click('#step5_print')
+        assert.equal(await page.evaluate(() => window.__print_calls), 1, '«Печать» вызывает window.print')
+        const print_head = await page.textContent('#step5_print_head')
+        assert.ok(print_head.startsWith('Мастер настройки · ' + path.basename(log_path) + ' · StellarH7V2 0034002E 35335104 39363630, QUAD/X_REV · '), print_head)
+        assert.match(print_head, / · \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}$/, 'дата печати: ' + print_head)
+        // Правила печати: только сводка шага 5 — без вступления, навигации, шага 0, графиков и кнопок; шапка печати видна
+        await page.emulateMedia({ media: 'print' })
+        const print5 = await page.evaluate(() => {
+            const display = (el) => getComputedStyle(el).display
+            return {
+                wizbar: display(document.querySelector('.wizbar')),
+                lede: display(document.querySelector('.hero .lede')),
+                step0: display(document.querySelector('section[data-step="0"]')),
+                plots: [...document.querySelectorAll('.plot')].map(display).filter((d) => d !== 'none').length,
+                buttons: [...document.querySelectorAll('section[data-step="5"] button')].map(display).filter((d) => d !== 'none').length,
+                bg: getComputedStyle(document.body).backgroundColor,
+            }
+        })
+        assert.deepEqual(print5, { wizbar: 'none', lede: 'none', step0: 'none', plots: 0, buttons: 0, bg: 'rgb(255, 255, 255)' }, 'печать — только сводка на белом фоне')
+        assert.equal(await page.isVisible('#step5_print_head'), true, 'шапка печати видна')
+        await page.screenshot({ path: path.join(shots, 'step5-print.png'), fullPage: true })
+        await page.emulateMedia({ media: 'screen' })
+        assert.equal(await page.isVisible('#step5_print_head'), false, 'на экране шапки печати нет')
+        // Без горизонтальной прокрутки страницы — и на узком окне (таблицы прокручиваются внутри своих рамок)
+        const [fit_w, fit_c] = await page_fits(page)
+        assert.ok(fit_w <= fit_c, 'шаг 5: ширина страницы ' + fit_w + ' px — окно ' + fit_c + ' px')
+        await page.screenshot({ path: path.join(shots, 'step5.png'), fullPage: true })
+        await page.setViewportSize({ width: 390, height: 1000 })
+        const [narrow_w, narrow_c] = await page_fits(page)
+        assert.ok(narrow_w <= narrow_c, 'шаг 5 на узком окне: ширина страницы ' + narrow_w + ' px — окно ' + narrow_c + ' px')
+        await page.setViewportSize({ width: 1400, height: 1000 })
+        await page.click('#wizbar button:nth-child(1)')
+
         // Версия фильтра — во входах шагов 2–3: другая версия на шаге 1 («Пересчитать», FFT тот же) меняет отпечаток шага 2 и
         // делает принятое шага 3 устаревшим, возврат версии — снова актуальным (шаг 2 уже устарел из-за интервала, у него —
         // сам отпечаток до и после; раскладку ключа проверяют юнит-тесты)
@@ -1216,7 +1379,7 @@ async function main() {
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаги 0–4 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+        console.log('tunewizard-browser: шаги 0–5 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
         console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
         console.log('  шаг 2: варианты ' + v1.titles.join('; ') + '; рекомендован ' + v1.best_id + '; вердикт «' + v1.verdict + '»')
@@ -1226,6 +1389,8 @@ async function main() {
             ((a.failed.length == 1) ? 'не пройдена ' : 'не пройдены ') + a.failed.join(', ')).join('; ') + '; итог — измерение ненадёжно на всех осях, прогноз ' +
             'недостоверен (правил и прогноза нет); под подменой у тангажа (фильтры шагов 2–3, без ложного «неустойчив») — варианты ' + sub_lines.titles.join('; ') + ', рекомендуется «' +
             sub_lines.recommended.join('; ') + '», бодэ ' + sub_lines.log)
+        console.log('  шаг 5: изменено ' + v5.expected.length + ', без изменений ' + v5.expected_unchanged + '; вердикт «' + v5.verdict + '»; что перелететь — пунктов ' +
+            v5.refly.length)
     } catch (e) {
         // При падении показать накопленные сообщения консоли и сервера — иначе причина теряется
         if (problems.length) {

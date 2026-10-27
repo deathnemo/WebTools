@@ -1,10 +1,11 @@
 // Тесты общего модуля шагов мастера настройки (TuneWizard/steps/common.js) без браузера: число со знаком, запись
 // значения параметра и ячейка таблицы, перехват ошибок действия в вердикт, вложенный step_run под оверлеем внешнего,
-// досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна загрузка), флаг нажатой кнопки мыши,
-// каркас механизма правок полей и отпечаток входов принятого шага. Скрипт классический (общая глобальная область),
-// поэтому загружается как на странице — через vm.runInThisContext (как в tests/tunewizard-core.test.cjs). Глобалы
-// страницы, которые он зовёт (document, window, fetch, loading_call, state, html_escape, step1, step1_ready,
-// step1_prepare, step2_param_names, step4_param_names), — заглушки ниже; модуль обращается к ним только при вызове.
+// досчёт расчёта шага 1, «Открыть в …», описания параметров из метаданных (одна загрузка, флаг сбоя), флаг нажатой
+// кнопки мыши, каркас механизма правок полей, контекст итога и отпечаток входов принятого шага (и «устарело» без лога).
+// Скрипт классический (общая глобальная область), поэтому загружается как на странице — через vm.runInThisContext
+// (как в tests/tunewizard-core.test.cjs). Глобалы страницы, которые он зовёт (document, window, fetch, loading_call,
+// state, html_escape, step1, step1_ready, step1_prepare, step2_param_names, step4_param_names), — заглушки ниже; модуль
+// обращается к ним только при вызове.
 // param_to_string — настоящий, из Libraries/Param_Helpers.js; summary_inputs_key и summary_stale (core/summary.js, с его
 // зависимостями), lowpass_param_names (core/lowpass.js) и hmncs_bits (core/params.js) — настоящие, в порядке страницы.
 const test = require('node:test')
@@ -185,24 +186,36 @@ test('step_load_metadata: один запрос на страницу, повт�
         return { ok: true, json: async () => data }
     }
     assert.equal(step_metadata(), null)
+    assert.equal(step_metadata_failed(), false, 'до загрузки — не сбой')
     const first = step_load_metadata()
     assert.equal(step_load_metadata(), first, 'тот же промис')
+    assert.equal(step_metadata_failed(), false, 'пока грузятся — не сбой')
     assert.equal(await first, data)
     assert.equal(await step_load_metadata(), data)
     assert.equal(calls, 1)
     assert.equal(step_metadata(), data)
+    assert.equal(step_metadata_failed(), false, 'загрузились — не сбой')
 })
 
-test('step_load_metadata: ошибка загрузки — null и предупреждение в консоль, исключения нет', async (t) => {
+test('step_load_metadata: ошибка загрузки — null, флаг сбоя и предупреждение в консоль, исключения нет', async (t) => {
     const saved = vm.runInThisContext('({ ...step_metadata_state })')
-    vm.runInThisContext('step_metadata_state.promise = null; step_metadata_state.data = null')
+    vm.runInThisContext('step_metadata_state.promise = null; step_metadata_state.data = null; step_metadata_state.failed = false')
     const warned = t.mock.method(console, 'warn', () => {})
     globalThis.fetch = async () => ({ ok: false, status: 404, statusText: 'Not Found', url: '../FilterReview/params.json' })
-    assert.equal(await step_load_metadata(), null)
+    const loading = step_load_metadata()
+    // «Грузятся» и «не загрузились» step_metadata() не различает (null в обоих случаях) — различает флаг сбоя
+    assert.equal(step_metadata_failed(), false, 'пока грузятся — не сбой')
+    assert.equal(await loading, null)
     assert.equal(step_metadata(), null)
+    assert.equal(step_metadata_failed(), true, 'не загрузились — сбой')
     assert.equal(warned.mock.callCount(), 1)
     assert.match(warned.mock.calls[0].arguments[0], /не загрузились.*HTTP 404 Not Found/)
-    vm.runInThisContext('step_metadata_state.promise = null; step_metadata_state.data = null')
+    // Ошибка самого запроса (сеть) — тоже сбой
+    vm.runInThisContext('step_metadata_state.promise = null; step_metadata_state.data = null; step_metadata_state.failed = false')
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch') }
+    assert.equal(await step_load_metadata(), null)
+    assert.equal(step_metadata_failed(), true, 'сеть недоступна — сбой')
+    vm.runInThisContext('step_metadata_state.promise = null; step_metadata_state.data = null; step_metadata_state.failed = false')
     Object.assign(vm.runInThisContext('step_metadata_state'), saved)
 })
 
@@ -350,4 +363,34 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
     state.steps[3] = { accepted: accepted_of(lowpass_param_names(state.params)) }
     state.steps[3].inputs = step_inputs_key(3)
     assert.deepEqual(fresh(), [false, false, false], 'шаг 3 принят «Как в логе» — шаг 4 не устарел')
+
+    // Контекст итога и отпечатка — один построитель: версия фильтра и размер маски HMNCS — от state.spectrum.filter_version
+    const ctx = step_summary_context()
+    assert.equal(ctx.filter_version, 2)
+    assert.equal(ctx.bits, 8, 'версия фильтра 2, в логе нет INS_RAW_LOG_OPT — маска HMNCS 8 бит')
+    assert.equal(ctx.steps, state.steps)
+    assert.equal(ctx.params, state.params)
+    assert.deepEqual([ctx.start, ctx.end, ctx.fft_key], [10, 100, 'batch:1'])
+})
+
+test('step_accepted_stale: без лога — false сразу, контекст итога не строится', () => {
+    const saved = { settings: state.settings, spectrum: state.spectrum, steps: state.steps, params: state.params }
+    try {
+        // Как после reset(): лога нет (state.params null), принятого нет — построитель контекста бросил бы
+        // (lowpass_param_names(null))
+        state.params = null
+        state.steps = []
+        state.settings = { start: 0, end: 0 }
+        state.spectrum = { filter_version: null }
+        assert.throws(() => step_summary_context(), 'без лога построитель контекста бросает')
+        for (const n of [2, 3, 4]) {
+            assert.equal(step_accepted_stale(n), false, 'шаг ' + n + ' без лога — не устарел')
+        }
+        // Шаг не принят (null), а у других шагов принятое есть — тоже false без построения контекста
+        state.steps = [undefined, undefined, { accepted: {}, inputs: 'x' }, null]
+        assert.equal(step_accepted_stale(3), false, 'шаг 3 не принят (null) — не устарел')
+        assert.equal(step_accepted_stale(4), false, 'шаг 4 не принят (нет записи) — не устарел')
+    } finally {
+        Object.assign(state, saved)
+    }
 })
