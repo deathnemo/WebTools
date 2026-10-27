@@ -157,8 +157,10 @@ function summary_file_name(log_name) {
 // Ключ FFT и версия фильтра — только у шагов 2–3: они всегда считают шаг 1 до «Принять» (версия фильтра меняет и
 // форму шага 2: ниже 4 ESCMSK — 0); у шага 4 на их месте null. Ключ FFT: шаг 4 можно принять, не открывая шаг 1, и
 // ключ, появившийся позже, давал бы ложное «устарело». Версия фильтра: шаг 4 зависит от неё только через фильтры
-// гироскопа и устаревает через изменённое принятое шагов 2–3. Принятое шага k — пары
-// [имя, значение] с именами по алфавиту (как candidate_key), значения как есть; не принят — null.
+// гироскопа и устаревает через изменённое принятое шагов 2–3; если после смены версии шаги 2–3 приняли заново с теми
+// же значениями, шаг 4 устаревшим не станет — допустимо, версию меняют редко [наше].
+// Принятое шага k — пары [имя, значение] с именами по алфавиту (как candidate_key), значения как есть;
+// не принят — null.
 // Ключи расчёта шагов (calc_key) не годятся: в них окно FFT и выбор набора, их смена давала бы ложное «устарело» [наше]
 function summary_inputs_key(n, ctx) {
     const accepted = []
@@ -188,22 +190,39 @@ function summary_notch_enable_hint(enable_name, log_value) {
         "затем загрузите файл ещё раз."
 }
 
-// «Что перелететь»: пункты [{ source, text }] по порядку [решение пользователя 25.10.2026].
-// ctx = { checks, rows, steps, reboot_names, test_flight }: checks — проверки шага 0 (state.checks: { status, title,
-// fix }; null — проверок нет), rows — строки итога (summary_rows), steps — state.steps, reboot_names — имена, которым
-// нужна перезагрузка (summary_reboot_names), test_flight — совет тестового полёта (step4_test_flight_short).
-// 1. "check" — проверки warn или fail с непустым fix: «title: fix»;
+// Законченная фраза: точка в конце, если фраза не кончается на . ! ? — текст с точкой (будущий fix проверки) не
+// получит вторую
+function summary_period(text) {
+    return /[.!?]$/.test(text) ? text : text + "."
+}
+
+// «Что перелететь»: пункты [{ source, text }] по порядку, каждый текст — фраза с точкой (summary_period)
+// [решение пользователя 25.10.2026]. ctx = { checks, rows, reboot_names, unreliable_axes, test_flight }:
+// - checks — проверки шага 0 (state.checks: { status, title, fix }; null — проверок нет);
+// - rows — строки итога, summary_rows(…).rows;
+// - reboot_names — имена, которым нужна перезагрузка (summary_reboot_names): [] — метаданные есть, перезагрузка не
+//   нужна; null — метаданные не загрузились;
+// - unreliable_axes — ключи осей шага 4 без надёжного измерения (roll | pitch | yaw; [] или null — таких нет). Страница
+//   берёт их из принятого шага 4 или из посчитанного: совет нужен и тогда, когда менять нечего и «Принять» на шаге 4
+//   не нажимали [наше];
+// - test_flight — совет тестового полёта (step4_test_flight_short).
+// Пункты:
+// 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия);
 // 2. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
 //    summary_notch_enable_hint;
-// 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк;
-// 4. "test_flight" — шаг 4 принят и у осей metrics.reliable === false: «оси через запятую: » + test_flight, оси —
-//    pidtune_axes[ось].title в порядке pidtune_axes;
-// 5. "repeat" — всегда последним: слетать тем же профилем и загрузить лог
+// 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
+//    есть — общий пункт: свериться с пометкой Reboot required в Mission Planner [наше];
+// 4. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
+//    в порядке pidtune_axes, первая с заглавной;
+// 5. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
+//    изменений проверять нечего, и список может быть пустым [наше]
 function summary_refly(ctx) {
     const items = []
+    const add = (source, text) => items.push({ source: source, text: summary_period(text) })
+
     for (const check of ctx.checks ?? []) {
         if (((check.status === "warn") || (check.status === "fail")) && ((check.fix ?? "") !== "")) {
-            items.push({ source: "check", text: check.title + ": " + check.fix })
+            add("check", check.title + " — " + check.fix)
         }
     }
 
@@ -211,37 +230,44 @@ function summary_refly(ctx) {
     const enables = notch_param_names().map((notch) => notch.enable)
     for (const row of changed) {
         if (enables.includes(row.name) && summary_notch_enabling(row.log, row.value)) {
-            items.push({ source: "notch", text: summary_notch_enable_hint(row.name, row.log) })
+            add("notch", summary_notch_enable_hint(row.name, row.log))
         }
     }
 
-    const reboot = changed.map((row) => row.name).filter((name) => ctx.reboot_names.includes(name))
-    if (reboot.length > 0) {
-        const text = "После записи перезагрузите полётный контроллер: изменены " + reboot.join(", ") +
-            " — они действуют после перезагрузки."
-        items.push({ source: "reboot", text: text })
-    }
-
-    const step4 = ctx.steps[4]
-    if (step4 != null) {
-        const axes = Object.keys(pidtune_axes).filter((axis) => step4.axes?.[axis]?.metrics?.reliable === false)
-        if (axes.length > 0) {
-            const text = axes.map((axis) => pidtune_axes[axis].title).join(", ") + ": " + ctx.test_flight
-            items.push({ source: "test_flight", text: text })
+    if (ctx.reboot_names == null) {
+        if (changed.length > 0) {
+            add("reboot", "Описания параметров не загрузились, и мастер не знает, какие изменённые параметры " +
+                "действуют только после перезагрузки: проверьте пометку Reboot required в Mission Planner и при " +
+                "необходимости перезагрузите полётный контроллер")
+        }
+    } else {
+        const reboot = changed.map((row) => row.name).filter((name) => ctx.reboot_names.includes(name))
+        if (reboot.length > 0) {
+            add("reboot", "После записи перезагрузите полётный контроллер — только после перезагрузки действуют: " +
+                reboot.join(", "))
         }
     }
 
-    items.push({ source: "repeat", text: "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, " +
-        "что применено, шаги 2–4 — сбылся ли прогноз." })
+    const axes = Object.keys(pidtune_axes).filter((axis) => (ctx.unreliable_axes ?? []).includes(axis))
+    if (axes.length > 0) {
+        const titles = axes.map((axis) => pidtune_axes[axis].title).join(", ")
+        add("test_flight", titles[0].toUpperCase() + titles.slice(1) + " — " + ctx.test_flight)
+    }
+
+    if (changed.length > 0) {
+        add("repeat", "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–4 — " +
+            "сбылся ли прогноз")
+    }
     return items
 }
 
 // Имена из names, которым после записи нужна перезагрузка: в метаданных параметров (FilterReview/params.json —
 // описания ArduPilot) RebootRequired = "True" [код]. find(metadata, name) → запись или null (страница передаёт
-// step_find_metadata); metadata null (не загрузились) — [], find не зовётся
+// step_find_metadata). [] — метаданные есть, перезагрузка не нужна; metadata null (не загрузились) — null, а не []:
+// summary_refly тогда даёт общий пункт; find не зовётся
 function summary_reboot_names(names, metadata, find) {
     if (metadata == null) {
-        return []
+        return null
     }
     return names.filter((name) => find(metadata, name)?.RebootRequired === "True")
 }

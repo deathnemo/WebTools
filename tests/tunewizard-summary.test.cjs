@@ -478,41 +478,91 @@ test('summary_inputs_key: у шага 2 не зависит от шага 3, у 
 
 // ---------------------------------------------------------------- что перелететь
 
-// Текст подсказки step2_second_notch_hint до выноса в ядро (steps/step2.js) — дословно, при INS_HNTC2_ENABLE = 0
-// в логе
-const STEP2_HINT_OLD = 'В логе INS_HNTC2_ENABLE = 0: на аппарате сначала запишите INS_HNTC2_ENABLE = 1 ' +
+// Подсказка о включаемом втором notch при INS_HNTC2_ENABLE = 0 в логе — дословно текст step2_second_notch_hint
+// до выноса в ядро (steps/step2.js)
+const HNTC2_ENABLE_HINT = 'В логе INS_HNTC2_ENABLE = 0: на аппарате сначала запишите INS_HNTC2_ENABLE = 1 ' +
     'и обновите список параметров — остальные INS_HNTC2_* появятся только после этого, затем загрузите файл ещё раз.'
 
-const REPEAT = { source: 'repeat',
-    text: 'Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–4 — сбылся ли прогноз.' }
+// Совет тестового полёта — подставной (страница передаёт step4_test_flight_short, он без точки и с двоеточием)
+const TEST_FLIGHT = 'нужен тестовый полёт: Acro'
 
-// Совет тестового полёта — подставной (страница передаёт step4_test_flight_short)
-const TEST_FLIGHT = 'нужен тестовый полёт'
-
-// Вход summary_refly: строки итога — summary_rows по тем же принятым шагам
-function refly_ctx({ checks = [], steps = [], log = BASE_LOG, filter_version = 2, reboot_names = [] } = {}) {
+// Вход summary_refly: строки итога — summary_rows по принятым шагам
+function refly_ctx({ checks = [], steps = [], log = BASE_LOG, filter_version = 2, reboot_names = [], unreliable_axes = [] } = {}) {
     return { checks: checks, rows: summary_rows(rows_ctx({ log: log, steps: steps, filter_version: filter_version })).rows,
-             steps: steps, reboot_names: reboot_names, test_flight: TEST_FLIGHT }
+             reboot_names: reboot_names, unreliable_axes: unreliable_axes, test_flight: TEST_FLIGHT }
+}
+
+// Принятый шаг 2: правки changes поверх лога log
+function steps_with2(changes, log = BASE_LOG) {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, changes) }
+    return steps
+}
+
+function sources_of(items) {
+    return items.map((item) => item.source)
 }
 
 function of_source(items, source) {
     return items.filter((item) => item.source === source)
 }
 
+// Имена параметров в тексте пункта — состав пункта без привязки к формулировке
+function param_names_in(text) {
+    return text.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) ?? []
+}
+
+test('summary_period: точка, если фраза не кончается на . ! ?', () => {
+    assert.equal(summary_period('Проверьте крепление'), 'Проверьте крепление.')
+    assert.equal(summary_period('Проверьте крепление.'), 'Проверьте крепление.')
+    assert.equal(summary_period('Готово!'), 'Готово!')
+    assert.equal(summary_period('Почему?'), 'Почему?')
+})
+
 test('summary_notch_enable_hint: текст подсказки шага 2 дословно; ENABLE нет в логе — 0; префикс — имя без ENABLE', () => {
-    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', 0), STEP2_HINT_OLD)
-    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', null), STEP2_HINT_OLD)
+    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', 0), HNTC2_ENABLE_HINT)
+    assert.equal(summary_notch_enable_hint('INS_HNTC2_ENABLE', null), HNTC2_ENABLE_HINT)
     assert.equal(summary_notch_enable_hint('INS_HNTCH_ENABLE', -1),
         'В логе INS_HNTCH_ENABLE = -1: на аппарате сначала запишите INS_HNTCH_ENABLE = 1 ' +
         'и обновите список параметров — остальные INS_HNTCH_* появятся только после этого, затем загрузите файл ещё раз.')
 })
 
-test('summary_refly: ничего не принято и проверок нет — только «repeat»; checks null — как пустой список', () => {
-    assert.deepEqual(summary_refly(refly_ctx()), [REPEAT])
-    assert.deepEqual(summary_refly({ ...refly_ctx(), checks: null }), [REPEAT])
+// Единственное место, где тексты пунктов проверяются целиком; в остальных тестах — состав
+test('summary_refly: тексты пунктов — законченные фразы с точкой; порядок — проверки, notch, перезагрузка, тестовый полёт, повтор', () => {
+    const checks = [
+        { id: 'pid_log', status: 'warn', title: 'Сообщения PID', text: 'PID с частотой 10 Гц',
+          fix: 'Включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter пишет PID с частотой 10 Гц' },
+        { id: 'vibe', status: 'fail', title: 'Вибрации', text: 'высокие', fix: 'Проверьте крепление автопилота.' },
+    ]
+    const steps = steps_with2({ SCHED_LOOP_RATE: 800, INS_HNTCH_HMNCS: 7, INS_HNTC2_ENABLE: 1 })
+    const ctx = refly_ctx({ checks: checks, steps: steps, reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'],
+        unreliable_axes: ['roll', 'pitch'] })
+    assert.deepEqual(summary_refly(ctx), [
+        { source: 'check', text: 'Сообщения PID — Включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter ' +
+            'пишет PID с частотой 10 Гц.' },
+        { source: 'check', text: 'Вибрации — Проверьте крепление автопилота.' },
+        { source: 'notch', text: HNTC2_ENABLE_HINT },
+        { source: 'reboot', text: 'После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' +
+            'SCHED_LOOP_RATE, INS_HNTCH_HMNCS.' },
+        { source: 'test_flight', text: 'Крен, тангаж — нужен тестовый полёт: Acro.' },
+        { source: 'repeat', text: 'Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, ' +
+            'шаги 2–4 — сбылся ли прогноз.' },
+    ])
+    // Метаданные не загрузились — общий пункт перезагрузки
+    assert.deepEqual(of_source(summary_refly({ ...ctx, reboot_names: null }), 'reboot'), [{ source: 'reboot',
+        text: 'Описания параметров не загрузились, и мастер не знает, какие изменённые параметры действуют только после ' +
+            'перезагрузки: проверьте пометку Reboot required в Mission Planner и при необходимости перезагрузите ' +
+            'полётный контроллер.' }])
 })
 
-test('summary_refly: проверки warn и fail с fix — «title: fix» по порядку; ok и без fix — нет', () => {
+test('summary_refly: ничего не изменено, проверок и ненадёжных осей нет — список пуст; checks null — как пустой', () => {
+    assert.deepEqual(summary_refly(refly_ctx()), [])
+    assert.deepEqual(summary_refly({ ...refly_ctx(), checks: null }), [])
+    // Шаг 2 принят без изменений — тоже пусто
+    assert.deepEqual(summary_refly(refly_ctx({ steps: steps_with2({}) })), [])
+})
+
+test('summary_refly: проверки warn и fail с fix — по порядку проверок; ok и без fix — нет', () => {
     const checks = [
         { id: 'pid_log', status: 'warn', title: 'Сообщения PID', text: 'PID с частотой 10 Гц', fix: 'Включите бит ATTITUDE_FAST' },
         { id: 'vibe', status: 'ok', title: 'Вибрации', text: 'в норме', fix: 'не показывать' },
@@ -521,101 +571,104 @@ test('summary_refly: проверки warn и fail с fix — «title: fix» п�
         { id: 'tracking', status: 'warn', title: 'Слежение', text: 'нет' },
         { id: 'hover_throttle', status: 'fail', title: 'Газ висения', text: 'высокий', fix: 'Облегчите аппарат' },
     ]
-    assert.deepEqual(summary_refly(refly_ctx({ checks: checks })), [
-        { source: 'check', text: 'Сообщения PID: Включите бит ATTITUDE_FAST' },
-        { source: 'check', text: 'Газ висения: Облегчите аппарат' },
-        REPEAT,
-    ])
+    const items = summary_refly(refly_ctx({ checks: checks }))
+    assert.deepEqual(sources_of(items), ['check', 'check'])
+    // Какой проверке принадлежит пункт — по её fix в тексте
+    assert.deepEqual(items.map((item) => checks.find((c) => (c.fix ?? '') !== '' && item.text.includes(c.fix)).id),
+        ['pid_log', 'hover_throttle'])
 })
 
-test('summary_refly: включение второго notch — пункт с подсказкой шага 2 (INS_HNTC2_ENABLE, префикс INS_HNTC2_)', () => {
-    const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTC2_ENABLE: 1, INS_HNTC2_FREQ: 153 }) }
+test('summary_refly: включение второго notch — пункт с подсказкой для INS_HNTC2_ENABLE', () => {
+    const steps = steps_with2({ INS_HNTC2_ENABLE: 1, INS_HNTC2_FREQ: 153 })
     const items = summary_refly(refly_ctx({ steps: steps }))
-    assert.deepEqual(items, [{ source: 'notch', text: STEP2_HINT_OLD }, REPEAT])
-    assert.match(items[0].text, /INS_HNTC2_ENABLE = 1/)
-    assert.match(items[0].text, /остальные INS_HNTC2_\* появятся/)
+    assert.deepEqual(sources_of(items), ['notch', 'repeat'])
+    assert.equal(items[0].text, summary_notch_enable_hint('INS_HNTC2_ENABLE', 0))
 
-    // ENABLE нет в логе вовсе — «= 0», как у шага 2
+    // ENABLE нет в логе вовсе — как 0, тот же текст, что у шага 2
     const no_enable = { ...BASE_LOG }
     delete no_enable.INS_HNTC2_ENABLE
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ log: no_enable, steps: steps })), 'notch'),
-        [{ source: 'notch', text: STEP2_HINT_OLD }])
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ log: no_enable, steps: steps })), 'notch').map((item) => item.text),
+        [summary_notch_enable_hint('INS_HNTC2_ENABLE', 0)])
 })
 
 test('summary_refly: notch не включается (остаётся выключенным, уже включён, выключается) — пункта нет', () => {
     for (const changes of [{ INS_HNTC2_FREQ: 153 }, { INS_HNTCH_FREQ: 75 }, { INS_HNTCH_ENABLE: 0 }]) {
-        const steps = []
-        steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, changes) }
-        assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'notch'), [], JSON.stringify(changes))
+        assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps_with2(changes) })), 'notch'), [], JSON.stringify(changes))
     }
 })
 
 test('summary_refly: включаются оба notch — два пункта по порядку notch', () => {
     const log = Object.fromEntries(Object.entries(BASE_LOG).filter(([name]) => !name.startsWith('INS_HNTCH_')))
     log.INS_HNTCH_ENABLE = 0
-    const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTCH_ENABLE: 1, INS_HNTC2_ENABLE: 1 }) }
+    const steps = steps_with2({ INS_HNTCH_ENABLE: 1, INS_HNTC2_ENABLE: 1 }, log)
     assert.deepEqual(of_source(summary_refly(refly_ctx({ log: log, steps: steps })), 'notch').map((item) => item.text),
-        [summary_notch_enable_hint('INS_HNTCH_ENABLE', 0), STEP2_HINT_OLD])
+        [summary_notch_enable_hint('INS_HNTCH_ENABLE', 0), summary_notch_enable_hint('INS_HNTC2_ENABLE', 0)])
 })
 
 test('summary_refly: изменённые из reboot_names — один пункт с именами по порядку строк; неизменённые — нет', () => {
     const reboot_names = ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS']
-    const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTCH_HMNCS: 7, INS_HNTCH_FREQ: 75 }) }
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: reboot_names })), 'reboot'), [{
-        source: 'reboot',
-        text: 'После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE, INS_HNTCH_HMNCS — они действуют после перезагрузки.',
-    }])
+    const reboot_of = (changes, names) => of_source(summary_refly(refly_ctx({ steps: steps_with2(changes), reboot_names: names })), 'reboot')
+
+    const both = reboot_of({ SCHED_LOOP_RATE: 800, INS_HNTCH_HMNCS: 7, INS_HNTCH_FREQ: 75 }, reboot_names)
+    assert.equal(both.length, 1)
+    assert.deepEqual(param_names_in(both[0].text), ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'])
 
     // HMNCS не изменён — только SCHED_LOOP_RATE
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTCH_FREQ: 75 }) }
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: reboot_names })), 'reboot').map((item) => item.text),
-        ['После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE — они действуют после перезагрузки.'])
+    assert.deepEqual(reboot_of({ SCHED_LOOP_RATE: 800, INS_HNTCH_FREQ: 75 }, reboot_names).map((item) => param_names_in(item.text)),
+        [['SCHED_LOOP_RATE']])
 
-    // SCHED_LOOP_RATE совпал с логом — пункта нет
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 400, INS_HNTCH_FREQ: 75 }) }
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps, reboot_names: ['SCHED_LOOP_RATE'] })), 'reboot'), [])
+    // SCHED_LOOP_RATE совпал с логом — пункта нет; метаданные есть, перезагрузка не нужна ([]) — тоже нет
+    assert.deepEqual(reboot_of({ SCHED_LOOP_RATE: 400, INS_HNTCH_FREQ: 75 }, ['SCHED_LOOP_RATE']), [])
+    assert.deepEqual(reboot_of({ SCHED_LOOP_RATE: 800 }, []), [])
+
+    // Поля включаемого notch изменены — его HMNCS, OPTS, REF тоже в пункте, по порядку строк
+    const notch2 = notch_param_names()[1]
+    const notch2_reboot = [notch2.harmonics, notch2.options, notch2.ref]
+    assert.deepEqual(reboot_of({ INS_HNTC2_ENABLE: 1 }, notch2_reboot).map((item) => param_names_in(item.text)),
+        [Object.values(notch2).filter((name) => notch2_reboot.includes(name))])
 })
 
-test('summary_refly: ненадёжные крен и тангаж — «крен, тангаж: » + совет; все надёжны или metrics null — пункта нет', () => {
-    const steps = []
-    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ roll: false, pitch: false }) }
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight'),
-        [{ source: 'test_flight', text: 'крен, тангаж: ' + TEST_FLIGHT }])
-
-    // Оси — в порядке pidtune_axes
-    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ yaw: false, roll: false }) }
-    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight').map((item) => item.text),
-        ['крен, рыскание: ' + TEST_FLIGHT])
-
-    const no_metrics = step4_axes()
-    no_metrics.roll.metrics = null
-    for (const axes of [step4_axes(), no_metrics, undefined]) {
-        steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: axes }
-        assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps })), 'test_flight'), [])
-    }
+test('summary_refly: метаданные не загрузились (reboot_names null) — общий пункт без имён, если есть изменённые', () => {
+    const items = summary_refly(refly_ctx({ steps: steps_with2({ INS_HNTCH_FREQ: 75 }), reboot_names: null }))
+    assert.deepEqual(sources_of(items), ['reboot', 'repeat'])
+    assert.deepEqual(param_names_in(items[0].text), [])
+    // Изменённых нет — пункта нет
+    assert.deepEqual(summary_refly(refly_ctx({ steps: steps_with2({}), reboot_names: null })), [])
 })
 
-test('summary_refly: шаг 4 не принят — пункта тестового полёта нет', () => {
-    const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 75 }) }
-    assert.deepEqual(summary_refly(refly_ctx({ steps: steps })), [REPEAT])
+test('summary_refly: ненадёжные оси — пункт тестового полёта с осями по порядку pidtune_axes, первая с заглавной', () => {
+    const flight_of = (axes) => of_source(summary_refly(refly_ctx({ unreliable_axes: axes })), 'test_flight')
+
+    const roll_pitch = flight_of(['roll', 'pitch'])
+    assert.equal(roll_pitch.length, 1)
+    assert.ok(roll_pitch[0].text.startsWith('Крен, тангаж '), roll_pitch[0].text)
+    assert.ok(roll_pitch[0].text.includes(TEST_FLIGHT), roll_pitch[0].text)
+
+    // Порядок — pidtune_axes, а не порядок в unreliable_axes
+    assert.ok(flight_of(['yaw', 'roll'])[0].text.startsWith('Крен, рыскание '))
+    assert.ok(flight_of(['yaw'])[0].text.startsWith('Рыскание '))
+
+    // Ненадёжных осей нет — пункта нет
+    assert.deepEqual(flight_of([]), [])
+    assert.deepEqual(flight_of(null), [])
 })
 
-test('summary_refly: порядок пунктов — проверки, notch, перезагрузка, тестовый полёт, последним «repeat»', () => {
+test('summary_refly: все оси ненадёжны, менять нечего (шаг 4 не принят) — только тестовый полёт, без «repeat»', () => {
+    assert.deepEqual(sources_of(summary_refly(refly_ctx({ unreliable_axes: ['roll', 'pitch', 'yaw'] }))), ['test_flight'])
     const checks = [{ id: 'vibe', status: 'warn', title: 'Вибрации', text: 'высокие', fix: 'Проверьте крепление' }]
-    const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { SCHED_LOOP_RATE: 800, INS_HNTC2_ENABLE: 1 }) }
-    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes({ pitch: false }) }
-    const items = summary_refly(refly_ctx({ checks: checks, steps: steps, reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTC2_HMNCS'] }))
-    assert.deepEqual(items.map((item) => item.source), ['check', 'notch', 'reboot', 'test_flight', 'repeat'])
-    // Поля включаемого notch изменены — его HMNCS тоже в пункте перезагрузки
-    assert.equal(items[2].text,
-        'После записи перезагрузите полётный контроллер: изменены SCHED_LOOP_RATE, INS_HNTC2_HMNCS — они действуют после перезагрузки.')
-    assert.equal(items[3].text, 'тангаж: ' + TEST_FLIGHT)
-    assert.deepEqual(items.at(-1), REPEAT)
+    assert.deepEqual(sources_of(summary_refly(refly_ctx({ checks: checks, steps: steps_with2({}), unreliable_axes: ['pitch'] }))),
+        ['check', 'test_flight'])
+})
+
+test('summary_refly: «repeat» — последним и только при изменённых строках', () => {
+    // Изменён шаг 2 или шаг 4
+    const step4_changed = []
+    step4_changed[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.15 }), axes: step4_axes() }
+    for (const steps of [steps_with2({ INS_HNTCH_FREQ: 75 }), step4_changed]) {
+        assert.deepEqual(sources_of(summary_refly(refly_ctx({ steps: steps, unreliable_axes: ['roll'] }))), ['test_flight', 'repeat'])
+    }
+    // Принято без изменений — повторять нечего
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps_with2({}) })), 'repeat'), [])
 })
 
 // Метаданные в форме FilterReview/params.json: группы по префиксу, внутри — записи по полному имени
@@ -636,14 +689,17 @@ function find_in_groups(data, name) {
     return (group != null) ? group[name] : null
 }
 
-test('summary_reboot_names: имена с RebootRequired = "True" в порядке names; без метаданных — []', () => {
+test('summary_reboot_names: имена с RebootRequired = "True" в порядке names; без метаданных — null, а не []', () => {
     const names = ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', 'INS_HNTCH_FREQ', 'INS_HNTCH_HMNCS', 'INS_HNTCH_OPTS', 'ATC_RAT_RLL_P']
     assert.deepEqual(summary_reboot_names(names, FAKE_METADATA, find_in_groups), ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'])
+    // Метаданные есть, перезагрузка не нужна — пустой массив
     assert.deepEqual(summary_reboot_names([], FAKE_METADATA, find_in_groups), [])
+    assert.deepEqual(summary_reboot_names(['INS_HNTCH_FREQ'], FAKE_METADATA, find_in_groups), [])
     // Поиск получает метаданные и имя
     const calls = []
     summary_reboot_names(['SCHED_LOOP_RATE'], FAKE_METADATA, (data, name) => { calls.push([data, name]); return null })
     assert.deepEqual(calls, [[FAKE_METADATA, 'SCHED_LOOP_RATE']])
-    // Метаданные не загрузились — поиск не зовётся
-    assert.deepEqual(summary_reboot_names(names, null, () => { throw new Error('поиск без метаданных') }), [])
+    // Метаданные не загрузились — null (сводка покажет общий пункт), поиск не зовётся
+    assert.equal(summary_reboot_names(names, null, () => { throw new Error('поиск без метаданных') }), null)
 })
+
