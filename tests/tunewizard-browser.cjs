@@ -1,4 +1,5 @@
-// Smoke-прогон мастера настройки (TuneWizard) в настоящем браузере через Playwright.
+// Smoke-прогон мастера настройки (TuneWizard) в настоящем браузере через Playwright; в начале — строка мастера
+// на главной WebTools.
 // Запуск: npm run test:tunewizard
 // Нужны: лог .bin (переменная TUNEWIZARD_LOG или первый .bin в TuneWizard/logs/), браузер
 // (CHROME_PATH — путь к chrome.exe; без него Playwright берёт свой Chromium, если он установлен)
@@ -315,7 +316,34 @@ async function main() {
         const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
         page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()) })
         page.on('pageerror', (e) => problems.push('pageerror: ' + e.message))
-        await wait_for_server(page, 'http://127.0.0.1:' + port + '/TuneWizard/', server)
+        const base = 'http://127.0.0.1:' + port
+        // Скриншоты для глаз — рядом с логами, в репозиторий не попадают
+        const shots = path.join(logs_dir, 'screenshots')
+        fs.mkdirSync(shots, { recursive: true })
+
+        // Главная WebTools: строка «Мастер настройки» сразу после PID Review, иконка загрузилась, ссылка ведёт на мастер.
+        // Проверка — до лога; затем страница мастера открывается заново, как без неё
+        await wait_for_server(page, base + '/index.html', server)
+        const landing = await page.evaluate(() => {
+            const links = [...document.querySelectorAll('a[href="./TuneWizard"]')]
+            const img = links[0]?.querySelector('img') ?? null
+            const row = links[0]?.closest('tr') ?? null
+            return {
+                links: links.length,
+                src: img?.getAttribute('src') ?? null,
+                loaded: (img != null) && img.complete && (img.naturalWidth > 0),
+                heading: row?.querySelector('h2')?.textContent ?? null,
+                lang: row?.cells[1]?.lang ?? null,
+                after: row?.previousElementSibling?.querySelector('a')?.getAttribute('href') ?? null,
+            }
+        })
+        assert.deepEqual(landing, { links: 1, src: 'images/TuneWizard_Icon.png', loaded: true, heading: 'Мастер настройки', lang: 'ru', after: './PIDReview' },
+                         'главная: одна ссылка на мастер с загруженной иконкой, строка «Мастер настройки» на русском сразу после PID Review')
+        await page.screenshot({ path: path.join(shots, 'landing.png'), fullPage: true })
+        await page.click('a[href="./TuneWizard"]')
+        await page.waitForURL(base + '/TuneWizard/', { waitUntil: 'networkidle' })
+        assert.equal(await page.evaluate(() => document.title), 'Мастер настройки', 'ссылка с главной открывает мастер')
+        await page.goto(base + '/TuneWizard/', { waitUntil: 'networkidle' })
 
         // Каркас до загрузки
         assert.equal(await page.locator('#wizbar button').count(), 6, 'шесть кнопок шагов')
@@ -390,9 +418,6 @@ async function main() {
         const surface = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--surface').trim())
         assert.equal(await page.evaluate(() => document.getElementById('FlightData').layout.paper_bgcolor), surface, 'фон графика полёта — --surface')
 
-        // Скриншоты для глаз — рядом с логами, в репозиторий не попадают
-        const shots = path.join(logs_dir, 'screenshots')
-        fs.mkdirSync(shots, { recursive: true })
         await page.screenshot({ path: path.join(shots, 'step0.png'), fullPage: true })
 
         // Шаг 1: спектр, спектрограмма, пики и вердикт считаются при первом показе
@@ -1867,7 +1892,7 @@ async function main() {
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
-        console.log('tunewizard-browser: шаги 0–5 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
+        console.log('tunewizard-browser: главная и шаги 0–5 пройдены, проверок ' + statuses.length + ' (' + statuses.join(', ') + '); шаг 1: трасс с данными ' + s1.with_data +
             ', бинов ' + s1.x_len + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; скриншоты в ' + shots)
         console.log('  пики: ' + s1.peak_rows.map((row) => row.join(' | ')).join(' ; '))
         console.log('  шаг 2: варианты ' + v1.titles.join('; ') + '; рекомендован ' + v1.best_id + '; вердикт «' + v1.verdict + '»')
