@@ -630,9 +630,6 @@ async function main() {
         assert.ok((accepted.flags != null) && Array.isArray(accepted.flags.worse_peaks), 'отметки принятого против лога')
         assert.match(await page.textContent('#verdict2'), /^Принято/, 'вердикт шага 2 — «Принято»')
         await assert_accepted_fresh(page, 2)
-        // Версия фильтра шага 1 — в отпечатке (четвёртый элемент) числом: опечатка в поле контекста дала бы null
-        const fv_in_key = await page.evaluate(() => ({ key: JSON.parse(step_inputs_key(2))[3], version: state.spectrum.filter_version }))
-        assert.ok(Number.isInteger(fv_in_key.key) && (fv_in_key.key === fv_in_key.version), 'версия фильтра в отпечатке шага 2: ' + JSON.stringify(fv_in_key))
 
         // Принять вариант, который хуже лога: вердикт warn «Принято, но хуже лога»
         await page.click('#wizbar button:nth-child(3)')
@@ -1130,22 +1127,24 @@ async function main() {
         await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
 
-        // Версия фильтра — во входах шагов 2–3: другая версия на шаге 1 («Пересчитать», FFT тот же) делает принятое шага 3
-        // устаревшим, возврат версии — снова актуальным. Шаг 2 уже устарел из-за интервала, у него — место версии в отпечатке
+        // Версия фильтра — во входах шагов 2–3: другая версия на шаге 1 («Пересчитать», FFT тот же) меняет отпечаток шага 2 и
+        // делает принятое шага 3 устаревшим, возврат версии — снова актуальным (шаг 2 уже устарел из-за интервала, у него —
+        // сам отпечаток до и после; раскладку ключа проверяют юнит-тесты)
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
-        const log_fv = await page.evaluate(() => state.spectrum.filter_version)
-        const other_fv = (log_fv < 4) ? log_fv + 1 : 3
-        const fft_key = await page.evaluate(() => step1.fft_key)
+        const before_fv = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: step_inputs_key(2) }))
+        const other_fv = (before_fv.version < 4) ? before_fv.version + 1 : 3
         await page.check('#spec_fv_' + other_fv)
         await page.click('#spec_recalc')
         await wait_overlay(page)
-        const fv_stale = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: JSON.parse(step_inputs_key(2))[3], stale3: step_accepted_stale(3) }))
-        assert.deepEqual(fv_stale, { version: other_fv, fft_key: fft_key, key2: other_fv, stale3: true }, 'другая версия фильтра — принятое шага 3 устарело')
-        await page.check('#spec_fv_' + log_fv)
+        const fv_stale = await page.evaluate(() => ({ version: state.spectrum.filter_version, fft_key: step1.fft_key, key2: step_inputs_key(2), stale3: step_accepted_stale(3) }))
+        assert.deepEqual({ ...fv_stale, key2: fv_stale.key2 !== before_fv.key2 }, { version: other_fv, fft_key: before_fv.fft_key, key2: true, stale3: true },
+                         'другая версия фильтра — отпечаток шага 2 сменился, принятое шага 3 устарело')
+        await page.check('#spec_fv_' + before_fv.version)
         await page.click('#spec_recalc')
         await wait_overlay(page)
-        assert.equal(await page.evaluate(() => step_accepted_stale(3)), false, 'версию фильтра вернули — принятое шага 3 снова актуально')
+        assert.deepEqual(await page.evaluate(() => ({ key2: step_inputs_key(2), stale3: step_accepted_stale(3) })), { key2: before_fv.key2, stale3: false },
+                         'версию фильтра вернули — отпечаток шага 2 прежний, принятое шага 3 снова актуально')
         await page.click('#wizbar button:nth-child(1)')
 
         // Повторная загрузка того же лога (поле выбора очищается после чтения, change срабатывает снова):

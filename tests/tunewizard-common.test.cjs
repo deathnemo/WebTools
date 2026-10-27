@@ -4,9 +4,9 @@
 // каркас механизма правок полей и отпечаток входов принятого шага. Скрипт классический (общая глобальная область),
 // поэтому загружается как на странице — через vm.runInThisContext (как в tests/tunewizard-core.test.cjs). Глобалы
 // страницы, которые он зовёт (document, window, fetch, loading_call, state, html_escape, step1, step1_ready,
-// step1_prepare), — заглушки ниже; модуль обращается к ним только при вызове. param_to_string — настоящий, из
-// Libraries/Param_Helpers.js; summary_inputs_key и summary_stale — настоящие, из core/summary.js (с его зависимостями,
-// в порядке страницы).
+// step1_prepare, step2_param_names, step4_param_names), — заглушки ниже; модуль обращается к ним только при вызове.
+// param_to_string — настоящий, из Libraries/Param_Helpers.js; summary_inputs_key и summary_stale (core/summary.js, с его
+// зависимостями), lowpass_param_names (core/lowpass.js) и hmncs_bits (core/params.js) — настоящие, в порядке страницы.
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -37,10 +37,16 @@ globalThis.step1 = { error: null }
 globalThis.step1_ready = () => false
 globalThis.step1_prepare = () => false
 
+// Имена параметров шагов 2 и 4 (steps/step2.js и steps/step4.js под Node не грузятся) — тот же состав: шаг 2 —
+// INS_GYRO_FILTER, SCHED_LOOP_RATE и поля обоих notch; шаг 4 — P, I, D трёх осей
+globalThis.step2_param_names = () => ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...notch_param_names().flatMap((notch) => Object.values(notch))]
+globalThis.step4_param_names = () => Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
+
 // В порядке index.html: core/summary.js и то, что ему нужно (Param_Helpers.js, filters.js, pid.js и pidtune.js,
-// params.js), затем общий модуль шагов
-for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js',
-                    'TuneWizard/core/params.js', 'TuneWizard/core/summary.js', 'TuneWizard/steps/common.js']) {
+// params.js), lowpass.js (ему при загрузке — candidates.js), затем общий модуль шагов
+for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',
+                    'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
+                    'TuneWizard/steps/common.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
 }
@@ -287,7 +293,20 @@ test('step_edit_controller: набор — пересчёт после пауз�
     assert.equal(doc_handlers.pointerdown.length, 1)
 })
 
-test('step_inputs_key, step_accepted_stale: отпечаток входов из состояния страницы — интервал, ключ FFT и версия фильтра шага 1, принятое шагов', () => {
+test('step_inputs_key, step_accepted_stale: отпечаток из состояния страницы — интервал, ключ FFT и версия фильтра шага 1, отличия принятого от лога', (t) => {
+    // Поля state и step1, которые тест меняет, — вернуть после него
+    const saved = { settings: state.settings, spectrum: state.spectrum, steps: state.steps, params: state.params, fft_key: step1.fft_key }
+    t.after(() => {
+        Object.assign(state, { settings: saved.settings, spectrum: saved.spectrum, steps: saved.steps, params: saved.params })
+        step1.fft_key = saved.fft_key
+    })
+
+    // Параметры лога с интерфейсом log_params; 8-битная маска HMNCS первого notch записана со знаком (−128 — гармоника 8)
+    const log = { INS_GYRO_FILTER: 40, SCHED_LOOP_RATE: 400, INS_HNTCH_ENABLE: 1, INS_HNTCH_FREQ: 80, INS_HNTCH_HMNCS: -128,
+                  INS_HNTC2_ENABLE: 0, ATC_RAT_RLL_FLTD: 20, ATC_RAT_RLL_P: Math.fround(0.135) }
+    // Принятое шага: по всем именам шага — значение из changes, иначе из лога, иначе 0
+    const accepted_of = (names, changes = {}) => Object.fromEntries(names.map((name) => [name, (name in changes) ? changes[name] : (log[name] ?? 0)]))
+    state.params = { get: (name) => log[name] ?? null, has: (name) => name in log }
     state.settings = { start: 10, end: 100 }
     state.spectrum = { filter_version: 2 }
     state.steps = []
@@ -297,24 +316,25 @@ test('step_inputs_key, step_accepted_stale: отпечаток входов из
         assert.equal(step_accepted_stale(n), false, 'шаг ' + n + ' не принят — не устарел')
     }
 
-    // «Принять» по шагам: отпечаток — до записи state.steps[n], у шага n — от принятого шагов < n
-    state.steps[2] = { accepted: { INS_HNTCH_FREQ: 80, INS_HNTCH_ATT: 33 } }
-    state.steps[2].inputs = step_inputs_key(2)
-    state.steps[3] = { accepted: { INS_GYRO_FILTER: 42 }, inputs: step_inputs_key(3) }
-    state.steps[4] = { accepted: { ATC_RAT_RLL_P: 0.125 }, inputs: step_inputs_key(4) }
-    assert.deepEqual(JSON.parse(state.steps[3].inputs), [10, 100, 'batch:1', 2, [[['INS_HNTCH_ATT', 33], ['INS_HNTCH_FREQ', 80]]]])
-    assert.deepEqual(JSON.parse(state.steps[4].inputs), [10, 100, null, null, [[['INS_HNTCH_ATT', 33], ['INS_HNTCH_FREQ', 80]], [['INS_GYRO_FILTER', 42]]]])
+    // «Принять» по шагам. У шага 2 маска 128 — при 8 битах (версия фильтра 2) та же гармоника 8, что −128 лога: не отличие
+    state.steps[2] = { accepted: accepted_of(step2_param_names(), { INS_HNTCH_FREQ: 75, INS_HNTCH_HMNCS: 128 }), inputs: step_inputs_key(2) }
+    state.steps[3] = { accepted: accepted_of(lowpass_param_names(state.params), { INS_GYRO_FILTER: 42 }), inputs: step_inputs_key(3) }
+    state.steps[4] = { accepted: accepted_of(step4_param_names(), { ATC_RAT_RLL_P: 0.125 }), inputs: step_inputs_key(4) }
+    assert.deepEqual(JSON.parse(state.steps[3].inputs), [10, 100, 'batch:1', 2, [['INS_HNTCH_FREQ', 75]]])
+    assert.deepEqual(JSON.parse(state.steps[4].inputs), [10, 100, null, null, [['INS_GYRO_FILTER', 42], ['INS_HNTCH_FREQ', 75]]])
     const fresh = () => [2, 3, 4].map((n) => step_accepted_stale(n))
     assert.deepEqual(fresh(), [false, false, false], 'сразу после «Принять» — не устарело')
 
     // Каждое поле состояния входит в отпечаток: опечатка в имени дала бы undefined → null, и смена прошла бы незаметно.
-    // [поле, сменить, вернуть, устарело ли у шагов 2, 3, 4]
+    // Версия фильтра 3 — ещё и 32-битная маска HMNCS (hmncs_bits от той же версии): 128 и −128 уже разные, у шага 2
+    // появляется отличие — устаревает и шаг 4. [поле, сменить, вернуть, устарело ли у шагов 2, 3, 4]
     const cases = [
         ['state.settings.start', () => { state.settings.start = 20 }, () => { state.settings.start = 10 }, [true, true, true]],
         ['state.settings.end', () => { state.settings.end = 90 }, () => { state.settings.end = 100 }, [true, true, true]],
         ['step1.fft_key', () => { step1.fft_key = 'batch:3' }, () => { step1.fft_key = 'batch:1' }, [true, true, false]],
-        ['state.spectrum.filter_version', () => { state.spectrum.filter_version = 4 }, () => { state.spectrum.filter_version = 2 }, [true, true, false]],
-        ['state.steps[2].accepted', () => { state.steps[2].accepted.INS_HNTCH_ATT = 40 }, () => { state.steps[2].accepted.INS_HNTCH_ATT = 33 }, [false, true, true]],
+        ['state.spectrum.filter_version', () => { state.spectrum.filter_version = 3 }, () => { state.spectrum.filter_version = 2 }, [true, true, true]],
+        ['state.params', () => { log.INS_HNTCH_FREQ = 75 }, () => { log.INS_HNTCH_FREQ = 80 }, [false, true, true]],
+        ['state.steps[2].accepted', () => { state.steps[2].accepted.INS_HNTCH_FREQ = 70 }, () => { state.steps[2].accepted.INS_HNTCH_FREQ = 75 }, [false, true, true]],
         ['state.steps[3].accepted', () => { state.steps[3].accepted.INS_GYRO_FILTER = 39 }, () => { state.steps[3].accepted.INS_GYRO_FILTER = 42 }, [false, false, true]],
     ]
     for (const [field, change, restore, stale] of cases) {
@@ -324,8 +344,10 @@ test('step_inputs_key, step_accepted_stale: отпечаток входов из
         assert.deepEqual(fresh(), [false, false, false], field + ': вернули — не устарело')
     }
 
-    // Принятое без отпечатка — устарело
-    delete state.steps[3].inputs
-    assert.equal(step_accepted_stale(3), true)
-    step1.fft_key = null
+    // Шаг 3 «Как в логе» после шага 4 — то же, что не принят: принятое шага 4 не устарело
+    state.steps[3] = null
+    state.steps[4].inputs = step_inputs_key(4)
+    state.steps[3] = { accepted: accepted_of(lowpass_param_names(state.params)) }
+    state.steps[3].inputs = step_inputs_key(3)
+    assert.deepEqual(fresh(), [false, false, false], 'шаг 3 принят «Как в логе» — шаг 4 не устарел')
 })

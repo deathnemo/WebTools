@@ -151,25 +151,37 @@ function summary_file_name(log_name) {
     return (((log_name != null) && (log_name !== "")) ? log_name.replace(/\.[^.]*$/, "") + "_" : "") + "tune.param"
 }
 
-// Отпечаток входов шага n (2–4) для «устарело»: строка JSON [start, end, fft_key, filter_version, [принятое шагов
-// 2..n−1]], ctx = { start, end, fft_key, filter_version, steps } — интервал анализа (state.settings.start/end), ключ
-// FFT шага 1 (step1.fft_key), версия фильтра шага 1 и state.steps; нет значения (undefined) — null.
+// Отпечаток входов шага n (2–4) для «устарело»: строка JSON [start, end, fft_key, filter_version, изменения].
+// ctx — вход summary_rows ({ params, steps, names, filter_version, bits }) плюс интервал анализа (start, end —
+// state.settings.start/end) и ключ FFT шага 1 (fft_key — step1.fft_key); нет значения (undefined) — null.
+// Изменения — действующие отличия от лога принятого на шагах 2..n−1: строки summary_rows только по этим шагам с
+// changed, пары [имя, значение] с именами по алфавиту (как candidate_key), значения как есть. Отличия, а не принятое
+// целиком: шаг n считал от действующих значений, а они при «не принят» и «принят как в логе» одни и те же. Иначе
+// принятие шага 3 «Как в логе» после шага 4 делало бы шаг 4 ложно устаревшим (ключ расчёта шага 4 обходит это так же —
+// step4_calc_key). «Изменён» — тот же, что у итога и .param: float32, маски, включаемый notch; поля выключенного notch
+// с умолчаниями, которых нет в логе, — не изменение; INS_GYRO_FILTER шагов 2 и 3 — одна строка с действующим значением
+// (от последнего принявшего шага).
 // Ключ FFT и версия фильтра — только у шагов 2–3: они всегда считают шаг 1 до «Принять» (версия фильтра меняет и
 // форму шага 2: ниже 4 ESCMSK — 0); у шага 4 на их месте null. Ключ FFT: шаг 4 можно принять, не открывая шаг 1, и
 // ключ, появившийся позже, давал бы ложное «устарело». Версия фильтра: шаг 4 зависит от неё только через фильтры
-// гироскопа и устаревает через изменённое принятое шагов 2–3; если после смены версии шаги 2–3 приняли заново с теми
-// же значениями, шаг 4 устаревшим не станет — допустимо, версию меняют редко [наше].
-// Принятое шага k — пары [имя, значение] с именами по алфавиту (как candidate_key), значения как есть;
-// не принят — null.
+// гироскопа — через изменения шагов 2–3 (в них от версии зависят ещё правило ESCMSK и размер маски HMNCS bits); если
+// после смены версии шаги 2–3 приняли заново с теми же значениями, шаг 4 устаревшим не станет — допустимо, версию
+// меняют редко [наше].
 // Ключи расчёта шагов (calc_key) не годятся: в них окно FFT и выбор набора, их смена давала бы ложное «устарело» [наше]
 function summary_inputs_key(n, ctx) {
-    const accepted = []
+    const steps = []
     for (let k = 2; k < n; k++) {
-        const values = ctx.steps[k]?.accepted ?? null
-        accepted.push((values != null) ? Object.keys(values).sort().map((name) => [name, values[name]]) : null)
+        steps[k] = ctx.steps[k]
     }
+    const values = {}
+    for (const row of summary_rows({ ...ctx, steps: steps }).rows) {
+        if (row.changed) {
+            values[row.name] = row.value
+        }
+    }
+    const changes = Object.keys(values).sort().map((name) => [name, values[name]])
     const from_step1 = (n < 4) ? [ctx.fft_key ?? null, ctx.filter_version ?? null] : [null, null]
-    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...from_step1, accepted])
+    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...from_step1, changes])
 }
 
 // Устарело ли принятое шага n: шаг принят (steps[n] != null), а отпечаток, сохранённый при «Принять»

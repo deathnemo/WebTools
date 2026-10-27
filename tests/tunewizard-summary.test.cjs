@@ -1,8 +1,8 @@
 // Тесты итога прохода мастера настройки (TuneWizard/core/summary.js): сравнение значений как float32 и масок,
 // строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER, ESCMSK по версии фильтра,
 // включаемый notch, параметры без лога, ненадёжные оси шага 4), значения и текст .param из изменённых, имя
-// файла, отпечаток входов принятого шага и «устарело», «что перелететь» (проверки шага 0, включаемый notch,
-// перезагрузка, тестовый полёт, повтор) и имена с перезагрузкой по метаданным.
+// файла, отпечаток входов принятого шага (по действующим отличиям от лога) и «устарело», «что перелететь» (проверки
+// шага 0, включаемый notch, перезагрузка, тестовый полёт, повтор) и имена с перезагрузкой по метаданным.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pidtune.test.cjs).
 const test = require('node:test')
@@ -369,52 +369,100 @@ test('summary_file_name: имя лога без последнего расши�
 
 // ---------------------------------------------------------------- отпечаток входов
 
-// Состояние для отпечатка: интервал, ключ FFT и версия фильтра шага 1, принятые шаги 2 и 3
-function inputs_ctx() {
-    const steps = []
-    steps[2] = { accepted: { INS_HNTCH_FREQ: 80, INS_GYRO_FILTER: 40 } }
-    steps[3] = { accepted: { INS_GYRO_FILTER: 45, INS_ACCEL_FILTER: 10 } }
-    return { start: 10, end: 100, fft_key: 'batch:16', filter_version: 4, steps: steps }
+// Вход отпечатка: вход итога (лог log — по умолчанию BASE_LOG, версия фильтра 4, маска HMNCS 8 бит) плюс интервал и
+// ключ FFT шага 1; steps — принятые шаги
+function inputs_ctx(steps = [], log = BASE_LOG) {
+    return { ...rows_ctx({ log: log, steps: steps, filter_version: 4 }), start: 10, end: 100, fft_key: 'batch:16' }
 }
 
-// Состояние, в котором шаги 2–4 приняты с отпечатками от него самого
+// Принятое шагов 2–4 с отличиями от лога: FREQ первого notch; INS_GYRO_FILTER и FLTD крена; P крена
+function accepted_steps() {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 75 }) }
+    steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 45, ATC_RAT_RLL_FLTD: 25 }) }
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.125 }), axes: step4_axes() }
+    return steps
+}
+
+// Шаги 2–4 приняты по порядку, у каждого — отпечаток на момент его «Принять»
 function inputs_ctx_accepted() {
+    const all = accepted_steps()
     const ctx = inputs_ctx()
-    ctx.steps[4] = { accepted: { ATC_RAT_RLL_P: 0.135 } }
     for (const n of [2, 3, 4]) {
-        ctx.steps[n].inputs = summary_inputs_key(n, ctx)
+        ctx.steps[n] = { ...all[n], inputs: summary_inputs_key(n, ctx) }
     }
     return ctx
 }
 
-test('summary_inputs_key: JSON [начало, конец, ключ FFT, версия фильтра, принятое шагов 2..n−1 с именами по алфавиту]', () => {
-    const ctx = inputs_ctx()
+test('summary_inputs_key: JSON [начало, конец, ключ FFT, версия фильтра, отличия от лога шагов 2..n−1 — пары [имя, значение] по алфавиту]', () => {
+    const ctx = inputs_ctx(accepted_steps())
     assert.deepEqual(JSON.parse(summary_inputs_key(2, ctx)), [10, 100, 'batch:16', 4, []])
-    assert.deepEqual(JSON.parse(summary_inputs_key(3, ctx)),
-        [10, 100, 'batch:16', 4, [[['INS_GYRO_FILTER', 40], ['INS_HNTCH_FREQ', 80]]]])
-    // Шаг 4: ключа FFT и версии фильтра нет; непринятый шаг — null
-    ctx.steps[2] = null
+    assert.deepEqual(JSON.parse(summary_inputs_key(3, ctx)), [10, 100, 'batch:16', 4, [['INS_HNTCH_FREQ', 75]]])
+    // Шаг 4: ключа FFT и версии фильтра нет; отличия шагов 2 и 3 — одним списком по алфавиту
     assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx)),
-        [10, 100, null, null, [null, [['INS_ACCEL_FILTER', 10], ['INS_GYRO_FILTER', 45]]]])
+        [10, 100, null, null, [['ATC_RAT_RLL_FLTD', 25], ['INS_GYRO_FILTER', 45], ['INS_HNTCH_FREQ', 75]]])
     // Порядок имён в принятом не важен
-    const swapped = inputs_ctx()
-    swapped.steps[2] = { accepted: { INS_GYRO_FILTER: 40, INS_HNTCH_FREQ: 80 } }
-    assert.equal(summary_inputs_key(3, swapped), summary_inputs_key(3, inputs_ctx()))
+    const swapped = inputs_ctx(accepted_steps())
+    swapped.steps[3] = { accepted: Object.fromEntries(Object.entries(swapped.steps[3].accepted).reverse()) }
+    assert.equal(summary_inputs_key(4, swapped), summary_inputs_key(4, ctx))
 })
 
 test('summary_inputs_key: нет интервала, ключа FFT или версии фильтра (undefined) — null', () => {
     assert.deepEqual(JSON.parse(summary_inputs_key(2, { steps: [] })), [null, null, null, null, []])
-    assert.deepEqual(JSON.parse(summary_inputs_key(4, { steps: [] })), [null, null, null, null, [null, null]])
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, { steps: [] })), [null, null, null, null, []])
 })
 
-test('summary_stale: принятое с отпечатком текущего состояния — не устарело; смена принятого шага 2, интервала или FFT — устарело', () => {
+test('summary_inputs_key: шаг 3 не принят и принят «Как в логе» — один ключ шага 4; принят с отличием — шаг 4 устарел', () => {
+    // В логе нет INS_ACCEL_FILTER: форма шага 3 из лога берёт для него заводское значение (lowpass_log_values)
+    const log = { ...BASE_LOG }
+    delete log.INS_ACCEL_FILTER
+    const all = accepted_steps()
+    const ctx = inputs_ctx([], log)
+    ctx.steps[2] = all[2]
+    // Шаг 4 принят раньше шага 3
+    ctx.steps[4] = { ...all[4], inputs: summary_inputs_key(4, ctx) }
+    ctx.steps[3] = { accepted: lowpass_log_values(ctx.params) }
+    assert.equal(ctx.steps[3].accepted.INS_ACCEL_FILTER, lowpass_rules.defaults.accel_hz, 'чего нет в логе — заводское')
+    assert.equal(summary_inputs_key(4, ctx), ctx.steps[4].inputs, 'принят «Как в логе» — тот же ключ, что у непринятого')
+    assert.equal(summary_stale(4, ctx), false)
+    ctx.steps[3] = { accepted: { ...lowpass_log_values(ctx.params), INS_GYRO_FILTER: 45 } }
+    assert.notEqual(summary_inputs_key(4, ctx), ctx.steps[4].inputs)
+    assert.equal(summary_stale(4, ctx), true, 'принят с отличием от лога — шаг 4 устарел')
+})
+
+test('summary_inputs_key: поля выключенного notch с умолчаниями (в логе их нет) ключ шага 3 не меняют; включённый notch — меняет', () => {
+    const ctx = inputs_ctx()
+    const not_accepted = summary_inputs_key(3, ctx)
+    // Форма шага 2 из лога: полям второго notch, которых в логе нет, — умолчания (values_from_log), ENABLE 0 из лога
+    const defaults = { INS_HNTC2_FREQ: 80, INS_HNTC2_BW: 40, INS_HNTC2_ATT: 40, INS_HNTC2_HMNCS: 3, INS_HNTC2_MODE: 1, INS_HNTC2_FM_RAT: 1 }
+    ctx.steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, defaults) }
+    assert.equal(summary_inputs_key(3, ctx), not_accepted, 'принят «Как в логе» — тот же ключ, что у непринятого')
+    // Второй notch включается: все его поля — изменения
+    ctx.steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { ...defaults, INS_HNTC2_ENABLE: 1 }) }
+    const changes = JSON.parse(summary_inputs_key(3, ctx))[4]
+    assert.deepEqual(changes.map(([name]) => name), Object.values(notch_param_names()[1]).sort())
+    assert.deepEqual(changes.find(([name]) => name === 'INS_HNTC2_FREQ'), ['INS_HNTC2_FREQ', 80])
+})
+
+test('summary_inputs_key: INS_GYRO_FILTER шагов 2 и 3 расходится — в ключе шага 4 значение шага 3', () => {
+    const ctx = inputs_ctx()
+    ctx.steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 50 }) }
+    ctx.steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 45 }) }
+    assert.deepEqual(JSON.parse(summary_inputs_key(3, ctx))[4], [['INS_GYRO_FILTER', 50]])
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx))[4], [['INS_GYRO_FILTER', 45]])
+    // Шаг 3 вернул значение лога — действует оно: отличий нет
+    ctx.steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG) }
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx))[4], [])
+})
+
+test('summary_stale: принятое с отпечатком текущего состояния — не устарело; смена отличий шага 2, интервала или FFT — устарело', () => {
     const fresh = inputs_ctx_accepted
     for (const n of [2, 3, 4]) {
         assert.equal(summary_stale(n, fresh()), false, 'шаг ' + n)
     }
 
     const accepted2 = fresh()
-    accepted2.steps[2] = { ...accepted2.steps[2], accepted: { INS_HNTCH_FREQ: 75, INS_GYRO_FILTER: 40 } }
+    accepted2.steps[2] = { ...accepted2.steps[2], accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 70 }) }
     assert.equal(summary_stale(3, accepted2), true)
     assert.equal(summary_stale(4, accepted2), true)
 
@@ -430,17 +478,19 @@ test('summary_stale: принятое с отпечатком текущего �
     fft.fft_key = 'raw:1024'
     assert.equal(summary_stale(3, fft), true)
 
-    // Шаг 2 приняли позже шага 3 — шаг 3 считал от лога: устарело
-    const late = inputs_ctx()
+    // Шаг 2 (с отличием от лога) приняли позже шага 3 — шаг 3 считал от лога: устарело
+    const late = fresh()
+    const step2 = late.steps[2]
     late.steps[2] = null
     late.steps[3].inputs = summary_inputs_key(3, late)
-    late.steps[2] = inputs_ctx().steps[2]
+    late.steps[2] = step2
     assert.equal(summary_stale(3, late), true)
 })
 
 test('summary_stale: смена версии фильтра — шаги 2 и 3 устарели, шаг 4 — нет', () => {
-    // Лог с версией 4: шаги 2–4 приняты при версии 4, затем на шаге 1 поставили 3 (форма шага 2 писала бы ESCMSK 0) —
-    // шаги 2 и 3 устарели, шаг 4 — нет; вернули 4 — шаг 2 снова не устарел
+    // Шаги 2–4 приняты при версии 4, затем на шаге 1 поставили 3 (форма шага 2 писала бы ESCMSK 0) — шаги 2 и 3
+    // устарели, шаг 4 — нет (ESCMSK в логе нет, маска HMNCS — те же 8 бит: отличия шагов 2–3 те же); вернули 4 — шаг 2
+    // снова не устарел
     const ctx = inputs_ctx_accepted()
     ctx.filter_version = 3
     assert.equal(summary_stale(2, ctx), true)
@@ -451,28 +501,27 @@ test('summary_stale: смена версии фильтра — шаги 2 и 3 
 })
 
 test('summary_stale: непринятый шаг — не устарел; принятое без отпечатка — устарело', () => {
-    const ctx = inputs_ctx()
+    const ctx = inputs_ctx(accepted_steps())
+    ctx.steps[4] = null
     assert.equal(summary_stale(4, ctx), false)
     assert.equal(summary_stale(3, ctx), true)
 })
 
 test('summary_inputs_key: у шага 2 не зависит от шага 3, у шага 4 — от ключа FFT', () => {
-    const ctx = inputs_ctx()
+    const ctx = inputs_ctx(accepted_steps())
     const key2 = summary_inputs_key(2, ctx)
-    ctx.steps[3] = { accepted: { INS_GYRO_FILTER: 50, INS_ACCEL_FILTER: 15 } }
+    ctx.steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 50 }) }
     assert.equal(summary_inputs_key(2, ctx), key2)
     ctx.steps[3] = null
     assert.equal(summary_inputs_key(2, ctx), key2)
 
-    const step4 = inputs_ctx()
-    step4.steps[4] = { accepted: {} }
-    step4.steps[4].inputs = summary_inputs_key(4, step4)
+    const step4 = inputs_ctx_accepted()
     step4.fft_key = null
     assert.equal(summary_stale(4, step4), false)
     step4.fft_key = 'raw:2048'
     assert.equal(summary_stale(4, step4), false)
-    // А принятое шага 3 — входит
-    step4.steps[3] = { accepted: { INS_GYRO_FILTER: 50, INS_ACCEL_FILTER: 10 } }
+    // А отличия шага 3 — входят
+    step4.steps[3] = { ...step4.steps[3], accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 50 }) }
     assert.equal(summary_stale(4, step4), true)
 })
 

@@ -6,12 +6,13 @@
 // указателя с подписчиками (step_pointer).
 //
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
-// core/spectrum.js (find_instance), core/summary.js (summary_inputs_key, summary_stale), plots.js (plot, render_plot),
-// Libraries/LoadingOverlay.js (loading_call), Libraries/Param_Helpers.js (param_to_string). Все они нужны только при
-// вызове, поэтому модуль подключается перед steps/step1.js. Обработчики указателя ставятся при первой подписке
-// (step_on_pointer_release), а не при загрузке этого модуля; шаги 3 и 4 подписываются при загрузке своих скриптов
-// (step3_edits, step4_edits), поэтому на странице обработчики фактически стоят с её загрузки, а тест модуля под Node
-// обходится без них.
+// steps/step2.js (step2_param_names), steps/step4.js (step4_param_names), core/spectrum.js (find_instance),
+// core/summary.js (summary_inputs_key, summary_stale), core/lowpass.js (lowpass_param_names), core/params.js
+// (hmncs_bits), plots.js (plot, render_plot), Libraries/LoadingOverlay.js (loading_call), Libraries/Param_Helpers.js
+// (param_to_string). Все они нужны только при вызове, поэтому модуль подключается перед steps/step1.js. Обработчики
+// указателя ставятся при первой подписке (step_on_pointer_release), а не при загрузке этого модуля; шаги 3 и 4
+// подписываются при загрузке своих скриптов (step3_edits, step4_edits), поэтому на странице обработчики фактически
+// стоят с её загрузки, а тест модуля под Node обходится без них.
 
 // ---------- Подписи ----------
 
@@ -70,9 +71,14 @@ function step_ensure_step1() {
 // Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 2.4. Устаревшее принятое предупреждается,
 // не блокирует [решение пользователя 25.10.2026]
 
-// Контекст отпечатка (summary_inputs_key, summary_stale) из состояния страницы: интервал анализа, ключ FFT и версия
-// фильтра шага 1, принятое шагов. Один построитель на оба помощника ниже — чтобы ключ при «Принять» и проверка
-// «устарело» не разошлись
+// Контекст отпечатка (summary_inputs_key, summary_stale) из состояния страницы: вход итога summary_rows (параметры
+// лога, принятое шагов, имена параметров шагов, версия фильтра и размер маски HMNCS) плюс интервал анализа и ключ FFT
+// шага 1. Версия фильтра одна — state.spectrum.filter_version: и в ключе шагов 2–3, и для правила ESCMSK и размера
+// маски в summary_rows. Один построитель на оба помощника ниже — чтобы ключ при «Принять» и проверка «устарело» не
+// разошлись. Нужен загруженный лог (state.params). Функции имён и hmncs_bits — из core/lowpass.js, core/params.js,
+// steps/step2.js и steps/step4.js: все они загружены к любому вызову.
+// Известное ограничение: step1.fft_key — ключ последнего расчёта шага 1, поэтому смена окна FFT на шаге 0 без
+// пересчёта шага 1 не делает принятое устаревшим, пока шаг 1 не пересчитан
 function step_inputs_context() {
     return {
         start: state.settings.start,
@@ -80,11 +86,14 @@ function step_inputs_context() {
         fft_key: step1.fft_key,
         filter_version: state.spectrum.filter_version,
         steps: state.steps,
+        params: state.params,
+        names: { 2: step2_param_names(), 3: lowpass_param_names(state.params), 4: step4_param_names() },
+        bits: hmncs_bits(state.params, state.spectrum.filter_version ?? 1),
     }
 }
 
 // Отпечаток входов шага n (2–4) по текущему состоянию — «Принять» шагов 2–4 кладёт его в state.steps[n].inputs.
-// Брать до записи state.steps[n]: отпечаток шага n — от принятого шагов < n
+// Порядок не важен: ключ шага n — от шагов < n; берётся до записи state.steps[n] для ясности
 function step_inputs_key(n) {
     return summary_inputs_key(n, step_inputs_context())
 }
