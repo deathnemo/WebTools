@@ -68,7 +68,7 @@
 - `summary_param_values(rows, bits)` → объект имя → число из строк с `changed`; `*_HMNCS` — `mask_signed(value, bits)` (как `step2_save_param`).
 - `summary_param_text(rows, bits)` → `param_file_text(summary_param_values(rows, bits))` или `null`, если изменённых нет.
 - `summary_file_name(log_name)` → имя без последнего расширения + `_tune.param` (`"a.b.bin"` → `"a.b_tune.param"`, `null` → `"tune.param"`).
-- `summary_inputs_key(n, ctx)` → строка JSON `[start, end, fft_key, принятое шагов 2..n−1]`, `ctx = { start, end, fft_key, steps }`; `fft_key` — только для шагов 2–3 (они всегда считают шаг 1 до «Принять»), у шага 4 на его месте `null`: шаг 4 можно принять, не открывая шаг 1, и ключ FFT, появившийся позже, давал бы ложное «устарело»; принятое — `steps[k]?.accepted ?? null` с ключами в отсортированном порядке (как `candidate_key`), значения как есть.
+- `summary_inputs_key(n, ctx)` → строка JSON `[start, end, fft_key, filter_version, изменения]` (**изменено по ревью задач 1 и 4**): `ctx` — контекст итога плюс поля отпечатка `{ start, end, fft_key, filter_version, steps, params, names, bits }`; `fft_key` и `filter_version` — только у шагов 2–3, у шага 4 — `null`; «изменения» — строки `summary_rows` по шагам 2..n−1 с `changed`, пары `[имя, значение]` по алфавиту (действующие отличия от лога: «не принят» и «принят как в логе» дают один ключ).
 - `summary_stale(n, ctx)` → `true`, если `steps[n] != null` и `steps[n].inputs !== summary_inputs_key(n, ctx)`; принятое без `inputs` — тоже устарело (защитная ветка).
 
 **Тесты** (`tests/tunewizard-summary.test.cjs`; поддельные `params` — объект с `get`/`has` поверх словаря; скрипты: `Libraries/Param_Helpers.js`, `core/params.js`, `core/filters.js`, `core/pidtune.js` с их зависимостями в порядке страницы, затем `core/summary.js`):
@@ -177,7 +177,7 @@
 
 **Что сделать:**
 
-- `step_inputs_key(n)` в `common.js` → `summary_inputs_key(n, { start: state.settings.start, end: state.settings.end, fft_key: step1.fft_key, filter_version: state.spectrum.filter_version, steps: state.steps })` (версия фильтра — по ревью задачи 1); парный `step_accepted_stale(n)` → `summary_stale(n, …)` с тем же контекстом.
+- `step_inputs_context()` в `common.js` — контекст итога и отпечатка (`start`, `end`, `fft_key: step1.fft_key`, `filter_version: state.spectrum.filter_version`, `steps`, `params`, `names`, `bits`; **изменено по ревью задачи 4**); `step_inputs_key(n)` → `summary_inputs_key(n, step_inputs_context())`, `step_accepted_stale(n)` → `summary_stale(n, …)`.
 - `step2_accept`, `step3_accept`, `step4_accept`: в объект `state.steps[n]` добавить `inputs: step_inputs_key(n)`. Ключ берётся **до** записи `state.steps[n]` (у шага `n` ключ от шагов `< n`, так что порядок не важен, но так понятнее).
 - `log_info`: `frame` — текст после «Frame: » из первого сообщения MSG, которое так начинается (`log.get("MSG", "Message")`; нет MSG или строки — `null`). В тесте — поддельный лог с MSG `["ArduCopter V4.6.3 (92b0cd78)", "Frame: QUAD/X_REV"]` → `"QUAD/X_REV"`; без строки — `null`.
 - `log_info`: `board_id` — номер платы APJ из VER (`version.board_id` от `get_version_and_board`, `null`, если нет) — для запасного ключа памяти (ревью задачи 3).
@@ -202,7 +202,7 @@
 
 **`steps/step5.js`:**
 
-- `step5_context()` — `ctx` для `summary_rows`: `params: state.params`, `steps: state.steps`, `names: { 2: step2_param_names(), 3: lowpass_param_names(state.params), 4: step4_param_names() }`, `filter_version: state.env?.filter_version ?? 1`, `bits: hmncs_bits(state.params, state.env?.filter_version ?? 1)`.
+- `step5_context()` — `ctx` для `summary_rows`: тот же построитель, что у отпечатка (`step_inputs_context()` из `common.js`, при необходимости переименовать в `step_summary_context()` и звать в обоих местах), чтобы «изменён» в ключе и в сводке брал одну версию фильтра (`state.spectrum.filter_version`) — ревью задачи 4, N2. Страховка (N1): `step_accepted_stale(n)` сразу `false`, если `state.steps[n] == null` (без лога построитель контекста бросает).
 - `step5_show()` — рисует сводку сразу (`step5_render` под `step_try(…, "verdict5", "шага 5")`); если метаданные ещё не загружены (`step_metadata()` — `null`), дополнительно `step_load_metadata().then(() => step5_render())`: пункт о перезагрузке появится после загрузки. **Различать «грузятся» и «не загрузились»** (ревью задачи 2): `step_metadata()` даёт `null` в обоих случаях — в `common.js` в `catch` у `step_load_metadata` ставить `step_metadata_state.failed = true`; странице `reboot_names` = `failed ? null : (data ? summary_reboot_names(…) : [])` — пока грузятся, пункта о перезагрузке нет, после загрузки появится, после сбоя — общий пункт. Тест в `tests/tunewizard-common.test.cjs` на флаг сбоя.
 - `step5_render()`:
   - **плитки** (`step_tile`): «Аппарат» — `state.info.board ?? "—"` и рама подписью; «Лог» — `state.file_name`; «Изменено» — число строк `changed` (акцент); «Приняты шаги» — «2, 3, 4» / «нет»;
