@@ -59,23 +59,23 @@ function wait_overlay(page) {
     return page.waitForFunction(() => document.getElementById('loading').style.visibility === 'hidden', null, { timeout: 180000 })
 }
 
-// Склеить снимки (PNG в base64) столбиком через зазор gap цвета фона страницы и уменьшить до ширины width с сохранением
-// пропорций. Выполняется в странице: createImageBitmap и canvas, imageSmoothingQuality = "high". Возвращает размеры
-// кусков, склейки и иконки и PNG иконки в base64
-function compose_icon(page, pieces, gap, width) {
-    return page.evaluate(async ({ pieces, gap, width }) => {
+// Склеить снимки (PNG в base64) столбиком через зазор gap цвета фона страницы и уменьшить до ширины icon_width
+// с сохранением пропорций. Выполняется в странице: createImageBitmap и canvas, imageSmoothingQuality = "high".
+// Возвращает размеры кусков, склейки и иконки и PNG иконки в base64
+function compose_icon(page, pieces) {
+    return page.evaluate(async ({ pieces, spacing, width }) => {
         const bitmap = (b64) => createImageBitmap(new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type: 'image/png' }))
         const images = await Promise.all(pieces.map(bitmap))
         const full = document.createElement('canvas')
         full.width = Math.max(...images.map((img) => img.width))
-        full.height = images.reduce((sum, img) => sum + img.height, 0) + gap * (images.length - 1)
+        full.height = images.reduce((sum, img) => sum + img.height, 0) + spacing * (images.length - 1)
         const ctx = full.getContext('2d')
         ctx.fillStyle = getComputedStyle(document.body).backgroundColor
         ctx.fillRect(0, 0, full.width, full.height)
         let y = 0
         for (const img of images) {
             ctx.drawImage(img, 0, y)
-            y += img.height + gap
+            y += img.height + spacing
         }
         const icon = document.createElement('canvas')
         icon.width = width
@@ -90,7 +90,7 @@ function compose_icon(page, pieces, gap, width) {
             size: [icon.width, icon.height],
             png: icon.toDataURL('image/png').split(',')[1],
         }
-    }, { pieces, gap, width })
+    }, { pieces: pieces, spacing: gap, width: icon_width })
 }
 
 async function main() {
@@ -125,8 +125,9 @@ async function main() {
             return step2.form_ready && (gd._fullLayout != null) && (gd.data ?? []).some((t) => (t.y != null) && (t.y.length > 0)) &&
                 (Math.abs(gd._fullLayout.width - gd.getBoundingClientRect().width) <= 2)
         }, null, { timeout: 60000 })
-        // Шрифты страницы загружены; курсор и фокус убраны, чтобы на снимке не было наведения и рамки фокуса
-        await page.evaluate(() => document.fonts.ready)
+        // Дождаться идущих загрузок шрифтов (отказ загрузки попадёт в problems и остановит запись ниже); курсор и фокус
+        // убраны, чтобы на снимке не было наведения и рамки фокуса
+        await page.evaluate(() => document.fonts.ready.then(() => null))
         await page.mouse.move(0, 0)
         await page.evaluate(() => document.activeElement?.blur())
 
@@ -135,7 +136,12 @@ async function main() {
         for (const selector of ['#wizbar', '#Spectrum2']) {
             pieces.push((await page.locator(selector).screenshot()).toString('base64'))
         }
-        const icon = await compose_icon(page, pieces, gap, icon_width)
+        // Ошибки страницы (например, не загрузились шрифты Google Fonts — снимок вышел бы с запасными) — иконку
+        // не записывать; сами сообщения печатает catch ниже
+        if (problems.length) {
+            throw new Error('на странице были ошибки — иконка не записана')
+        }
+        const icon = await compose_icon(page, pieces)
         fs.writeFileSync(icon_path, Buffer.from(icon.png, 'base64'))
         console.log('tunewizard-icon: ' + path.relative(repo, icon_path).split(path.sep).join('/') + ' — ' + icon.size.join('×') + ' px')
         console.log('  окно ' + viewport.width + ' px; полоса шагов ' + icon.pieces[0].join('×') + ', спектр ' + icon.pieces[1].join('×') +
