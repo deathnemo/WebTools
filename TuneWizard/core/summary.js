@@ -211,7 +211,7 @@ function summary_period(text) {
 // 2. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
 //    summary_notch_enable_hint;
 // 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
-//    есть — общий пункт: свериться с пометкой Reboot required в Mission Planner [наше];
+//    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
 // 4. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
 //    в порядке pidtune_axes, первая с заглавной;
 // 5. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
@@ -237,8 +237,7 @@ function summary_refly(ctx) {
     if (ctx.reboot_names == null) {
         if (changed.length > 0) {
             add("reboot", "Описания параметров не загрузились, и мастер не знает, какие изменённые параметры " +
-                "действуют только после перезагрузки: проверьте пометку Reboot required в Mission Planner и при " +
-                "необходимости перезагрузите полётный контроллер")
+                "действуют только после перезагрузки: после записи перезагрузите полётный контроллер — так надёжнее")
         }
     } else {
         const reboot = changed.map((row) => row.name).filter((name) => ctx.reboot_names.includes(name))
