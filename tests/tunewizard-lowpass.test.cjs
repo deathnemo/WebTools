@@ -1,6 +1,7 @@
 // Тесты низкочастотных фильтров шага 3 мастера настройки (TuneWizard/core/lowpass.js): формулы Mission Planner
 // по размеру винта (включая округление C# и RoundTo), имена и единицы пределов ускорения для 4.6 и новых
-// версий, значения лога с заводскими по умолчанию, распознавание заводских пределов и набор вариантов; модель ПИД
+// версий, значения лога с заводскими по умолчанию, распознавание заводских пределов и набор вариантов, ограничение
+// среза фильтра гироскопа 0.4 частоты выборки, как в прошивке; модель ПИД
 // без гироскопа — фильтр первого порядка и его задержка, производная (обе — и против разностных уравнений
 // AC_PID::update_all во времени), отметки вариантов, предупреждения модели (оценка на синтетическом гироскопе —
 // в tests/tunewizard-steps.test.cjs).
@@ -406,6 +407,28 @@ test('prop_size_warning: пусто — нет предупреждения, в�
     assert.equal(prop_size_warning(40), null)
     assert.equal(prop_size_warning(null), null)
     assert.equal(prop_size_warning(undefined), null)
+})
+
+test('lowpass_gyro_cutoff: срез выше 0.4 частоты выборки ограничивается, как в прошивке, с предупреждением; иначе — как есть', () => {
+    // DigitalBiquadFilter::compute_params: cutoff = MIN(cutoff, 0.4·sample_freq)
+    assert.equal(lowpass_gyro_cutoff_ratio, 0.4)
+    assert.deepEqual(lowpass_gyro_cutoff(40, 1000), { hz: 40, warning: null })
+    assert.deepEqual(lowpass_gyro_cutoff(400, 1000), { hz: 400, warning: null }, 'ровно 0.4·fs — без ограничения')
+    const over = lowpass_gyro_cutoff(500, 1000)
+    assert.equal(over.hz, 400)
+    assert.equal(over.warning, 'INS_GYRO_FILTER 500 выше 0.4 частоты гироскопа (1000 Гц): прошивка ограничит до 400 Гц — так и посчитано')
+    // Дробная частота выборки batch-лога — в тексте округлена до десятых, срез — точный
+    const raw = lowpass_gyro_cutoff(1e6, 2000.3342)
+    assert.ok(Math.abs(raw.hz - 800.13368) < 1e-6, String(raw.hz))
+    assert.match(raw.warning, /^INS_GYRO_FILTER 1000000 выше 0.4 частоты гироскопа \(2000\.3 Гц\): прошивка ограничит до 800\.1 Гц/)
+    // Выключенный фильтр, отрицательный срез и нечисловой (пустое поле формы — NaN) — как есть, без предупреждения
+    for (const hz of [0, -5, NaN, undefined, null]) {
+        assert.deepEqual(lowpass_gyro_cutoff(hz, 1000), { hz: hz, warning: null }, String(hz))
+    }
+    // Частота выборки неизвестна или не положительна — ограничивать нечем
+    for (const rate of [NaN, 0, -1, undefined, null]) {
+        assert.deepEqual(lowpass_gyro_cutoff(5000, rate), { hz: 5000, warning: null }, 'частота выборки ' + rate)
+    }
 })
 
 // ---------- Модель ПИД: фильтр первого порядка, производная, отметки вариантов ----------
