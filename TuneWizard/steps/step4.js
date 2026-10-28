@@ -95,6 +95,15 @@ function step4_windows_text(n) {
     return step_plural(n, ["окно", "окна", "окон"])
 }
 
+// Запас фазы прогноза pred словами: «56.2°»; частота среза найдена, а запас не определён (развёртка фазы недостоверна,
+// pidtune_margins → pm_note) — «не определён»; нет прогноза или среза — «—»
+function step4_pm_text(pred) {
+    if (Number.isFinite(pred?.pm_deg)) {
+        return pred.pm_deg.toFixed(1) + "°"
+    }
+    return (pred?.pm_note != null) ? "не определён" : "—"
+}
+
 // Имена параметров формы по порядку: ATC_RAT_RLL/PIT/YAW_P/I/D
 function step4_param_names() {
     return step4_axis_list.flatMap((axis) => step4_gain_keys.map((k) => pidtune_axes[axis].rate + k))
@@ -1262,7 +1271,7 @@ function step4_prediction_text(row, pred_log) {
         return step4_unstable_text(row)
     }
     const m = pred.metrics
-    return "запас фазы " + step4_fixed(pred.pm_deg, 1) + "° (лог " + step4_fixed(pred_log?.pm_deg, 1) + "°), частота среза " + step4_fixed(pred.crossover_hz, 2) +
+    return "запас фазы " + step4_pm_text(pred) + " (лог " + step4_pm_text(pred_log) + "), частота среза " + step4_fixed(pred.crossover_hz, 2) +
         " Гц (лог " + step4_fixed(pred_log?.crossover_hz, 2) + "), перерегулирование " + step4_fixed(m?.overshoot_pct, 1) + " % (лог " +
         step4_fixed(pred_log?.metrics?.overshoot_pct, 1) + " %), нарастание " + step4_ms(m?.rise_s) + " (лог " + step4_ms(pred_log?.metrics?.rise_s) + ")"
 }
@@ -1510,8 +1519,9 @@ function step4_render_metrics() {
     tiles.push(step_tile("Данные", (seg != null) ? step4_windows_text(seg.windows) + " · " + seg.data_s.toFixed(1) + " с" : "—", "нужно не меньше " + rules.min_data_s + " с",
                          ((seg != null) && (seg.data_s < rules.min_data_s)) ? "bad" : null))
     const pl = res.pred_log
-    tiles.push(step_tile("Срез · запас фазы (лог)", res.predict_ok ? step4_fixed(pl?.crossover_hz, 2) + " Гц · " + step4_fixed(pl?.pm_deg, 1) + "°" : "—",
-                         res.predict_ok ? ("по амплитуде " + (Number.isFinite(pl?.gm_db) ? pl.gm_db.toFixed(1) + " дБ" : "—")) : "только при достоверном прогнозе", null))
+    const pm_sub = (pl?.pm_note != null) ? pl.pm_note : "по амплитуде " + (Number.isFinite(pl?.gm_db) ? pl.gm_db.toFixed(1) + " дБ" : "—")
+    tiles.push(step_tile("Срез · запас фазы (лог)", res.predict_ok ? step4_fixed(pl?.crossover_hz, 2) + " Гц · " + step4_pm_text(pl) : "—",
+                         res.predict_ok ? pm_sub : "только при достоверном прогнозе", null))
     box.innerHTML = tiles.join("")
     box.hidden = false
 }
@@ -1582,7 +1592,9 @@ function step4_pred_cells(row, res, same_as_log) {
     }
     const m = pred.metrics
     const ms = (s) => Number.isFinite(s) ? s * 1000 : NaN
-    return step_cell(step4_fixed(pred.pm_deg, 1), diff(pred.pm_deg, log?.pm_deg, 1), pm_cls, Number.isFinite(pred.gm_db) ? "запас по амплитуде " + pred.gm_db.toFixed(1) + " дБ" : null) +
+    // Запас не определён (развёртка фазы недостоверна) — «—», причина в подсказке ячейки
+    return step_cell(step4_fixed(pred.pm_deg, 1), diff(pred.pm_deg, log?.pm_deg, 1), pm_cls,
+                     Number.isFinite(pred.gm_db) ? "запас по амплитуде " + pred.gm_db.toFixed(1) + " дБ" : pred.pm_note) +
         step_cell(step4_fixed(pred.crossover_hz, 2), diff(pred.crossover_hz, log?.crossover_hz, 2), "", null) +
         step_cell(step4_fixed(m?.overshoot_pct, 1), diff(m?.overshoot_pct, log?.metrics?.overshoot_pct, 1), flags?.overshoot ? "worse" : "", null) +
         step_cell(step4_fixed(ms(m?.rise_s), 1), diff(ms(m?.rise_s), ms(log?.metrics?.rise_s), 1), "", null)
@@ -2230,7 +2242,8 @@ function lbode4_bode(pred) {
 }
 
 // Частота среза и запас фазы прогноза для легенды: « · срез 3.86 Гц · запас 60.7°»; неустойчивый по причинности при
-// запасе больше 0 (step4_margins_shown — как в таблице) — « · запас недостоверен» без чисел; без них — пусто
+// запасе больше 0 (step4_margins_shown — как в таблице) — « · запас недостоверен» без чисел; срез найден, а запас
+// не определён (развёртка фазы недостоверна, pm_note) — « · срез 3.86 Гц · запас не определён»; без среза — пусто
 function lbode4_margins_text(pred) {
     if (pred == null) {
         return ""
@@ -2238,10 +2251,10 @@ function lbode4_margins_text(pred) {
     if (!step4_margins_shown(pred)) {
         return " · запас недостоверен"
     }
-    if (!Number.isFinite(pred.crossover_hz) || !Number.isFinite(pred.pm_deg)) {
+    if (!Number.isFinite(pred.crossover_hz) || (!Number.isFinite(pred.pm_deg) && (pred.pm_note == null))) {
         return ""
     }
-    return " · срез " + pred.crossover_hz.toFixed(2) + " Гц · запас " + pred.pm_deg.toFixed(1) + "°"
+    return " · срез " + pred.crossover_hz.toFixed(2) + " Гц · запас " + step4_pm_text(pred)
 }
 
 // Бодэ разомкнутого контура L оси res: лог (прогноз лога — измеренная L) и выбранная строка row, отметки частоты среза

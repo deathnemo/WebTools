@@ -1111,10 +1111,17 @@ test('pidtune_margins: L = (fc/f)·e^(−j(90° + 360°·f·τ)) — срез fc
     assert.equal(m.multiple_crossings, false)
     assert.equal(m.crossings.length, 1)
     // Фаза первого пересечения развёрнута от низких частот: при τ 0.3 с она ниже −360° — запас 90° − 360°·fc·τ ≈ −453°
-    // (главное значение дало бы −93°)
-    close_to(pidtune_margins(freq, loop(5.03, 0.3)).pm_deg, 90 - 360 * 5.03 * 0.3, 0.1, 'запас при фазе ниже −360°')
+    // (главное значение дало бы −93°); по модулю больше 180° — развёртка признаётся недостоверной (аудит области D):
+    // pm_deg null с причиной, посчитанный запас остаётся в crossings[0], частота среза — есть, запаса по амплитуде нет
+    const far = pidtune_margins(freq, loop(5.03, 0.3))
+    assert.equal(far.pm_deg, null)
+    close_to(far.crossings[0].pm_deg, 90 - 360 * 5.03 * 0.3, 0.1, 'запас первого пересечения при фазе ниже −360°')
+    assert.match(far.pm_note, /^развёртка фазы недостоверна: запас первого пересечения -453° по модулю больше 180°$/)
+    assert.equal(far.gm_db, null)
+    close_to(far.crossover_hz, 5.03, 1e-3, 'частота среза остаётся')
+    assert.equal(m.pm_note, null, 'достоверный запас — без причины')
     // Срез ниже crossover_min_hz (0.5 Гц) и |L| меньше 1 везде — частоты среза нет
-    const none = { crossover_hz: null, pm_deg: null, gm_db: null, multiple_crossings: false, crossings: [] }
+    const none = { crossover_hz: null, pm_deg: null, gm_db: null, multiple_crossings: false, crossings: [], pm_note: null }
     assert.deepEqual(pidtune_margins(freq, loop(0.3, 0.02)), none)
     // Нечисловое L — нет
     const bad = loop(5.03, 0.021)
@@ -1176,6 +1183,41 @@ test('pidtune_margins: резонанс даёт второе пересечен
             assert.ok(m.gm_db > 0, 'запас по амплитуде ' + m.gm_db)
         }
     }
+})
+
+test('pidtune_margins: слегка положительная фаза L на 0.5 Гц — точка отсчёта в (−270°, 90°], запас верный; шум около 0° ветвь не переворачивает (аудит области D)', () => {
+    // |L| = 5/f (срез 5 Гц), фаза p0 − 25°·(f − 0.5): правда — запас 180° + p0 − 112.5° = 67.5° + p0. Сетка — как у
+    // прогноза при 400 Гц (4096 точек): первый бин не ниже 0.5 Гц — 0.586 Гц, там фаза p0 − 2.1°
+    const freq = Array.from({ length: 2049 }, (_, k) => k * 400 / 4096)
+    const loop = (p0) => [freq.map((f) => (f > 0) ? 5 / f * Math.cos((p0 - 25 * (f - 0.5)) / R2D) : Infinity),
+                          freq.map((f) => (f > 0) ? 5 / f * Math.sin((p0 - 25 * (f - 0.5)) / R2D) : 0)]
+    for (const p0 of [-100, -10, -1, -0.1, 0, 0.1, 1, 10, 30, 89]) {
+        const m = pidtune_margins(freq, loop(p0))
+        close_to(m.crossover_hz, 5, 0.02, 'срез при фазе ' + p0 + '° на 0.5 Гц')
+        close_to(m.pm_deg, 67.5 + p0, 0.5, 'запас при фазе ' + p0 + '° на 0.5 Гц (раньше +10° давало −282.5°)')
+        assert.equal(m.pm_note, null, 'фаза ' + p0 + '°: запас достоверен')
+        assert.ok((67.5 + p0 <= 0) || (m.gm_db != null), 'фаза ' + p0 + '°: запас по амплитуде ' + m.gm_db)
+    }
+    // Шумная фаза на первом бине: +2° вместо −2° только на нём — запас тот же (шаг между бинами в (−180°, 180°]), без 360°
+    const base = pidtune_margins(freq, loop(-2))
+    const noisy = loop(-2)
+    const k0 = freq.findIndex((f) => f >= pidtune_rules.crossover_min_hz)
+    const mag0 = Math.hypot(noisy[0][k0], noisy[1][k0])
+    noisy[0][k0] = mag0 * Math.cos(2 / R2D)
+    noisy[1][k0] = mag0 * Math.sin(2 / R2D)
+    close_to(pidtune_margins(freq, noisy).pm_deg, base.pm_deg, 1e-6, 'шум ±2° на первом бине')
+    // Фаза +100° на 0.5 Гц — вне окна (−270°, 90°]: точка отсчёта −260°, запас 180° − 260° − 112.5° = −192.5° — по
+    // модулю больше 180°, запас не определён
+    const far = pidtune_margins(freq, loop(100))
+    assert.equal(far.pm_deg, null)
+    assert.match(far.pm_note, /по модулю больше 180°/)
+    // Отметки такого прогноза: не «неустойчив», а «неполный: запас фазы не определён (…)»
+    const log = { pm_deg: 50, metrics: { overshoot_pct: 10 } }
+    const flags = pidtune_flags({ pm_deg: null, pm_note: far.pm_note, crossover_hz: far.crossover_hz, metrics: { overshoot_pct: 12 }, unstable: false }, log)
+    assert.equal(flags.unstable, false)
+    assert.equal(flags.incomplete, true)
+    assert.equal(flags.reasons[0], 'прогноз неполный: запас фазы не определён (' + far.pm_note + ')')
+    assert.ok(!flags.reasons.some((r) => r.includes('неустойчив')), flags.reasons.join('; '))
 })
 
 test('pidtune_predict: на известном контуре — T_new = G·g·(C_new + FF) / (1 + G·g·C_new) точно, с FF ≠ 0 и поправкой фильтров', () => {
