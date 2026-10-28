@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 28.10.2026 — этап 5 (шаг 5 «Сводка», `.param`, память прохода, печать) готов: 8 задач, финальное ревью и правки по нему; открыт [PR #5](https://github.com/deathnemo/WebTools/pull/5) внутри форка (сливает пользователь).
+**Обновлено:** 28.10.2026 — этап 5 (шаг 5 «Сводка», `.param`, память прохода, печать) готов: 8 задач, финальное ревью и правки по нему; слит в `main` ([PR #5](https://github.com/deathnemo/WebTools/pull/5)). Этап 6 (иконка и строка «Мастер настройки» на главной WebTools) готов: 2 задачи, ревью пройдены; открыт [PR #6](https://github.com/deathnemo/WebTools/pull/6) внутри форка (сливает пользователь). Все шесть этапов мастера сделаны.
 
 ---
 
@@ -112,12 +112,22 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 | 25.10 | Этап 5: память прохода — «применено + прогноз» (шаг 0 — что применено; шаги 2–4 — «было → прогноз → в этом логе»), по аппаратам (ключ — строка полётного контроллера из MSG), без переноса между браузерами |
 | 25.10 | Этап 5: `.param` — только изменённые параметры; устаревшее принятое — предупредить, не блокировать; печать — только сводка; подход «ядро (`core/summary.js`, `core/passmem.js`) + страница» |
 | 28.10 | Этап 5 — через PR внутри форка (PR #5) |
+| 28.10 | Этап 6: ссылка «Мастер настройки» — на главной WebTools сразу после PID Review (подпись на русском); иконка — снимок «полоса шагов + спектр шага 2», как у соседних инструментов |
+| 28.10 | Этап 6 — через PR внутри форка (PR #6) |
 
 ---
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-stage5` (от `main` = `77d67e0`), отправлена в форк. Этап 5 (сводка, `.param`, память прохода, печать) готов: 8 задач, все ревью пройдены, финальное ревью ветки и правки по нему. Дизайн — `docs/plans/2026-10-25-tune-wizard-stage5-design.md`, план — `docs/plans/2026-10-25-tune-wizard-stage5.md`. Открыт PR #5 внутри форка.
+- **Ветка:** `tune-wizard-stage6` (от `main` = `9fa01fa`), отправлена в форк. Этап 6 готов: иконка `images/TuneWizard_Icon.png` и строка «Мастер настройки» на главной WebTools после PID Review. Дизайн — `docs/plans/2026-10-28-tune-wizard-stage6-design.md`, план — `…-stage6.md`. Открыт PR #6 внутри форка.
+- **Этап 6:**
+
+| Задача | Коммиты |
+|---|---|
+| 1. Скрипт иконки `tests/tunewizard-icon.cjs` (`npm run tunewizard:icon`) и `images/TuneWizard_Icon.png` 400×300: полоса шагов и спектр шага 2 снимаются отдельно в окне 760 px (полоса — в две строки) и склеиваются на canvas; по ревью — при ошибках страницы иконка не записывается | `7e4fa00`, `bd8a5f2` |
+| 2. Строка «Мастер настройки» в корневом `index.html` после PID Review (подпись на русском, `lang="ru"`), проверка главной в браузерном тесте, Readme и `tests/README.md` | `ad7e612`, `1211302` |
+
+- **Финальные проверки этапа 6** (28.10.2026, код `1211302`): lint чистый, `npm test` 468 из 468, `npm run test:tunewizard` — «главная и шаги 0–5 пройдены»; главная отличается от `upstream/main` только 10 добавленными строками, пробное слияние с upstream — без конфликтов.
 - **Этап 5** (план `docs/plans/2026-10-25-tune-wizard-stage5.md`):
 
 | Задача | Коммиты |
@@ -134,7 +144,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 - **Финальные проверки этапа 5** (28.10.2026, код `7cff023`): lint чистый, `npm test` 468 из 468, `npm run test:tunewizard` (шаги 0–5), `npm run test:tunewizard-compare` и `npm run test:tunewizard-pid-compare` — отклонение 0. На тестовом логе в сводке после блока «Устаревание» браузерного теста — 13 изменённых параметров, 29 без изменений, 5 пунктов «что сделать перед следующим полётом».
 
-- **`main`** = `origin/main` = `77d67e0`: этапы 1–4. Локальный `main` отслеживает `upstream/main` — обновлять из форка командой `git pull origin main`, простой `git pull` потянет ArduPilot.
+- **`main`** = `origin/main` = `9fa01fa`: этапы 1–5. Локальный `main` отслеживает `upstream/main` — обновлять из форка командой `git pull origin main`, простой `git pull` потянет ArduPilot.
 - **Этап 4** (план `docs/plans/2026-10-25-tune-wizard-stage4.md`, дизайн `…-stage4-design.md`):
 
 | Задача | Коммиты |
@@ -174,8 +184,9 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
   - **вынос графиков шагов 3–4** в отдельные файлы (`step3_plots.js`, `step4_plots.js`) — по мере роста.
 - **PR этапа 3:** [PR #3](https://github.com/deathnemo/WebTools/pull/3) слит пользователем 24.10.2026 21:21 UTC (коммит слияния `0a0a5ea`).
 - **PR этапа 4:** [PR #4](https://github.com/deathnemo/WebTools/pull/4) слит пользователем 25.10.2026 09:19 UTC (коммит слияния `77d67e0`).
-- **PR этапа 5:** [PR #5](https://github.com/deathnemo/WebTools/pull/5) (`tune-wizard-stage5` → `main` в форке) открыт 28.10.2026, сливает пользователь кнопкой на GitHub; затем `git checkout main`, `git pull origin main`.
-- **Дальше:** слияние PR #5; этап 6 (иконка и ссылка на лендинге).
+- **PR этапа 5:** [PR #5](https://github.com/deathnemo/WebTools/pull/5) слит пользователем 27.10.2026 22:54 UTC (коммит слияния `9fa01fa`).
+- **PR этапа 6:** [PR #6](https://github.com/deathnemo/WebTools/pull/6) (`tune-wizard-stage6` → `main` в форке) открыт 28.10.2026, сливает пользователь кнопкой на GitHub; затем `git checkout main`, `git pull origin main`.
+- **Дальше:** слияние PR #6. После него мастер закончен; дальше — долги из списка выше по мере надобности (прежде всего тестовый полёт «Rate Loop Only» и пара логов одного аппарата для проверки памяти).
 
 ---
 
@@ -240,6 +251,16 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
   - задачи 5–7 — страница сводки, «Прошлый проход» на шаге 0, строки «было → прогноз → в этом логе» на шагах 2–4; по ревью: печать шагов 0–4 снова работает, «Забыть» удаляет только показанный проход, «в этом логе» — только конфигурация лога, порядок в строке называется один раз;
   - задача 8 — Readme, описание тестов, финальный прогон (`27048c8`); финальное ревью ветки — правки `988126c`, `7cff023` (вердикт шага 2 при устаревшем принятом, «устарело» шага 4 только по его фильтрам).
   - открыт [PR #5](https://github.com/deathnemo/WebTools/pull/5) внутри форка.
+- **Этап 5 слит:** [PR #5](https://github.com/deathnemo/WebTools/pull/5) — пользователь нажал «Merge pull request» на GitHub (22:54 UTC 27.10, `9fa01fa`), локальный `main` обновлён `git pull origin main`; создана ветка этапа 6 `tune-wizard-stage6`.
+
+### 28.10.2026 — этап 5 слит, этап 6
+
+- **Этап 6** (ветка `tune-wizard-stage6`):
+  - брейнсторминг: ссылка — на главной после PID Review, подпись на русском; иконка — снимок «полоса шагов + спектр шага 2», как у соседей (решения в разделе 3);
+  - дизайн и план (`2f0d745`), 2 задачи;
+  - задача 1 — скрипт иконки и картинка (`7e4fa00`); при реализации: сплошная область выходит выше 3000 px, поэтому полоса и график снимаются отдельно и склеиваются, окно 760 px; по ревью — при ошибках страницы (например, без Google Fonts) иконка не записывается (`bd8a5f2`);
+  - задача 2 — строка на главной, проверка главной в браузерном тесте, документы (`ad7e612`, мелочи `1211302`);
+  - открыт [PR #6](https://github.com/deathnemo/WebTools/pull/6) внутри форка.
 
 ---
 
@@ -252,12 +273,15 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
   - `2026-10-24-tune-wizard-stage2-design.md`, `…-stage2.md`;
   - `2026-10-24-tune-wizard-stage3-design.md`, `…-stage3.md`;
   - `2026-10-25-tune-wizard-stage4-design.md`, `…-stage4.md`;
-  - `2026-10-25-tune-wizard-stage5-design.md`, `…-stage5.md`.
+  - `2026-10-25-tune-wizard-stage5-design.md`, `…-stage5.md`;
+  - `2026-10-28-tune-wizard-stage6-design.md`, `…-stage6.md`.
 - `tests/tunewizard*.cjs` — тесты мастера, описание в `tests/README.md`:
   - `tunewizard.test.cjs`, `-core`, `-steps`, `-plots`, `-params`, `-compare-rules`, `-lowpass`, `-common`, `-pid`, `-pidtune`, `-pid-compare-rules`, `-summary`, `-passmem` — под Node, входят в `npm test`;
   - `tunewizard-browser.cjs` — шаги 0–5 в Chrome (привязан к тестовому логу);
-  - `tunewizard-compare.cjs` — сравнение с FilterReview; `tunewizard-pid-compare.cjs` — сравнение отклика с PIDReview.
+  - `tunewizard-compare.cjs` — сравнение с FilterReview; `tunewizard-pid-compare.cjs` — сравнение отклика с PIDReview;
+  - `tunewizard-icon.cjs` — пересоздаёт иконку `images/TuneWizard_Icon.png` (`npm run tunewizard:icon`, вручную; в обычные проверки не входит).
 - `eslint.config.mjs` — глобалы страницы ESLint берёт из тегов `<script>` в `index.html`: каждый новый скрипт мастера надо подключить там.
+- Корневой `index.html` (главная WebTools) — единственный изменённый файл ArduPilot: строка «Мастер настройки» после PID Review. Если ArduPilot поправит это же место, при подтягивании upstream будет небольшой конфликт — оставить обе правки.
 
 ---
 
