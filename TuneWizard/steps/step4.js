@@ -24,7 +24,8 @@
 // core/candidates.js (candidate_key), core/filters.js (notch_param_names), core/spectrum.js (find_instance),
 // core/gyro.js (find_start_index, find_end_index), Libraries/Array_Math.js (complex_abs, array_add),
 // Libraries/Param_Helpers.js (param_to_string),
-// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape),
+// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape,
+// interval_input_changed — кнопка «Интервал — участок ACRO»),
 // steps/common.js (step_signed, step_plural, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, step_pointer, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js
@@ -71,12 +72,15 @@ const step4_check_letters = { ridge: "(а)", halves: "(б)", outer: "(в)" }
 // равными (step4_best_unflagged) [наше, решение координатора по ревью задачи 7]
 const step4_best_tie_pct = 0.5
 
-// Совет тестового полёта (решение пользователя 25.10.2026; раздел 3 дизайна): полный — в вердикте оси, краткий — в сводке
-const step4_test_flight = "Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only» (значение 2, или 3 вместе с Air-mode) — " +
-    "угловой контур выключен, цель — прямая команда пилота; 2–3 минуты резких отклонений стиков по каждой оси; в LOG_BITMASK " +
-    "включены ATTITUDE_FAST и PID. Такой лог мастер считает точно."
-const step4_test_flight_short = "нужен тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only» (2, или 3 с Air-mode), 2–3 минуты резких " +
-    "отклонений стиков по каждой оси, в LOG_BITMASK — ATTITUDE_FAST и PID"
+// Совет тестового полёта (решение пользователя 25.10.2026; раздел 3 дизайна): полный — в вердикте оси, краткий — в сводке.
+// ACRO_TRAINER = 0 — тренер Acro (заводское 2) подмешивает в цель скорости выравнивание по углу и в Rate Loop Only
+// (mode_acro.cpp, get_pilot_desired_rates_rads) [аудит области D]
+const step4_test_flight = "Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only» (значение 2, или 3 вместе с Air-mode) и " +
+    "ACRO_TRAINER = 0 — угловой контур выключен, цель — прямая команда пилота (тренер при ACRO_TRAINER ≠ 0 подмешивал бы в неё " +
+    "выравнивание по углу); 2–3 минуты резких отклонений стиков по каждой оси; в LOG_BITMASK включены ATTITUDE_FAST и PID. Такой лог " +
+    "мастер считает точно."
+const step4_test_flight_short = "нужен тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only» (2, или 3 с Air-mode) и ACRO_TRAINER = 0, " +
+    "2–3 минуты резких отклонений стиков по каждой оси, в LOG_BITMASK — ATTITUDE_FAST и PID"
 
 // ---------- Подписи ----------
 
@@ -102,6 +106,32 @@ function step4_pm_text(pred) {
         return pred.pm_deg.toFixed(1) + "°"
     }
     return (pred?.pm_note != null) ? "не определён" : "—"
+}
+
+// Интервал для кнопки «Интервал — участок ACRO»: участок ACRO лога тестового полёта с интервалом шире него
+// (pidtune_log_mode → rate_only_segment; один на интервал — у первой оси с режимом лога), границы — целые секунды внутри
+// участка (начало вверх, конец вниз: interval_input_changed округляет наружу и захватил бы соседние режимы; MODE ровно
+// на конце участка pidtune_mode_segments в интервал не берёт). null — участка нет или он короче секунды
+function step4_acro_interval() {
+    const segment = step4_axis_list.map((axis) => step4.calc?.[axis]?.mode?.rate_only_segment ?? null).find((s) => s != null) ?? null
+    if (segment == null) {
+        return null
+    }
+    const start = Math.ceil(segment.start)
+    const end = Math.floor(segment.end)
+    return (end > start) ? { start: start, end: end } : null
+}
+
+// Подсказка лога тестового полёта с широким интервалом (вместо совета слетать ещё раз): строчными, для начала фразы —
+// capital. null — участка ACRO нет
+function step4_acro_hint(capital = false) {
+    const interval = step4_acro_interval()
+    if (interval == null) {
+        return null
+    }
+    const text = "лог тестового полёта: сузьте интервал анализа до участка ACRO (" + interval.start + "–" + interval.end + " с) — кнопка " +
+        "«Интервал — участок ACRO» под сводкой шага"
+    return capital ? text[0].toUpperCase() + text.slice(1) : text
 }
 
 // Имена параметров формы по порядку: ATC_RAT_RLL/PIT/YAW_P/I/D
@@ -203,6 +233,7 @@ function step4_init() {
     })
     document.getElementById("cand4_apply").addEventListener("click", step4_apply)
     document.getElementById("pidf_accept").addEventListener("click", step4_accept)
+    document.getElementById("step4_acro_interval").addEventListener("click", step4_acro_apply)
     // «Открыть в PIDReview» — как «Открыть в FilterReview» шага 1
     document.getElementById("step4_open_pidreview").addEventListener("click", () => step_open_in("../PIDReview/", () => {
         step_verdict("verdict4", "warn", "Браузер не открыл новую вкладку: разрешите всплывающие окна для этой страницы")
@@ -222,7 +253,7 @@ function step4_reset() {
     step4.edit_timer = null
     document.getElementById("step4_window").value = step4.window
     document.getElementById("pidf_form").innerHTML = ""
-    for (const id of ["verdict4", "step4_tabs", "step4_panel", "memory4"]) {
+    for (const id of ["verdict4", "step4_acro_row", "step4_tabs", "step4_panel", "memory4"]) {
         document.getElementById(id).hidden = true
     }
     for (const id of ["cand4_apply", "pidf_accept", "step4_open_pidreview"]) {
@@ -959,6 +990,20 @@ function step4_apply() {
     step4_flush_edits(true)
 }
 
+// «Интервал — участок ACRO»: интервал анализа — участок ACRO лога тестового полёта (step4_acro_interval) через поля
+// шага 0 и interval_input_changed (wizard.js: зажим в границы лога, график полёта), затем пересчёт шага (интервал —
+// часть ключа расчёта)
+function step4_acro_apply() {
+    const interval = step4_acro_interval()
+    if (interval == null) {
+        return
+    }
+    document.getElementById("TimeStart").value = interval.start
+    document.getElementById("TimeEnd").value = interval.end
+    interval_input_changed()
+    step4_show()
+}
+
 // Поля, которые принять нельзя: пустые (значение неизвестно) и отрицательные → текст отказа или null
 function step4_accept_refusal(values) {
     const names = step4_param_names()
@@ -1044,6 +1089,8 @@ function step4_redraw_all() {
     const ready = step4_ready()
     document.getElementById("pidf_accept").disabled = !(ready && step4.filled)
     document.getElementById("step4_open_pidreview").disabled = state.file == null
+    // Кнопка «Интервал — участок ACRO» — только у лога тестового полёта с интервалом шире участка ACRO
+    document.getElementById("step4_acro_row").hidden = !ready || (step4_acro_interval() == null)
     if (!ready) {
         for (const id of ["step4_tabs", "step4_panel"]) {
             document.getElementById(id).hidden = true
@@ -1156,6 +1203,8 @@ function step4_render_summary() {
 
     const states = Object.fromEntries(step4_axis_list.map((axis) => [axis, step4_axis_state(axis)]))
     const reliable = step4_axis_list.filter((axis) => step4.calc[axis].status === "ok")
+    // Лог тестового полёта с интервалом шире участка ACRO — сузить интервал, а не лететь снова
+    const flight_advice = step4_acro_hint() ?? step4_test_flight_short
     if (reliable.length == 0) {
         if (step4_axis_list.every((axis) => step4.calc[axis].status === "nodata")) {
             step_verdict("verdict4", "fail", "Нет данных PID ни по одной оси в интервале анализа — выберите другой интервал на шаге 0.")
@@ -1165,7 +1214,7 @@ function step4_render_summary() {
         const reasons = [...new Set(step4_axis_list.map((axis) => states[axis].reason))]
         const what = (reasons.length == 1) ? states.roll.all
             : "Надёжного измерения нет ни на одной оси: " + step4_axis_list.map((axis) => step4_axis_names[axis].nom.toLowerCase() + " — " + states[axis].reason).join(", ")
-        step_verdict("verdict4", "warn", what + " — правил и прогноза нет; " + step4_test_flight_short + " (подробности — во вкладках осей).")
+        step_verdict("verdict4", "warn", what + " — правил и прогноза нет; " + flight_advice + " (подробности — во вкладках осей).")
         return
     }
 
@@ -1192,7 +1241,7 @@ function step4_render_summary() {
         parts.push(name + " — " + text)
     }
     const unreliable = step4_axis_list.filter((axis) => step4.calc[axis].status !== "ok")
-    const tail = (unreliable.length > 0) ? " По осям без надёжного измерения " + step4_test_flight_short + "." : ""
+    const tail = (unreliable.length > 0) ? " По осям без надёжного измерения " + flight_advice + "." : ""
     step_verdict("verdict4", status, "Предлагается: " + parts.join("; ") + "." + tail)
 }
 
@@ -1305,12 +1354,25 @@ function step4_render_axis_verdict() {
         parts.push("Цель — из RATE (сообщений PIDR/PIDP/PIDY в логе нет): она записана до фильтра FLTT, поэтому отклик включает FLTT и немного " +
                    "медленнее настоящего" + lag + ".")
     }
+    // Лог тестового полёта с интервалом шире участка ACRO: подсказка сузить интервал вместо совета слетать снова
+    const acro_hint = step4_acro_hint(true)
+    let hinted = false
     // Смешение режимов — предупреждение и на надёжной оси (вердикт не зелёный): (б) его не всегда ловит
     const mixed_note = () => {
         if (res.mode?.mixed_modes.length > 0) {
             warn()
             parts.push("В интервале режимы " + res.mode.mixed_modes.join(", ") + ": смешение режимов ломает проверку (б) — для измерения выберите " +
-                       "интервал одного режима.")
+                       "интервал одного режима." + ((acro_hint != null) ? " " + acro_hint + "." : ""))
+            hinted = acro_hint != null
+        }
+    }
+    // Совет тестового полёта; у лога тестового полёта — подсказка сузить интервал (один раз)
+    const flight_note = () => {
+        if (acro_hint == null) {
+            parts.push(step4_test_flight)
+        } else if (!hinted) {
+            parts.push(acro_hint + ".")
+            hinted = true
         }
     }
 
@@ -1336,7 +1398,7 @@ function step4_render_axis_verdict() {
                 parts.push(response)
             }
             rate_note()
-            parts.push(step4_test_flight)
+            flight_note()
             break
         case "noresp":
             status = "fail"
@@ -1349,7 +1411,7 @@ function step4_render_axis_verdict() {
             parts.push(response + " Отклик показан с пометкой: по нему не судят.")
             mixed_note()
             rate_note()
-            parts.push(step4_test_flight)
+            flight_note()
             break
         case "ok": {
             parts.push(response)

@@ -795,6 +795,69 @@ test('pidtune_log_mode: смешение режимов в интервале; �
     assert.deepEqual(pidtune_log_mode(odd, log_params(odd), V47, [20, 80], 'roll', RATE_HZ).modes, ['режим 99'])
 })
 
+// Участки режимов с временем, округлённым до микросекунды (TimeUS·US2S)
+function segments_of(log, range) {
+    return pidtune_mode_segments(log, range).map((s) => ({ mode: s.mode, start: Math.round(s.start * 1e6) / 1e6, end: Math.round(s.end * 1e6) / 1e6 }))
+}
+
+test('pidtune_mode_segments и rate_only_segment: лог тестового полёта с взлётом и посадкой — участок ACRO для сужения интервала (аудит области D)', () => {
+    // STAB@0 → ACRO@20 → LAND@300, ACRO_OPTIONS 2: интервал по умолчанию 10–310 — режимы смешаны, участок ACRO 20–300
+    const log = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    const params = log_params(log)
+    assert.deepEqual(segments_of(log, [10, 310]), [{ mode: 0, start: 10, end: 20 }, { mode: 1, start: 20, end: 300 }, { mode: 9, start: 300, end: 310 }])
+    const wide = pidtune_log_mode(log, params, V46, [10, 310], 'roll', RATE_HZ)
+    assert.equal(wide.rate_only, false)
+    assert.deepEqual(wide.mixed_modes, ['STABILIZE', 'ACRO', 'LAND'])
+    assert.deepEqual(wide.rate_only_segment, { start: 20, end: 300 })
+    // Участок — в границах интервала: 10–100 → 20–100
+    assert.deepEqual(pidtune_log_mode(log, params, V46, [10, 100], 'roll', RATE_HZ).rate_only_segment, { start: 20, end: 100 })
+    // Суженный до участка интервал — Rate Loop Only; MODE ровно на конце интервала (LAND@300 при 20–300) в него не входит
+    const narrow = pidtune_log_mode(log, params, V46, [20, 300], 'roll', RATE_HZ)
+    assert.equal(narrow.rate_only, true)
+    assert.deepEqual(narrow.modes, ['ACRO'])
+    assert.equal(narrow.rate_only_segment, null, 'в Rate Loop Only подсказки нет')
+    // Самый длинный участок ACRO из нескольких; повторная запись ACRO (40 и 45 с) — один участок
+    const two = mode_log([[0, 0], [20, 1], [30, 0], [40, 1], [45, 1], [100, 9]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    assert.deepEqual(segments_of(two, [0, 120]).map((s) => [s.mode, s.start, s.end]), [[0, 0, 20], [1, 20, 30], [0, 30, 40], [1, 40, 100], [9, 100, 120]])
+    assert.deepEqual(pidtune_log_mode(two, log_params(two), V46, [0, 120], 'roll', RATE_HZ).rate_only_segment, { start: 40, end: 100 })
+    // Бит выставлен, а ACRO не было вовсе (весь полёт STABILIZE, как второй лог пользователя) — подсказки нет
+    const stab = mode_log([[0, 0], [0.2, 0]], [['ACRO_OPTIONS', 3, 0.3], ...ANG])
+    const s = pidtune_log_mode(stab, log_params(stab), V46, [10, 310], 'roll', RATE_HZ)
+    assert.deepEqual([s.rate_only, s.rate_only_segment, s.mixed_modes, s.modes], [false, null, [], ['STABILIZE']])
+    // Бит включили во время участка ACRO (ACRO_OPTIONS 0 → 2 на 50 с) — сужение не даст Rate Loop Only, подсказки нет;
+    // включили до участка (на 15 с, в STABILIZE) — есть
+    const late = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 0, 0.3], ['ACRO_OPTIONS', 2, 50], ...ANG])
+    assert.equal(pidtune_log_mode(late, log_params(late), V46, [10, 310], 'roll', RATE_HZ).rate_only_segment, null)
+    const early = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 0, 0.3], ['ACRO_OPTIONS', 2, 15], ...ANG])
+    assert.deepEqual(pidtune_log_mode(early, log_params(early), V46, [10, 310], 'roll', RATE_HZ).rate_only_segment, { start: 20, end: 300 })
+    // Без бита — ни Rate Loop Only, ни участка
+    const plain = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 1, 0.3], ...ANG])
+    assert.equal(pidtune_log_mode(plain, log_params(plain), V46, [10, 310], 'roll', RATE_HZ).rate_only_segment, null)
+    // Режим до первого MODE неизвестен: MODE@20, интервал 5–15 — участков и режимов нет; без MODE — тоже
+    assert.deepEqual(segments_of(mode_log([[20, 1]], ANG), [5, 15]), [])
+    assert.deepEqual(pidtune_modes_in(mode_log([[20, 1]], ANG), [5, 15]), [])
+    assert.deepEqual(pidtune_mode_segments(fake_log({ params: ANG }), [5, 15]), [])
+})
+
+test('pidtune_log_mode: ACRO_TRAINER ≠ 0 в Rate Loop Only — предупреждение (тренер подмешивает выравнивание по углу в цель)', () => {
+    const trained = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ['ACRO_TRAINER', 2, 1], ...ANG])
+    const mode = pidtune_log_mode(trained, log_params(trained), V46, [20, 80], 'roll', RATE_HZ)
+    assert.equal(mode.rate_only, true, 'режим лога остаётся Rate Loop Only')
+    assert.equal(mode.warnings.length, 1)
+    assert.match(mode.warnings[0], /^ACRO_TRAINER = 2 \(не 0\): .*ставьте ACRO_TRAINER = 0$/)
+    // Тренер выключен — без предупреждения; не Rate Loop Only — тоже (там цель и так не команда пилота)
+    const off = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ['ACRO_TRAINER', 0, 1], ...ANG])
+    assert.deepEqual(pidtune_log_mode(off, log_params(off), V46, [20, 80], 'roll', RATE_HZ).warnings, [])
+    const plain = mode_log([[10, 1]], [['ACRO_OPTIONS', 0, 1], ['ACRO_TRAINER', 2, 1], ...ANG])
+    assert.deepEqual(pidtune_log_mode(plain, log_params(plain), V46, [20, 80], 'roll', RATE_HZ).warnings, [])
+    // Тренер выключили посреди интервала (2 → 0 на 50 с) — предупреждение: часть интервала с тренером
+    const switched = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ['ACRO_TRAINER', 2, 1], ['ACRO_TRAINER', 0, 50], ...ANG])
+    assert.equal(pidtune_log_mode(switched, log_params(switched), V46, [20, 80], 'roll', RATE_HZ).warnings.length, 1)
+    // ACRO_TRAINER в логе нет — предупреждения нет (значение неизвестно)
+    const none = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ...ANG])
+    assert.deepEqual(pidtune_log_mode(none, log_params(none), V46, [20, 80], 'roll', RATE_HZ).warnings, [])
+})
+
 test('pidtune_log_mode: частота лога PID ниже 99 Гц (без ATTITUDE_FAST — 10 Гц) — low_rate', () => {
     const log = mode_log([[10, 1]], ANG)
     const params = log_params(log)

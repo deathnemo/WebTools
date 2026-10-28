@@ -758,9 +758,12 @@ function pidtune_param_values(params, name, range) {
     return values
 }
 
-// Номера режимов полёта в интервале range по сообщениям MODE (поле Mode): действующий на t0 (последний не позже t0)
-// и включённые внутри, без повторов, в порядке появления. Режим до первого MODE неизвестен и не входит. [] — нет MODE
-function pidtune_modes_in(log, range) {
+// Участки режимов полёта в интервале range = [t0, t1] по сообщениям MODE (поле Mode): действующий на t0 (последний
+// MODE не позже t0) — с t0, каждый MODE внутри (t0 < t < t1) открывает новый участок, последний — до t1; подряд один
+// и тот же режим (повторная запись ACRO) — один участок. Режим до первого MODE неизвестен — участка нет. MODE ровно
+// на t1 участка не даёт: его длительность в интервале нулевая (и кнопка «Интервал — участок ACRO» шага 4 ставит
+// конец интервала на целую секунду не позже смены режима). → [{ mode (номер), start, end (с) }] по времени; [] — нет MODE
+function pidtune_mode_segments(log, range) {
     if ((log == null) || !("MODE" in log.messageTypes)) {
         return []
     }
@@ -770,19 +773,41 @@ function pidtune_modes_in(log, range) {
         return []
     }
     let current = null
-    const list = []
+    const inner = []
     for (let i = 0; i < time.length; i++) {
         const t = time[i] * US2S
         if (t <= range[0]) {
             current = mode[i]
-        } else if (t <= range[1]) {
-            list.push(mode[i])
+        } else if (t < range[1]) {
+            inner.push([mode[i], t])
         }
     }
+    const segments = []
+    const open = (m, t) => {
+        const last = segments[segments.length - 1]
+        if (last != null) {
+            if (last.mode == m) {
+                return
+            }
+            last.end = t
+        }
+        segments.push({ mode: m, start: t, end: range[1] })
+    }
+    if (current != null) {
+        open(current, range[0])
+    }
+    for (const [m, t] of inner) {
+        open(m, t)
+    }
+    return segments
+}
+
+// Номера режимов полёта в интервале range (pidtune_mode_segments): без повторов, в порядке появления. [] — нет MODE
+function pidtune_modes_in(log, range) {
     const out = []
-    for (const m of ((current != null) ? [current, ...list] : list)) {
-        if (!out.includes(m)) {
-            out.push(m)
+    for (const segment of pidtune_mode_segments(log, range)) {
+        if (!out.includes(segment.mode)) {
+            out.push(segment.mode)
         }
     }
     return out
@@ -810,22 +835,54 @@ function pidtune_firmware(log, version) {
 //   rate_only — тестовый полёт Acro «Rate Loop Only»: во всём интервале режим ACRO (acro_mode) и в каждом действующем
 //               значении ACRO_OPTIONS бит acro_rate_only_bit — угловой контур выключен, цель — команда пилота;
 //   modes — имена режимов в интервале (pidtune_modes_in), mixed_modes — они же, если режимов больше одного, иначе [];
+//   rate_only_segment — { start, end } (с): лог тестового полёта с интервалом шире него (взлёт и посадка в STABILIZE,
+//             LAND — интервал по умолчанию у полёта с газом): режимы смешаны, не rate_only, а самый длинный участок ACRO
+//             (pidtune_mode_segments, в границах интервала) с битом acro_rate_only_bit в каждом действующем на нём
+//             ACRO_OPTIONS — сужение интервала до него даст rate_only; иначе null (и когда участка ACRO нет вовсе —
+//             полёт в STABILIZE с выставленным битом) [аудит области D];
 //   i_scale — множитель I регулятора (update_all, i_scale): ATC_ANG_*_P оси (значение в конце интервала) при rate_only
 //             и версии не ниже i_scale_since (4.7), иначе 1;
 //   firmware — pidtune_firmware(log, version); low_rate — rate_hz ниже min_log_rate_hz (отклик не считается);
-//   warnings — что не удалось определить (версия, ATC_ANG_*_P при rate_only — тогда i_scale 1).
+//   warnings — что не удалось определить (версия, ATC_ANG_*_P при rate_only — тогда i_scale 1) и ACRO_TRAINER ≠ 0 при
+//             rate_only: тренер подмешивает в цель скорости выравнивание по углу и в Rate Loop Only [код,
+//             ArduCopter/mode_acro.cpp, get_pilot_desired_rates_rads — вызывается до ветвления по RATE_LOOP_ONLY],
+//             цель — не чистая команда пилота.
 // params — log_params (core/log.js), version — get_version_and_board (state.version), rate_hz — pidtune_segments
 function pidtune_log_mode(log, params, version, range, axis_name, rate_hz, rules = pidtune_rules) {
     const warnings = []
-    const numbers = pidtune_modes_in(log, range)
+    const segments = pidtune_mode_segments(log, range)
+    const numbers = []
+    for (const segment of segments) {
+        if (!numbers.includes(segment.mode)) {
+            numbers.push(segment.mode)
+        }
+    }
     const modes = numbers.map((m) => pidtune_mode_names[m] ?? ("режим " + m))
+    const bit_set = (values) => (values.length > 0) && values.every((v) => (v & rules.acro_rate_only_bit) != 0)
     const options = pidtune_param_values(params, "ACRO_OPTIONS", range)
-    const rate_only = (numbers.length > 0) && numbers.every((m) => m == rules.acro_mode) &&
-                      (options.length > 0) && options.every((v) => (v & rules.acro_rate_only_bit) != 0)
+    const rate_only = (numbers.length > 0) && numbers.every((m) => m == rules.acro_mode) && bit_set(options)
+
+    // Самый длинный участок ACRO смешанного интервала, на котором ACRO_OPTIONS с битом Rate Loop Only
+    let rate_only_segment = null
+    if (!rate_only && (numbers.length > 1)) {
+        const acro = segments.filter((s) => s.mode == rules.acro_mode)
+        if (acro.length > 0) {
+            const longest = acro.reduce((a, b) => ((b.end - b.start) > (a.end - a.start)) ? b : a)
+            if (bit_set(pidtune_param_values(params, "ACRO_OPTIONS", [longest.start, longest.end]))) {
+                rate_only_segment = { start: longest.start, end: longest.end }
+            }
+        }
+    }
 
     const firmware = pidtune_firmware(log, version)
     let i_scale = 1
     if (rate_only) {
+        const trainer = [...new Set(pidtune_param_values(params, "ACRO_TRAINER", range).filter((v) => v != 0))]
+        if (trainer.length > 0) {
+            warnings.push("ACRO_TRAINER = " + trainer.join(", ") + " (не 0): тренер Acro подмешивает в цель скорости выравнивание по углу и в Rate Loop " +
+                          "Only (mode_acro.cpp, get_pilot_desired_rates_rads) — цель не чистая команда пилота, измерение может быть искажено; для " +
+                          "тестового полёта ставьте ACRO_TRAINER = 0")
+        }
         const since = rules.i_scale_since
         if (firmware == null) {
             warnings.push("Версия прошивки не определена: масштаб I по " + pidtune_axes[axis_name].angle_p + " в Rate Loop Only " +
@@ -843,6 +900,7 @@ function pidtune_log_mode(log, params, version, range, axis_name, rate_hz, rules
         rate_only: rate_only,
         modes: modes,
         mixed_modes: (modes.length > 1) ? modes : [],
+        rate_only_segment: rate_only_segment,
         i_scale: i_scale,
         firmware: firmware,
         low_rate: (rate_hz != null) && (rate_hz < rules.min_log_rate_hz),
