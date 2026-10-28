@@ -189,6 +189,12 @@ function step3_init() {
     for (const span of document.querySelectorAll("[data-rule3]")) {
         span.textContent = rule_texts[span.dataset.rule3]
     }
+    // Границы поля размера винта — те же prop_range_in, что у предупреждения prop_size_warning: вне них поле :invalid.
+    // Шаг — любой: размеры бывают дробными (9.4″), а поле со step="0.5" считало бы их ошибкой
+    const prop_field = document.getElementById("prop_in")
+    prop_field.min = rules.prop_range_in[0]
+    prop_field.max = rules.prop_range_in[1]
+    prop_field.step = "any"
 
     const saved = step3_prop_load()
     if (saved != null) {
@@ -420,8 +426,10 @@ function step3_build_form() {
     for (const group of groups) {
         html += '<div class="pgroup' + (group.wide ? " pgroup--wide" : "") + '"><h3>' + html_escape(group.title) + '</h3>'
         for (const name of group.names) {
-            // Частоты — не меньше 0, с шагом 0.5 Гц (правило /2 даёт половинки); пределы ускорения из лога бывают дробными
-            const limits = [accel.r, accel.p, accel.y].includes(name) ? 'step="any"' : 'step="0.5" min="0"'
+            // Частоты — не меньше 0 (отрицательные не принимаются, step3_accept_refusal); шаг — любой: в логах бывают
+            // 1.2 и 0.7 Гц, а поле со step="0.5" считало бы их ошибкой (:invalid). Пределы ускорения — любые, отрицательные
+            // отсекает step3_accept_refusal
+            const limits = [accel.r, accel.p, accel.y].includes(name) ? 'step="any"' : 'step="any" min="0"'
             const id = "lpf_" + name
             html += '<p class="param" data-name="' + html_escape(name) + '"><label for="' + html_escape(id) + '">' + html_escape(name) + '</label>' +
                 '<input type="number" id="' + html_escape(id) + '" ' + limits + '><span class="units"></span><span class="inlog"></span></p>'
@@ -446,6 +454,35 @@ function step3_set_form_values(values) {
             document.getElementById("lpf_" + name).value = Number.isFinite(values[name]) ? param_to_string(values[name]) : ""
         }
     }
+}
+
+// Значения формы при первом заполнении (и после сброса — новый лог): лог (lowpass_log_values), а INS_GYRO_FILTER —
+// принятый на шаге 2, если шаг 2 принят и его INS_GYRO_FILTER отличается от лога. Иначе правка шага 2 терялась: итог
+// и файл .param берут INS_GYRO_FILTER у шага 3 (summary_rows), а форма шага 3 показывала значение лога. С таким
+// значением форма — строка «Свой» с метриками; «Применить вариант» перезаписывает поле значением варианта, и о
+// расхождении с шагом 2 напоминает заметка (step3_step2_gyro_note). Шаг 2, принятый уже после заполнения формы,
+// поле не меняет — только заметка
+function step3_initial_values() {
+    const values = lowpass_log_values(state.params)
+    const accepted = state.steps[2]?.accepted?.INS_GYRO_FILTER
+    if (Number.isFinite(accepted) && (Math.fround(accepted) !== values.INS_GYRO_FILTER)) {
+        values.INS_GYRO_FILTER = Math.fround(accepted)
+    }
+    return values
+}
+
+// Заметка о INS_GYRO_FILTER шага 2 для form_hz — значения поля формы (NaN — пустое): шаг 2 принят с INS_GYRO_FILTER,
+// отличным от лога, а в форме другое значение — шаг 3 решает этот параметр, в файл пойдёт значение формы (summary_rows
+// берёт его у последнего принявшего шага). null — заметка не нужна: шаг 2 не принят, принят как в логе или в форме уже
+// принятое на шаге 2 (первое заполнение — step3_initial_values)
+function step3_step2_gyro_note(form_hz) {
+    const accepted = state.steps[2]?.accepted?.INS_GYRO_FILTER
+    const log_hz = lowpass_log_values(state.params).INS_GYRO_FILTER
+    if (!Number.isFinite(accepted) || (Math.fround(accepted) === log_hz) || (Math.fround(accepted) === form_hz)) {
+        return null
+    }
+    return "На шаге 2 принят INS_GYRO_FILTER " + step_value_text(accepted) + " (в логе " + step_value_text(log_hz) + "). Шаг 3 решает этот параметр: " +
+           "в файл пойдёт значение из этой формы" + (Number.isFinite(form_hz) ? " — " + step_value_text(form_hz) : "") + "."
 }
 
 // Заполнить форму значениями и подписи «в логе»; у параметров, которых в логе нет, — заводское значение,
@@ -563,7 +600,8 @@ function step3_compute() {
 }
 
 // Почему варианты не сравниваются с логом (у «Как в логе» нет оценки): частота контура notch-базы не положительна
-// (ядро тогда оценки не даёт) или нет данных гироскопа до фильтров; null — оценка есть
+// (ядро тогда оценки не даёт), нет данных гироскопа до фильтров вовсе или нет их у первичного гироскопа (step_gyro_sensor
+// берёт только его: в лог попали не все IMU — INS_LOG_BAT_MASK — или у него нет окон FFT); null — оценка есть
 function step3_no_compare_reason() {
     if (step3.evaluations?.log != null) {
         return null
@@ -573,7 +611,11 @@ function step3_no_compare_reason() {
         return "частота контура SCHED_LOOP_RATE " + ((state.steps[2] != null) ? "(принята на шаге 2)" : "(из лога)") + " — " + step_value_text(loop_rate) +
             ", а нужна положительная"
     }
-    return "нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT / INS_RAW_LOG_OPT)"
+    const gyro = state.gyro
+    if (!gyro.have_pre) {
+        return "нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT / INS_RAW_LOG_OPT)"
+    }
+    return "у первичного гироскопа " + ((gyro.primary ?? gyro.first_gyro) + 1) + " нет данных до фильтров (есть у другого) — проверьте INS_LOG_BAT_MASK"
 }
 
 // Строка «Свой»: значения формы, если они не совпали ни с одним вариантом, с оценкой и отметками против лога.
@@ -670,8 +712,8 @@ function step3_run_edit(fn) {
     }
 }
 
-// Показ шага: форма из лога (один раз на лог); варианты считаются заново, если сменились интервал, расчёт шага 1,
-// принятый notch или размер винта
+// Показ шага: форма из лога с INS_GYRO_FILTER шага 2 (step3_initial_values; один раз на лог); варианты считаются заново,
+// если сменились интервал, расчёт шага 1, принятый notch или размер винта
 function step3_show() {
     if (state.log == null) {
         return
@@ -681,7 +723,7 @@ function step3_show() {
             step3_build_form()
         }
         if (!step3.filled) {
-            step3_fill_form(lowpass_log_values(state.params))
+            step3_fill_form(step3_initial_values())
             step3.filled = true
         }
         step3_render_prop()
@@ -706,33 +748,51 @@ function step3_show() {
 // шёл по строке, выбранной до него (ревью задачи 7 этапа 4: «По размеру винта», правка FLTT и сразу «Применить» давали
 // «Свой»). Если до досчёта был выбор по умолчанию (рекомендованная или «Как в логе»), — выбор по умолчанию после него:
 // step3_compute переводит его на новую рекомендацию (пустой размер → 10″ и сразу «Применить» — «По размеру винта»).
-// Значения строки берутся после досчёта, по её id: «По размеру винта» — для актуального размера
+// Значения строки берутся после досчёта, по её id: «По размеру винта» — для актуального размера.
+// Ошибка — в вердикт (step3_run_edit: step_try; расчёт шага 1 не готов — step_run, и тогда досчёт шага 1 и вариантов,
+// правок и применение идут одной функцией под оверлеем, как «Принять»; раньше досчёт правок уходил под оверлей сам,
+// а применение, не дождавшись его, молча выходило — щелчок терялся)
 function step3_apply() {
     if (!step3.filled) {
         return
     }
-    const ready = step3_ready() && (step3.candidates != null)
-    const previous = ready ? (step3_selected_row()?.id ?? null) : null
-    const was_default = previous === (step3_recommended_id() ?? "log")
-    step3_flush_edits(true)
-    if (!step3_ready() || (step3.candidates == null)) {
-        return
-    }
-    const id = ((previous == null) || was_default) ? (step3_recommended_id() ?? "log") : previous
-    const row = step3_rows().find((r) => r.id === id) ?? step3_selected_row()
-    if (row == null) {
-        return
-    }
-    step3.selected_id = row.id
-    step3_set_form_values(row.values)
-    step3_flush_edits(true)
+    step3_run_edit(() => {
+        if (!step3_ready() || (step3.candidates == null)) {
+            // Расчёт шага 1 или варианты не готовы: досчитать и показать (как step3_show), затем применять
+            step3.error = step_ensure_step1()
+            if ((step3.error == null) && step3_stale()) {
+                step3_compute()
+            }
+            step3_redraw_all()
+            if (!step3_ready() || (step3.candidates == null)) {
+                return
+            }
+        }
+        const previous = step3_selected_row()?.id ?? null
+        const was_default = previous === (step3_recommended_id() ?? "log")
+        step3_flush_edits(true)
+        if (!step3_ready() || (step3.candidates == null)) {
+            return
+        }
+        const id = ((previous == null) || was_default) ? (step3_recommended_id() ?? "log") : previous
+        const row = step3_rows().find((r) => r.id === id) ?? step3_selected_row()
+        if (row == null) {
+            return
+        }
+        step3.selected_id = row.id
+        step3_set_form_values(row.values)
+        step3_flush_edits(true)
+    })
 }
 
-// Поля, которые принять нельзя: пустые (значение неизвестно) и отрицательные частоты → текст отказа или null
+// Поля, которые принять нельзя: пустые (значение неизвестно), отрицательные частоты и отрицательные пределы ускорения
+// (у ATC_ACC*_MAX диапазон от 0: 0 — предел выключен) → текст отказа или null
 function step3_accept_refusal(values) {
     const accel = lowpass_accel_names(state.params)
+    const is_accel = (name) => [accel.r, accel.p, accel.y].includes(name)
     const empty = step3.form_names.filter((name) => !Number.isFinite(values[name]))
-    const negative = step3.form_names.filter((name) => ![accel.r, accel.p, accel.y].includes(name) && (values[name] < 0))
+    const negative = step3.form_names.filter((name) => !is_accel(name) && (values[name] < 0))
+    const negative_accel = step3.form_names.filter((name) => is_accel(name) && (values[name] < 0))
     const parts = []
     if (empty.length > 0) {
         parts.push("не заполнены поля: " + empty.join(", "))
@@ -740,12 +800,16 @@ function step3_accept_refusal(values) {
     if (negative.length > 0) {
         parts.push("отрицательные частоты: " + negative.join(", "))
     }
+    if (negative_accel.length > 0) {
+        parts.push("отрицательные пределы ускорения: " + negative_accel.join(", "))
+    }
     return (parts.length > 0) ? "Принять нельзя — " + parts.join("; ") + "." : null
 }
 
-// «Принять»: значения формы, их метрики и отметки против лога, ключ расчёта и отпечаток входов (step_inputs_key — для
+// «Принять»: значения формы, их метрики и отметки против лога, ключи расчёта и контекста оценки (context_key — по нему
+// вердикт узнаёт устаревшее принятое; размер винта в него не входит) и отпечаток входов (step_inputs_key — для
 // «устарело» сводки) — в итог мастера, затем шаг 4 (если доступен). Правки полей сначала досчитываются (щелчок мог
-// прийти раньше их пересчёта). Пустые поля и отрицательные частоты принять нельзя (step3_accept_refusal)
+// прийти раньше их пересчёта). Пустые поля, отрицательные частоты и пределы ускорения принять нельзя (step3_accept_refusal)
 function step3_accept() {
     step3_flush_edits(true)
     step_run(() => {
@@ -776,6 +840,7 @@ function step3_accept() {
             metrics: compared ? { current: step3_metrics_summary(row.evaluation), log: step3_metrics_summary(log) } : null,
             flags: compared ? (row.flags ?? lowpass_flags(row.evaluation, log)) : null,
             calc_key: step3.key,
+            context_key: step3.context_key,
             inputs: step_inputs_key(3),
             evaluated_at: Date.now(),
         }
@@ -1022,16 +1087,15 @@ function step3_render_metrics() {
     box.hidden = false
 }
 
-// Заметки под вердиктом: чего модель не учитывает (lowpass_model_warnings), INS_GYRO_FILTER шага 2, оси без Kd или
-// с выключенным D, предупреждения фильтров гироскопной части
+// Заметки под вердиктом: чего модель не учитывает (lowpass_model_warnings), INS_GYRO_FILTER шага 2 не в форме
+// (step3_step2_gyro_note), оси без Kd или с выключенным D, предупреждения фильтров гироскопной части (в том числе
+// срез INS_GYRO_FILTER, ограниченный прошивкой, — lowpass_gyro_cutoff)
 function step3_render_warnings() {
     const box = document.getElementById("warnings3")
     const lines = [...lowpass_model_warnings(state.params)]
-    const accepted = state.steps[2]?.accepted
-    const log_gyro = lowpass_log_values(state.params).INS_GYRO_FILTER
-    if ((accepted != null) && (Math.fround(accepted.INS_GYRO_FILTER) !== log_gyro)) {
-        lines.push("На шаге 2 принят INS_GYRO_FILTER " + step_value_text(accepted.INS_GYRO_FILTER) + " (в логе " + step_value_text(log_gyro) +
-                   "): шаг 3 выбирает INS_GYRO_FILTER заново, итоговым станет значение шага 3.")
+    const gyro_note = step3_step2_gyro_note(step3.filled ? step3_values_from_form().INS_GYRO_FILTER : NaN)
+    if (gyro_note != null) {
+        lines.push(gyro_note)
     }
     const kd = step3_kd()
     for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
@@ -1055,30 +1119,36 @@ function step3_render_warnings() {
     box.hidden = lines.length == 0
 }
 
-// Вердикт: принятые значения (всегда первыми); без размера винта — просьба ввести его; рекомендация «По размеру
-// винта» — что меняется против лога и метрики, с отметками — что хуже; пределы ускорения из лога — формула для
-// справки; notch из лога, если шаг 2 не принят. Под ним — строка сравнения с прошлым проходом (memory_show): при любом
-// исходе вердикта
+// Вердикт: принятые значения (всегда первыми; принят не рекомендованный вариант — какой рекомендовался: «Принять» без
+// «Применить вариант» принимает значения лога, и это легко не заметить); без размера винта — просьба ввести его;
+// рекомендация «По размеру винта» — что меняется против лога и метрики, с отметками — что хуже; пределы ускорения из
+// лога — формула для справки; notch из лога, если шаг 2 не принят. Под ним — строка сравнения с прошлым проходом
+// (memory_show): при любом исходе вердикта
 function step3_render_verdict() {
     memory_show(3)
     const base_note = (state.steps[2] == null) ? " Notch — из лога (шаг 2 не принят)." : ""
     const accepted = state.steps[3]
     if ((accepted != null) && step3.filled && (candidate_key(accepted.accepted) === candidate_key(step3_values_from_form()))) {
-        // Принятое считалось для другого интервала, расчёта шага 1, notch-базы или размера винта — его метрики устарели
-        if (accepted.calc_key !== step3_calc_key()) {
-            step_verdict("verdict3", "warn", "Принято раньше для другого интервала, notch или размера винта — проверьте и примите заново." + base_note)
+        // Принятое считалось на другом контексте оценки — интервал, расчёт шага 1, notch-база (step3_context_key) — его
+        // метрики устарели. Размер винта в контекст не входит: от него зависят варианты и рекомендация, а принятые
+        // значения, их метрики и отметки — нет (и сводка, step_accepted_stale, его не учитывает)
+        if (accepted.context_key !== step3_context_key()) {
+            step_verdict("verdict3", "warn", "Принято раньше для другого интервала, окна FFT или notch — проверьте и примите заново." + base_note)
             return
         }
         const match = step3_match(accepted.accepted)
         const name = (match != null) ? "«" + match.title + "»" : "свои значения"
+        const recommended_id = step3_recommended_id()
+        const recommended = ((recommended_id != null) && (recommended_id !== match?.id)) ? step3_rows().find((r) => r.id === recommended_id) : null
+        const advice = (recommended != null) ? " Рекомендовался «" + recommended.title + "»." : ""
         const metrics = accepted.metrics
         const tail = (metrics != null) ? " — " + step3_summary_text(metrics.current, metrics.log) + " (к логу)" : " (без сравнения с логом)"
         if (step3_flagged(accepted.flags)) {
             // name здесь начинает предложение: «свои значения» — с заглавной
             const sentence = name.charAt(0).toUpperCase() + name.slice(1)
-            step_verdict("verdict3", "warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + sentence + tail + "." + base_note)
+            step_verdict("verdict3", "warn", "Принято, но хуже лога: " + step3_flags_text(accepted.flags, metrics.current, metrics.log) + ". " + sentence + tail + "." + advice + base_note)
         } else {
-            step_verdict("verdict3", "ok", "Принято: " + name + tail + "." + base_note)
+            step_verdict("verdict3", "ok", "Принято: " + name + tail + "." + advice + base_note)
         }
         return
     }
