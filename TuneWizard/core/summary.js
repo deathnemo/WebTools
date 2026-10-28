@@ -36,20 +36,29 @@ function summary_notch_enabling(log, value) {
 // Строки итога по принятым шагам 2–4. ctx = { params, steps, names: { 2: […], 3: […], 4: […] }, filter_version, bits }:
 // params — параметры лога (get(name) → число или null, has(name)); steps — state.steps (принятое шага n —
 // steps[n].accepted, имя → число, в нём должно быть каждое имя из names[n]; у шага 4 ещё
-// steps[4].axes[ось].metrics.reliable); names — имена параметров шагов; filter_version — версия фильтра лога (нет —
-// считается 1, как в step2_save_param); bits — размер маски HMNCS (hmncs_bits).
-// → { rows, conflicts, accepted }:
+// steps[4].axes[ось].metrics.reliable и необязательный steps[4].set_values — значения набора параметров, от которого
+// шаг 4 считал (набор интервала анализа; нет — не проверяется)); names — имена параметров шагов; filter_version —
+// версия фильтра лога (нет — считается 1, как в step2_save_param); bits — размер маски HMNCS (hmncs_bits).
+// → { rows, conflicts, accepted, moved }:
 // - accepted — { 2, 3, 4 }: принят ли шаг (steps[n] != null);
 // - rows — строки { name, log, value, step, changed, note } только принятых шагов, по шагам 2 → 3 → 4 и порядку имён
-//   шага; log — последнее значение в логе или null, value — принятое, note — пометка словами или null. Имя, которое
-//   есть у нескольких принятых шагов (INS_GYRO_FILTER у шагов 2 и 3), — одна строка от последнего: шаг 3 считает
-//   от notch шага 2 [решение пользователя 25.10.2026];
-// - conflicts — такие имена с разными значениями шагов: { name, values: { шаг: значение }, used: шаг строки }.
+//   шага; log — последнее значение в логе или null, value — принятое, note — пометки словами через «; » или null.
+//   Имя, которое есть у нескольких принятых шагов (INS_GYRO_FILTER у шагов 2 и 3), — одна строка от последнего: шаг 3
+//   считает от notch шага 2 [решение пользователя 25.10.2026];
+// - conflicts — такие имена, у которых шаги разошлись: { name, values: { шаг: значение }, used: шаг строки }.
+//   Расхождение — только между значениями, отличными от лога: шаг, оставивший значение лога, ничего не выбирал
+//   (типовой поток «шаг 2 оставил INS_GYRO_FILTER лога, шаг 3 поставил своё» — не расхождение, и оценки шага 2 в
+//   памяти прохода сохраняются). Шаг 2 поставил своё, а шаг 3 вернул лог — расхождение: в файл ничего не идёт, а
+//   пользователь на шаге 2 ждал другого [наше];
+// - moved — имена строк шага 4, у которых значение набора анализа (steps[4].set_values) отличается от конца лога:
+//   PID менялись после интервала анализа, принятое перепишет значения конца лога; у строки — пометка.
 // *_ESCMSK при версии фильтра ниже 4 строки не получает: у прошивок ниже её нет, а 0 вместо настоящей маски сменил бы
 // набор моторов (как «Сохранить .param» шага 2). Включаемый notch (summary_notch_enabling): все его поля изменены,
 // даже совпавшие с логом, «было» у отсутствующих — null. Прочий параметр без лога не изменён и не пишется: значение
-// для него в лог не попало, сравнить не с чем [наше]. Изменённая строка шага 4 ненадёжной оси
-// (metrics.reliable === false) — значение введено вручную, а не из измерения: пометка
+// для него в лог не попало, сравнить не с чем [наше]. Принятое не число (undefined, NaN — поля нет в принятом или
+// оно пустое) — не изменено, с пометкой: в файл и в расхождения такое не идёт (param_file_text на NaN бросал бы)
+// [наше]. Изменённая строка шага 4 ненадёжной оси (metrics.reliable === false) — значение введено
+// вручную, а не из измерения: пометка
 function summary_rows(ctx) {
     const steps_order = [2, 3, 4]
     const log_value = (name) => ctx.params.has(name) ? ctx.params.get(name) : null
@@ -86,6 +95,8 @@ function summary_rows(ctx) {
 
     const rows = []
     const conflicts = []
+    const moved = []
+    const set_values = ctx.steps[4]?.set_values ?? null
     for (const n of steps_order) {
         if (!accepted[n]) {
             continue
@@ -99,31 +110,43 @@ function summary_rows(ctx) {
             }
             const log = log_value(name)
             const value = final_value(name)
+            const notes = []
             let changed
-            let note = null
-            if (enabling.has(name)) {
+            if (!Number.isFinite(value)) {
+                changed = false
+                notes.push("значение не число — пропущено")
+            } else if (enabling.has(name)) {
                 changed = true
             } else if (log == null) {
                 changed = false
-                note = "нет в логе — не пишется"
+                notes.push("нет в логе — не пишется")
             } else {
                 changed = !summary_same(name, log, value, ctx.bits)
             }
-            if ((n === 4) && changed) {
-                const axis = Object.keys(pidtune_axes).find((a) => name.startsWith(pidtune_axes[a].rate))
-                if (ctx.steps[4].axes?.[axis]?.metrics?.reliable === false) {
-                    note = "ось ненадёжна — значение введено вручную"
+            if (n === 4) {
+                if (changed) {
+                    const axis = Object.keys(pidtune_axes).find((a) => name.startsWith(pidtune_axes[a].rate))
+                    if (ctx.steps[4].axes?.[axis]?.metrics?.reliable === false) {
+                        notes.push("ось ненадёжна — значение введено вручную")
+                    }
+                }
+                const set = set_values?.[name]
+                if ((log != null) && Number.isFinite(set) && !summary_same(name, set, log, ctx.bits)) {
+                    notes.push("в конце лога другое значение: параметры менялись после интервала анализа")
+                    moved.push(name)
                 }
             }
-            rows.push({ name: name, log: log, value: value, step: n, changed: changed, note: note })
+            rows.push({ name: name, log: log, value: value, step: n, changed: changed, note: (notes.length > 0) ? notes.join("; ") : null })
 
+            // Расхождение: среди значений шагов, отличных от лога (и чисел), есть не равное итоговому
             const values = sources[name]
-            if (Object.values(values).some((v) => !summary_same(name, v, value, ctx.bits))) {
+            const chosen = Object.values(values).filter((v) => Number.isFinite(v) && !summary_same(name, v, log, ctx.bits))
+            if (Number.isFinite(value) && chosen.some((v) => !summary_same(name, v, value, ctx.bits))) {
                 conflicts.push({ name: name, values: { ...values }, used: n })
             }
         }
     }
-    return { rows: rows, conflicts: conflicts, accepted: accepted }
+    return { rows: rows, conflicts: conflicts, accepted: accepted, moved: moved }
 }
 
 // Значения для файла .param: объект имя → число из строк итога с changed. Маски *_HMNCS — со знаком при 8 битах
