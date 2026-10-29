@@ -251,10 +251,10 @@ test('motor_fundamental: ESC — медиана среднего по мотор
     assert.equal(motor_fundamental(tracking, {}, [0, 1.5]), 87.5, 'медиана 100 и 75')
 })
 
-test('motor_fundamental: без ESC — медиана цели газа по RATE.AOut, без газа — null', () => {
+test('motor_fundamental: без ESC — медиана цели газа по RATE.AOut при INS_HNTCH_MODE = 1, без газа — null', () => {
     const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0.25, 0.25, 1.0] } } })
     const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
-    const values = { INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
+    const values = { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
     // Цель freq·√(thr/ref): 0 (газ 0 — отброшен), 100, 100, 200 → медиана 100
     assert.equal(motor_fundamental(tracking, values, [0, 3]), 100)
     assert.equal(motor_fundamental(tracking, values, [2.5, 3]), 200)
@@ -265,16 +265,36 @@ test('motor_fundamental: без ESC — медиана цели газа по RA
     assert.equal(motor_fundamental(empty, values, [0, 3]), null, 'нет ни ESC, ни газа')
     // FREQ = 0 — цель газа не определена
     assert.equal(motor_fundamental(tracking, { ...values, INS_HNTCH_FREQ: 0 }, [0, 3]), null)
+    // Notch в логе следит не по газу (аудит, I1): FREQ и REF режима ESC (3), RPM (2) или статического (0) к газу
+    // не относятся — цель газа из них не строится; без режима (старые значения) — тоже
+    for (const mode of [0, 2, 3, 5, undefined]) {
+        assert.equal(motor_fundamental(tracking, { ...values, INS_HNTCH_MODE: mode }, [0, 3]), null, 'режим ' + mode)
+    }
 })
 
-test('motor_fundamental: ESC есть, но обороты нулевые — берётся цель газа', () => {
+test('motor_fundamental: ESC есть, но обороты нулевые — берётся цель газа (режим 1)', () => {
     const log = fake_log({ messages: {
         ESC: { instances: { 0: { TimeUS: [0, 1e6, 2e6], RPM: [0, 0, 0] } } },
         RATE: { TimeUS: [0, 1e6, 2e6], AOut: [0.25, 0.25, 0.25] }
     } })
     const tracking = create_tracking(log, env, { start_time: 0, end_time: 2 })
     assert.equal(tracking.find((t) => t.name === 'ESC').have_data(), true, 'ESC в логе есть')
-    assert.equal(motor_fundamental(tracking, { INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }, [0, 2]), 80)
+    assert.equal(motor_fundamental(tracking, { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }, [0, 2]), 80)
+})
+
+test('motor_fundamental: INS_HNTCH_MODE = 4 без ESC — медиана центрального пика бортового FFT (FTN1.PkAvg) в диапазоне', () => {
+    const log = fake_log({ messages: {
+        FTN1: { TimeUS: [0, 1e6, 2e6, 3e6], PkAvg: [0, 90, 110, 130] },
+        RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0.25, 0.25, 0.25, 0.25] }
+    } })
+    const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const values = { INS_HNTCH_MODE: 4, INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 1, INS_HNTCH_FM_RAT: 1 }
+    // Нулевой пик (моторы стоят) отброшен: медиана 90, 110, 130
+    assert.equal(motor_fundamental(tracking, values, [0, 3]), 110)
+    assert.equal(motor_fundamental(tracking, values, [1.5, 3]), 120)
+    // В режиме 4 цель газа не берётся, даже если FTN1 нет
+    const no_ftn = create_tracking(fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.25, 0.25] } } }), env, { start_time: 0, end_time: 1 })
+    assert.equal(motor_fundamental(no_ftn, values, [0, 1]), null)
 })
 
 // ---------- Атрибуция по порядковому спектру и сравнение вариантов notch ----------
@@ -437,16 +457,21 @@ test('attribute_peaks_auto: по порядку при ESC, иначе по ме
     assert.deepEqual(order.peaks, attribute_peaks_order(peaks, motor_order_info(gyro, tracking, range, 0)))
     assert.equal(nearest_peak(order.peaks, 155).source, 'frame')
 
-    // Без ESC: цель газа 100·√(thr/0.25) — 100, 100, 200 Гц, медиана 100; первая гармоника среди пиков — 100 Гц
+    // Без ESC: цель газа (режим 1) 100·√(thr/0.25) — 100, 100, 200 Гц, медиана 100; первая гармоника среди пиков — 100 Гц
     const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0.25, 0.25, 1.0] } } })
     const throttle = create_tracking(log, env, { start_time: 0, end_time: 3 })
-    const values = { INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
+    const values = { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
     const given = [{ freq: 100, excess_dB: 20 }, { freq: 200, excess_dB: 15 }, { freq: 57, excess_dB: 12 }]
     const median = attribute_peaks_auto(given, { gyro: [], tracking: throttle, range: [0, 3], esc_mask: 0, values })
     assert.equal(median.method, 'median')
     assert.deepEqual(median.info, { median_hz: 100, fundamental_hz: 100 })
     assert.deepEqual(median.peaks.map((p) => p.harmonic), [1, 2, null])
     assert.ok(median.peaks.every((p) => p.method === 'median'))
+    // Те же FREQ и REF при режиме ESC (3) без ESC-телеметрии — моторная частота не определена, все пики — рама (аудит, I1)
+    const mode3 = attribute_peaks_auto(given, { gyro: [], tracking: throttle, range: [0, 3], esc_mask: 0, values: { ...values, INS_HNTCH_MODE: 3 } })
+    assert.equal(mode3.method, 'median')
+    assert.deepEqual(mode3.info, { median_hz: null, fundamental_hz: null })
+    assert.ok(mode3.peaks.every((p) => (p.source === 'frame') && (p.harmonic === null)))
     // Ни ESC, ни газа — всё рама
     const none = attribute_peaks_auto(given, { gyro: [], tracking: create_tracking(fake_log(), env, { start_time: 0, end_time: 3 }), range: [0, 3], esc_mask: 0, values })
     assert.deepEqual(none.info, { median_hz: null, fundamental_hz: null })
@@ -1148,17 +1173,26 @@ test('second_notch_candidate: BW — удвоенная ширина пика п
     assert.equal(width.width_hz, 26)
 })
 
-test('notch_line_stats: NaN в ESC — среднее по числам (дефект upstream 8), без чисел — null', () => {
-    const esc_log = (rpm0) => fake_log({ messages: { ESC: { instances: {
-        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: rpm0 },
+test('notch_line_stats: NaN в целях трекинга — среднее по числам (дефект upstream 8), без чисел — null', () => {
+    // ESCTarget теперь отбрасывает NaN-отсчёты при чтении (аудит, C1; tests/tunewizard-audit-a.test.cjs), поэтому NaN
+    // подставляется в уже прочитанные данные источника (и в его общий ряд all) — проверяется сама статистика линий
+    const esc_log = () => fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [6000, 6000, 6000, 6000] },
         1: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [3000, 3000, 3000, 3000] }
     } } } })
     const values = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_REF: 1, INS_HNTCH_FREQ: 40, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 40, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 1, INS_HNTCH_ESCMSK: 0 }
-    const stats = (log, options) => {
-        const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const stats = (freq0, options) => {
+        const tracking = create_tracking(esc_log(), env, { start_time: 0, end_time: 3 })
+        const esc = tracking.find((t) => t.name === 'ESC')
+        esc.data[0].freq = freq0
+        for (const sample of esc.data.all) {
+            if (sample.inst == 0) {
+                sample.freq = freq0[esc.data[0].time.indexOf(sample.time)]
+            }
+        }
         return notch_line_stats(load_filters({ ...values, INS_HNTCH_OPTS: options }, env, tracking), [0, 3])[0].harmonics[0]
     }
-    const with_nan = esc_log([6000, NaN, 6000, 6000])
+    const with_nan = [100, NaN, 100, 100]
 
     // OPTS 2 — по моторам (многопиковая ветка): мотор 0 — 100 Гц без NaN-отсчёта, мотор 1 — 50 Гц
     const multi = stats(with_nan, 2)
@@ -1170,7 +1204,7 @@ test('notch_line_stats: NaN в ESC — среднее по числам (деф�
     assert.deepEqual([single.min, single.max], [75, 100])
 
     // Мотор 0 целиком NaN: по моторам — только мотор 1; в среднем по моторам все средние NaN → null
-    const all_nan = esc_log([NaN, NaN, NaN, NaN])
+    const all_nan = [NaN, NaN, NaN, NaN]
     const multi_nan = stats(all_nan, 2)
     assert.deepEqual([multi_nan.mean, multi_nan.min, multi_nan.max], [50, 50, 50])
     const single_nan = stats(all_nan, 0)

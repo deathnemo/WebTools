@@ -1,6 +1,8 @@
 // Трекинг по RPM.
 // Перенос из FilterReview/tracking/RPM.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s.
+// Отличие от upstream (аудит, C1): отсчёты с нечисловыми оборотами отбрасываются при чтении (см. конструктор);
+// массив оборотов копируется, и отметка нездорового датчика (−1) больше не пишется в данные парсера.
 class RPMTarget extends NotchTarget {
     constructor(log, env, instance, mode_value) {
         super(null, env, null, null, "RPM" + instance, mode_value)
@@ -11,28 +13,50 @@ class RPMTarget extends NotchTarget {
             return
         }
 
+        let time_us
+        let rpm
         if ("instances" in log.messageTypes.RPM) {
             // Новое сообщение RPM с экземплярами
             const inst = instance - 1
             if (inst in log.messageTypes.RPM.instances) {
-                this.data.time = us_to_s(log.get_instance(msg_name, inst, "TimeUS"))
-                this.data.value = log.get_instance(msg_name, inst, "RPM")
+                time_us = log.get_instance(msg_name, inst, "TimeUS")
+                rpm = log.get_instance(msg_name, inst, "RPM")
 
                 // При нездоровом датчике RPM = -1 — так сохраняется поведение старого логирования
                 const health = log.get_instance(msg_name, inst, "H")
-                const len = health.length
-                for (let i = 0; i < len; i++) {
-                    if (health[i] == 0) {
-                        this.data.value[i] = -1
+                if ((rpm != null) && (health != null)) {
+                    rpm = Array.from(rpm)
+                    const len = Math.min(health.length, rpm.length)
+                    for (let i = 0; i < len; i++) {
+                        if (health[i] == 0) {
+                            rpm[i] = -1
+                        }
                     }
                 }
             }
 
         } else {
             // Старое сообщение, в котором и rpm 1, и rpm 2
-            this.data.time = us_to_s(log.get(msg_name, "TimeUS"))
-            this.data.value = log.get(msg_name, "rpm" + instance)
+            time_us = log.get(msg_name, "TimeUS")
+            rpm = log.get(msg_name, "rpm" + instance)
 
+        }
+        if ((time_us == null) || (rpm == null)) {
+            // Сообщение объявлено без строк или нужного экземпляра нет
+            return
+        }
+
+        // Нечисловые обороты (датчик без данных пишет NaN, как и ESC) — не отсчёт: время и значение отбрасываются вместе,
+        // иначе NaN уходил в цель notch и в передаточную функцию окна (аудит, C1)
+        this.data.time = []
+        this.data.value = []
+        const len = Math.min(time_us.length, rpm.length)
+        for (let i = 0; i < len; i++) {
+            if (!Number.isFinite(rpm[i])) {
+                continue
+            }
+            this.data.time.push(time_us[i] * US2S)
+            this.data.value.push(rpm[i])
         }
     }
 

@@ -312,6 +312,8 @@ function load_failed(message) {
     reset()
     show_verdict("fail", message)
     document.getElementById("fileItem").value = ""
+    // Вердикт — на шаге 0; лог могли выбрать с другого шага
+    set_step(0)
 }
 
 function reset() {
@@ -326,6 +328,9 @@ function reset() {
     state.steps = []
     state.spectrum.log_type = null
     state.spectrum.filter_version = null
+    // Число окон на пакет зависит от длины пакета лога (подсказка шага 1) — для нового лога снова 1; окно raw
+    // (settings.window_size) — выбор пользователя, сохраняется (аудит, I5)
+    state.spectrum.window_per_batch = 1
     state.gyro = null
     state.tracking = null
     state.logged = null
@@ -355,6 +360,8 @@ function reset() {
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
     }
+    // В поле могло стоять вычисленное окно batch прошлого лога (show_fft_window в steps/step1.js) — снова окно raw
+    document.getElementById("FFTWindow_size").value = state.settings.window_size
     for (const id of ["TimeStart", "TimeEnd"]) {
         const input = document.getElementById(id)
         input.value = 0
@@ -426,6 +433,8 @@ async function load(buffer, file = null) {
     }
     document.getElementById("FFTWindow_size").disabled = !raw_window_used()
     update_wizbar()
+    // Новый лог начинается с шага 0: при выборе файла с другого шага его секция после reset() оставалась видимой пустой
+    set_step(0)
     console.log("Загрузка заняла " + Math.round(performance.now() - start) + " мс")
 }
 

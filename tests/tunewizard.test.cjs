@@ -279,6 +279,24 @@ test('log_info: ATT объявлен, но без строк (нет полей)
     assert.equal(info.time_end, 3)
 })
 
+test('log_info: без ATT, RATE и CTUN границы — из ISBH.SampleUS, GYR.SampleUS или любого сообщения с TimeUS (аудит, I3)', () => {
+    const bounds = (messages) => {
+        const info = core_log.log_info(fake_log({ messages }), copter_version)
+        return [info.time_start, info.time_end, info.duration_s]
+    }
+    // Batch-лог без сообщений положения: границы по заголовкам пакетов
+    assert.deepEqual(bounds({ ISBH: { N: [0, 1, 2], SampleUS: [10e6, 11e6, 12e6] }, PARM: { TimeUS: [1e6, 1e6] } }), [10, 12, 2])
+    // Raw-лог: GYR по экземплярам (читается через get_instance), объединение по всем экземплярам
+    assert.deepEqual(bounds({ GYR: { instances: { 0: { SampleUS: [20e6, 25e6] }, 1: { SampleUS: [21e6, 26e6] } } } }), [20, 26, 6])
+    // Ни того ни другого: крайние TimeUS сообщений без экземпляров (сообщения с экземплярами, как VIBE, пропускаются)
+    assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6, 9e6] }, MSG: { TimeUS: [4e6, 6e6], Message: ['a', 'b'] }, VIBE: { instances: { 0: { TimeUS: [0, 50e6] } } } }), [4, 9, 5])
+    // ATT в приоритете, как раньше; сообщение с одним отсчётом границ не задаёт
+    assert.deepEqual(bounds({ ATT: { TimeUS: [1e6, 3e6] }, ISBH: { SampleUS: [10e6, 12e6] } }), [1, 3, 2])
+    assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6] } }), [null, null, null])
+    assert.deepEqual(bounds({}), [null, null, null])
+    assert.deepEqual(core_log.log_time_bounds(fake_log({ messages: { ISBH: { SampleUS: [10e6, 12e6] } } })), { start: 10e6, end: 12e6 })
+})
+
 const checks = require('../TuneWizard/core/checks.js')
 
 // Сведения о хорошем логе Copter; тесты переопределяют нужные поля
@@ -286,6 +304,7 @@ function good_info(over = {}) {
     return {
         vehicle: 'Copter', fw_string: 'ArduCopter V4.6.0', board: 'CubeOrange', filter_version: 2, duration_s: 120,
         messages: { pid: true, rate: true, gyro_raw: true, gyro_batch: false, esc: true, rpm: false, vibe: true, ctun: true, att: true, pos: true, ftn: false },
+        esc: { instances: 4, with_rpm: 4 },
         throttle_source: 'CTUN.ThO',
         flight: { start: 5, end: 100, duration_s: 95, mean_throttle: 0.33 },
         ...over
@@ -392,10 +411,34 @@ test('run_checks: batch pre/post по INS_LOG_BAT_OPT', () => {
 })
 
 test('run_checks: источник трекинга — ESC ok, RPM ok, только газ warn', () => {
-    const rpm = good_info({ messages: { ...good_info().messages, esc: false, rpm: true } })
+    const rpm = good_info({ messages: { ...good_info().messages, esc: false, rpm: true }, esc: null })
     assert.equal(by_id(checks.run_checks(rpm, good_params, good_vibe), 'tracking').status, 'ok')
-    const throttle = good_info({ messages: { ...good_info().messages, esc: false, rpm: false } })
+    const throttle = good_info({ messages: { ...good_info().messages, esc: false, rpm: false }, esc: null })
     assert.equal(by_id(checks.run_checks(throttle, good_params, good_vibe), 'tracking').status, 'warn')
+})
+
+test('run_checks: ESC без оборотов (все 0 или NaN) — warn, хоть один экземпляр с оборотами — ok (аудит, I4)', () => {
+    // Сводка из log_info: экземпляры есть, оборотов ни у одного
+    const none = by_id(checks.run_checks(good_info({ esc: { instances: 4, with_rpm: 0 } }), good_params, good_vibe), 'tracking')
+    assert.equal(none.status, 'warn')
+    assert.match(none.text, /оборотов в ней нет/)
+    assert.match(none.fix, /SERVO_BLH_MASK/)
+    assert.equal(by_id(checks.run_checks(good_info({ esc: { instances: 4, with_rpm: 1 } }), good_params, good_vibe), 'tracking').status, 'ok')
+    // ESC объявлен, а сводки нет (сообщение без строк) — тоже warn
+    assert.equal(by_id(checks.run_checks(good_info({ esc: null }), good_params, good_vibe), 'tracking').status, 'warn')
+    // Поддельный лог → log_info → run_checks: NaN и нули не считаются оборотами
+    const esc_log = (RPM) => core_log.log_info(fake_log({ messages: {
+        ATT: { TimeUS: [0, 1e6] },
+        ESC: { instances: { 0: { TimeUS: [0, 1e6, 2e6], RPM }, 1: { TimeUS: [0, 1e6, 2e6], RPM: [0, 0, 0] } } }
+    } }), copter_version)
+    const dead = esc_log([0, NaN, 0])
+    assert.deepEqual(dead.esc, { instances: 2, with_rpm: 0 })
+    assert.equal(dead.messages.esc, true)
+    assert.equal(by_id(checks.run_checks(dead, good_params, good_vibe), 'tracking').status, 'warn')
+    const alive = esc_log([0, NaN, 3000])
+    assert.deepEqual(alive.esc, { instances: 2, with_rpm: 1 })
+    assert.equal(by_id(checks.run_checks(alive, good_params, good_vibe), 'tracking').status, 'ok')
+    assert.equal(core_log.log_info(fake_log(), copter_version).esc, null, 'без ESC сводки нет')
 })
 
 test('run_checks: полёт — нет газа fail, короткий warn', () => {

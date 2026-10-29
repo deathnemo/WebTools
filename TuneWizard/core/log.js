@@ -213,6 +213,84 @@ function vibe_summary(log) {
     }
 }
 
+// Сводка ESC-телеметрии для проверки источника трекинга (аудит, I4): instances — экземпляров ESC с данными,
+// with_rpm — сколько из них хоть раз сообщили конечные обороты больше нуля (прошивка пишет NaN, когда оборотов нет,
+// AP_ESC_Telem.cpp; нули — моторы стоят). null, если сообщения ESC нет
+function esc_summary(log) {
+    if (!("ESC" in log.messageTypes)) {
+        return null
+    }
+    // Старый лог без экземпляров читается как один регулятор через get_instance(name, null, field)
+    const instances = log.messageTypes.ESC.instances
+    const keys = instances ? Object.keys(instances) : [null]
+    let count = 0
+    let with_rpm = 0
+    for (const key of keys) {
+        const rpm = log.get_instance("ESC", key, "RPM")
+        if ((rpm == null) || (rpm.length == 0)) {
+            continue
+        }
+        count++
+        for (let i = 0; i < rpm.length; i++) {
+            if (Number.isFinite(rpm[i]) && (rpm[i] > 0)) {
+                with_rpm++
+                break
+            }
+        }
+    }
+    return { instances: count, with_rpm }
+}
+
+// Крайние метки времени лога, мкс: { start, end } или null. Сначала ATT, RATE, CTUN по порядку (первое с двумя и больше
+// отсчётами — как границы графиков FilterReview/PIDReview); без них (аудит, I3) — данные гироскопа: ISBH.SampleUS,
+// затем GYR.SampleUS по экземплярам; иначе — первая и последняя TimeUS по всем сообщениям без экземпляров (у каждого
+// сообщения с двумя и больше отсчётами; такие читаются через get). Сообщение может быть объявлено без единой строки:
+// поля нет, get возвращает undefined
+function log_time_bounds(log) {
+    const span = (t) => ((t != null) && (t.length > 1)) ? { start: t[0], end: t[t.length - 1] } : null
+    for (const name of ["ATT", "RATE", "CTUN"]) {
+        if (name in log.messageTypes) {
+            const found = span(log.get(name, "TimeUS"))
+            if (found != null) {
+                return found
+            }
+        }
+    }
+    if ("ISBH" in log.messageTypes) {
+        const found = span(log.get("ISBH", "SampleUS"))
+        if (found != null) {
+            return found
+        }
+    }
+    let bounds = null
+    const extend = (found) => {
+        if (found == null) {
+            return
+        }
+        if (bounds == null) {
+            bounds = { ...found }
+        } else {
+            bounds.start = Math.min(bounds.start, found.start)
+            bounds.end = Math.max(bounds.end, found.end)
+        }
+    }
+    if (("GYR" in log.messageTypes) && (log.messageTypes.GYR.instances != null)) {
+        for (const inst of Object.keys(log.messageTypes.GYR.instances)) {
+            extend(span(log.get_instance("GYR", inst, "SampleUS")))
+        }
+        if (bounds != null) {
+            return bounds
+        }
+    }
+    for (const name of Object.keys(log.messageTypes)) {
+        if (log.messageTypes[name].instances != null) {
+            continue
+        }
+        extend(span(log.get(name, "TimeUS")))
+    }
+    return bounds
+}
+
 // Рама из сообщений MSG: текст после «Frame: » первого сообщения, которое так начинается («Frame: QUAD/X_REV» —
 // класс и тип рамы, AP_Motors::get_frame_and_type_string). Нет MSG (или в нём нет строк) или такой строки — null
 function log_frame(log) {
@@ -225,26 +303,21 @@ function log_frame(log) {
 }
 
 // Сводная информация о логе. version — результат get_version_and_board(log) из Libraries/LogHelpers.js.
-// board — строка полётного контроллера из MSG, board_id — номер платы APJ из VER, frame — рама (log_frame); нет — null
+// board — строка полётного контроллера из MSG, board_id — номер платы APJ из VER, frame — рама (log_frame),
+// esc — сводка ESC-телеметрии (esc_summary); нет — null
 function log_info(log, version = {}) {
     const messages = log_messages(log)
 
-    // Границы и длительность по первому подходящему сообщению с TimeUS (без экземпляров: такие читаются через get).
-    // time_start/time_end — абсолютные секунды лога, по ним страница задаёт границы графиков
+    // Границы и длительность (log_time_bounds). time_start/time_end — абсолютные секунды лога, по ним страница задаёт
+    // границы графиков
     let time_start = null
     let time_end = null
     let duration_s = null
-    for (const name of ["ATT", "RATE", "CTUN"]) {
-        if (name in log.messageTypes) {
-            // Сообщение может быть объявлено без единой строки: поля нет, get возвращает undefined
-            const t = log.get(name, "TimeUS")
-            if ((t != null) && (t.length > 1)) {
-                time_start = t[0] * US2S
-                time_end = t[t.length - 1] * US2S
-                duration_s = (t[t.length - 1] - t[0]) * US2S
-                break
-            }
-        }
+    const bounds = log_time_bounds(log)
+    if (bounds != null) {
+        time_start = bounds.start * US2S
+        time_end = bounds.end * US2S
+        duration_s = (bounds.end - bounds.start) * US2S
     }
 
     const throttle = throttle_series(log)
@@ -266,6 +339,7 @@ function log_info(log, version = {}) {
         time_end,
         duration_s,
         messages,
+        esc: esc_summary(log),
         pid_log_rates,
         throttle_source: throttle?.source ?? null,
         flight: window ? {
@@ -278,5 +352,5 @@ function log_info(log, version = {}) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { US2S, us_to_s, log_params, log_messages, log_message_rate, throttle_series, throttle_window, mean_throttle, percentile, vibe_summary, log_info }
+    module.exports = { US2S, us_to_s, log_params, log_messages, log_message_rate, throttle_series, throttle_window, mean_throttle, percentile, vibe_summary, esc_summary, log_time_bounds, log_info }
 }

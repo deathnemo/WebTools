@@ -25,6 +25,8 @@
 //   estimate_post(…) берёт FFT.H                        → необязательный последний аргумент H, по умолчанию FFT.H
 // Исправлен досрочно дефект upstream 8 (FR 1200–1222, notch_line_stats): NaN в трекинге убирал среднюю линию notch.
 // Исправлен дефект upstream 7 (FR 174–186, задача 8): выключенный notch не даёт предупреждений.
+// Отличие от upstream (аудит, C1): estimate_post и bode_mean усредняют только окна с числовой H и делят на их число
+// (null, если таких нет); сами NaN-отсчёты трекинга теперь отбрасывают ESCTarget и RPMTarget.
 //
 // Нужны глобалы страницы: Libraries/Array_Math.js, core/gyro.js (find_start_index, find_end_index)
 // и классы core/tracking/*.
@@ -493,7 +495,8 @@ function phase_wrap(phase) {
 }
 
 // Оценка спектра «после» для экземпляра i по данным «до» и FFT.H: { x, y, z } уже после alias.apply_amp
-// и amplitude_scale.scale; null, если у экземпляра нет FFT или H.
+// и amplitude_scale.scale; null, если у экземпляра нет FFT или H. Окна с нечисловой H пропускаются; если таких все —
+// x, y, z из NaN.
 // H — передаточная функция по окнам (как FFT.H); по умолчанию FFT.H. Своя H (filter_transfer на FFT.Z1/Z2) нужна
 // core/candidates.js, чтобы оценить вариант параметров, не трогая FFT.H. Необязательный аргумент — дополнение
 // к upstream, без него поведение прежнее
@@ -518,8 +521,16 @@ function estimate_post(gyro, i, amplitude_scale, range, alias, H = gyro[i]?.FFT?
     let fft_mean_x = (new Array(fft_len)).fill(0)
     let fft_mean_y = (new Array(fft_len)).fill(0)
     let fft_mean_z = (new Array(fft_len)).fill(0)
+    // Число усреднённых окон: окно с нечисловой передаточной функцией (цель notch в этом окне не число) в среднее
+    // не входит, иначе NaN одного окна отравлял все бины (аудит, C1; источники трекинга такие отсчёты теперь
+    // отбрасывают, здесь — страховка, как в notch_line_stats при дефекте upstream 8)
+    let mean_length = 0
     for (let j=start_index;j<end_index;j++) {
         const attenuation = complex_abs(H[j])
+        if (!attenuation.every(Number.isFinite)) {
+            continue
+        }
+        mean_length++
 
         // Вычитаем шум, применяем передаточную функцию, возвращаем шум
         // Строго говоря, шум можно не трогать — с ним оценка менее точна,
@@ -534,8 +545,12 @@ function estimate_post(gyro, i, amplitude_scale, range, alias, H = gyro[i]?.FFT?
         fft_mean_z = array_add(fft_mean_z, amplitude_scale.fun(filtered_z))
     }
 
-    // Число усреднённых окон
-    const mean_length = end_index - start_index
+    if (mean_length == 0) {
+        // Ни одного окна с числовой передаточной функцией: оценки нет. Форма результата сохраняется (NaN по бинам),
+        // чтобы потребители (core/candidates.js, core/lowpass.js) отметили сомнительный вариант, а не падали на null
+        const nan = new Array(alias.bins.length).fill(NaN)
+        return { x: nan, y: nan.slice(), z: nan.slice() }
+    }
 
     const corrected_x = array_scale(fft_mean_x, window_correction / mean_length)
     const corrected_y = array_scale(fft_mean_y, window_correction / mean_length)
@@ -548,7 +563,8 @@ function estimate_post(gyro, i, amplitude_scale, range, alias, H = gyro[i]?.FFT?
 }
 
 // Среднее, максимум и минимум амплитуды и фазы бодэ экземпляра index по окнам в диапазоне range.
-// Амплитуда линейная (масштаб накладывает вызывающая сторона), фаза в градусах без свёртки
+// Амплитуда линейная (масштаб накладывает вызывающая сторона), фаза в градусах без свёртки.
+// Окна с нечисловой H пропускаются; null, если учесть нечего
 function bode_mean(gyro, index, range) {
     // Без FFT, окон, сетки бодэ или ещё не посчитанной H считать нечего — upstream такие экземпляры
     // пропускал при выборе индекса (FR 1396–1408); null симметрично estimate_post
@@ -560,9 +576,6 @@ function bode_mean(gyro, index, range) {
     const start_index = find_start_index(gyro[index].FFT.time, range)
     const end_index = find_end_index(gyro[index].FFT.time, range)+1
 
-    // Множитель для среднего из накопленной суммы
-    const mean_scale = 1 / (end_index - start_index)
-
     const H_len = gyro[index].FFT.bode.H[0][0].length
     let Amp_mean = (new Array(H_len)).fill(0)
     let Phase_mean = (new Array(H_len)).fill(0)
@@ -570,14 +583,19 @@ function bode_mean(gyro, index, range) {
     let Amp_min
     let Phase_max
     let Phase_min
+    // Число учтённых окон: окно с нечисловой передаточной функцией пропускается (аудит, C1; как в estimate_post)
+    let count = 0
     for (let j=start_index;j<end_index;j++) {
         const H = gyro[index].FFT.bode.H[j]
         const HR_att = complex_abs(H)
+        if (!HR_att.every(Number.isFinite)) {
+            continue
+        }
         const HR_phase = get_phase(H)
         Amp_mean = array_add(Amp_mean, HR_att)
         Phase_mean = array_add(Phase_mean, HR_phase)
 
-        if (j > start_index) {
+        if (count > 0) {
             Amp_max = array_max(Amp_max, HR_att)
             Amp_min = array_min(Amp_min, HR_att)
             Phase_max = array_max(Phase_max, HR_phase)
@@ -588,7 +606,15 @@ function bode_mean(gyro, index, range) {
             Phase_max = HR_phase
             Phase_min = HR_phase
         }
+        count++
     }
+    if (count == 0) {
+        // Ни одного окна с числовой передаточной функцией
+        return null
+    }
+
+    // Множитель для среднего из накопленной суммы
+    const mean_scale = 1 / count
 
     Amp_mean = array_scale(Amp_mean, mean_scale)
     Phase_mean = array_scale(Phase_mean, mean_scale)

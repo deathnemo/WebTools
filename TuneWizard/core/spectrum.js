@@ -51,7 +51,8 @@ function spectrum_frequency_scale(unit, log_axis) {
 // по бинам FFT к bins: "none" — как есть, "fold" — спектр до частоты Найквиста контура плюс отражённый в него
 // остаток, "only" — только отражённый остаток. Объект привязан к этому FFT (в none bins — это FFT.bins, в fold/only
 // интерполяция — к его частоте и окну), поэтому mean_spectrum и spectrogram_matrix получают alias от того же FFT.
-// null, если FFT нет или окон нет
+// null, если FFT нет или окон нет. Частота контура не положительное число (пустое поле формы) — как режим none:
+// иначе new Array(NaN) бросал RangeError (аудит)
 function alias_obj(FFT, opts) {
     // Без FFT или без окон строить нечего: redraw и redraw_Spectrogram в upstream пропускали такие экземпляры до вызова
     if ((FFT == null) || (FFT.x.length == 0)) {
@@ -59,7 +60,7 @@ function alias_obj(FFT, opts) {
     }
 
     let obj = {}
-    if (opts.mode == "none") {
+    if ((opts.mode == "none") || !(opts.loop_rate > 0)) {
         // Без алиасинга: возвращаем переданные значения как есть
         obj.len = FFT.x[0].length
         obj.bins = FFT.bins
@@ -177,8 +178,8 @@ function find_instance(gyro, sensor_num, post_filter) {
 // а в fold/only интерполяция привязана к частоте и окну этого FFT.
 // Возвращает { x, bins, z }: x — время окон в секундах с двумя дополнительными точками на каждый разрыв
 // (шаг больше 2.5 среднего), bins = alias.bins в герцах, z[j] — строка амплитуд окна j после поправки окна,
-// alias.apply_amp, amplitude_scale.fun и amplitude_scale.scale; строки разрывов — массивы undefined,
-// Plotly рисует их пустыми. null, если экземпляра или FFT нет либо для оценки нет FFT.H.
+// alias.apply_amp, amplitude_scale.fun и amplitude_scale.scale; строки разрывов (и окон оценки с нечисловой H) —
+// массивы undefined, Plotly рисует их пустыми. null, если экземпляра или FFT нет либо для оценки нет FFT.H.
 // Контракт графика (как в upstream, FR 689): heatmap с transpose: true, x = spec.x, y = frequency_scale.fun(spec.bins),
 // z = spec.z — строка z[j] соответствует времени x[j]
 function spectrogram_matrix(gyro, batch_instance, axis, estimated, amplitude_scale, alias) {
@@ -248,10 +249,18 @@ function spectrogram_matrix(gyro, batch_instance, axis, estimated, amplitude_sca
         var amplitude = array_scale(gyro[batch_instance].FFT[axis][index], window_correction)
         if (estimated) {
             const attenuation = complex_abs(gyro[batch_instance].FFT.H[index])
+            index++
+            if (!attenuation.every(Number.isFinite)) {
+                // Передаточная функция окна не число (цель notch в этом окне не число): оценки для строки нет,
+                // строка пустая, как у разрыва (аудит, C1; как пропуск окна в estimate_post)
+                z[j] = new Array(num_bins)
+                continue
+            }
             amplitude = array_offset(array_mul(array_offset(amplitude, -gyro.quantization_noise), attenuation), gyro.quantization_noise)
+        } else {
+            index++
         }
         z[j] = amplitude_scale.scale(amplitude_scale.fun(alias.apply_amp(amplitude)))
-        index++
     }
 
     return { x: x, bins: bins, z: z }
