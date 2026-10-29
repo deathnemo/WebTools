@@ -590,6 +590,32 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     assert.equal(evaluate_candidate(values, { ...ctx, gyro: post_only }), null)
 })
 
+test('evaluate_candidate: notch_enabled и notch_warnings — работает ли каждый notch и почему нет', () => {
+    const { gyro, env: log_env, tracking, range } = esc_setup({ esc_hz: [56, 58, 60, 60, 60, 62, 64] })
+    const ctx = { gyro, env: log_env, tracking, range, sensor: 0, peaks: [], loop_rate: 400 }
+    // ESC (MODE 3) с данными — работает; второй notch выключен
+    const esc = evaluate_candidate(log_values_7a, ctx)
+    assert.deepEqual(esc.notch_enabled, [true, false])
+    assert.deepEqual(esc.notch_warnings, [[], []])
+    // RPM1 (MODE 2) без сообщений RPM — включён, но не работает: фильтр посчитан без него, предупреждение источника
+    const rpm = evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 2 }, ctx)
+    assert.deepEqual(rpm.notch_enabled, [false, false])
+    assert.deepEqual(rpm.notch_warnings, [['Нет данных трекинга для notch RPM1'], []])
+    assert.deepEqual(rpm.warnings, ['Нет данных трекинга для notch RPM1'])
+    // Неизвестный режим 7
+    const unknown = evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 7 }, ctx)
+    assert.deepEqual(unknown.notch_enabled, [false, false])
+    assert.deepEqual(unknown.notch_warnings, [['Неподдерживаемый режим notch 7'], []])
+    // Выключенный notch не работает и не предупреждает (дефект upstream 7 исправлен)
+    const off = evaluate_candidate({ ...log_values_7a, INS_HNTCH_ENABLE: 0 }, ctx)
+    assert.deepEqual(off.notch_enabled, [false, false])
+    assert.deepEqual(off.notch_warnings, [[], []])
+    assert.deepEqual(off.warnings, [])
+    // Предупреждения — копии: правка списка оценки не трогает фильтры
+    rpm.notch_warnings[0].push('x')
+    assert.deepEqual(evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 2 }, ctx).notch_warnings[0], ['Нет данных трекинга для notch RPM1'])
+})
+
 // ---------- Оценка вариантов низкочастотных фильтров шага 3 (core/lowpass.js) ----------
 
 // Значения шага 3 «как в логе» (как у пользователя: FLTD 30, FLTT 20, FLTE крена и тангажа 0)
@@ -1051,6 +1077,40 @@ test('rank_candidates: пики оценки «после» лога тоже п
     const near_main = eval_7a(-40, 10, [[249, -64]], bump(flat, 10))
     rank_candidates({ log: near_main })
     assert.equal(near_main.peaks.filter((p) => p.source === 'post').length, 0)
+})
+
+test('rank_candidates: notch лога не работает (notch_enabled[0] false) — допуск задержки не применяется, пики и нечисловая задержка отмечают', () => {
+    const good = [[78, -65], [153, -63]]
+    // Лог с выключенным notch (аудит 28.10.2026, E12): автоподбор лучше по полосе на 9.8 дБ, но медленнее на 3.5 мс —
+    // раньше отвергался за задержку, и рекомендовался «как в логе + второй notch» на −0.25 дБ
+    const log_off = { ...eval_7a(-48.4, 6.25, [[78, -35], [153, -48]]), notch_enabled: [false, false] }
+    const r = rank_candidates({ log: log_off, fit: eval_7a(-58.1, 9.8, [[78, -62], [153, -48]]), second: eval_7a(-48.6, 6.43, [[78, -35], [153, -74]]) })
+    assert.equal(r.lag_gate, false)
+    assert.equal(r.best_id, 'fit')
+    assert.deepEqual(r.flags.fit, no_flags)
+    assert.deepEqual(r.flags.second, no_flags)
+    // Пики проверяются по-прежнему
+    const worse = rank_candidates({ log: log_off, fit: eval_7a(-58.1, 9.8, [[78, -62], [153, -44]]) })
+    assert.equal(worse.best_id, 'log')
+    assert.deepEqual(worse.flags.fit, { worse_peaks: [153], lag_over: false, incomplete: false })
+    // Нечисловая задержка отмечает вариант и без допуска
+    for (const lag30 of [NaN, undefined]) {
+        const nan = rank_candidates({ log: log_off, fit: eval_7a(-58.1, lag30, [[78, -62], [153, -48]]) })
+        assert.equal(nan.flags.fit.lag_over, true, 'задержка ' + lag30)
+        assert.equal(nan.best_id, 'log')
+    }
+    // Notch лога работает — допуск как раньше; без поля notch_enabled (оценки вручную) — тоже
+    for (const log of [{ ...eval_7a(-40, 10, good), notch_enabled: [true, false] }, eval_7a(-40, 10, good)]) {
+        const on = rank_candidates({ log, fit: eval_7a(-45, 13.5, [[78, -66], [153, -64]]) })
+        assert.equal(on.lag_gate, true)
+        assert.equal(on.best_id, 'log')
+        assert.deepEqual(on.flags.fit, { worse_peaks: [], lag_over: true, incomplete: false })
+    }
+    // Решает только первый notch лога: не работающий второй допуск не снимает
+    assert.equal(lag_gate_applies({ notch_enabled: [true, false] }), true)
+    assert.equal(lag_gate_applies({ notch_enabled: [false, true] }), false)
+    assert.equal(lag_gate_applies(null), true)
+    assert.equal(lag_gate_applies({ notch_enabled: null }), true)
 })
 
 // Задержка дискретного ФНЧ Баттерворта 2-го порядка (DigitalBiquadFilter) на частоте f, мс — по формуле

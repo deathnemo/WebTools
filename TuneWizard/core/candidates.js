@@ -197,6 +197,8 @@ function ctx_pre_spectrum(ctx, FFT, alias) {
 // настоящие, как у пиков шага 1). Трекинг уже интерполирован к окнам FFT (interpolate_tracking).
 // Возвращает null, если у экземпляра нет FFT или Z1 (только «после»), иначе {
 //   values, warnings (filters.warnings),
+//   notch_enabled: [bool, bool] — работает ли каждый гармонический notch (HarmonicNotchFilter.enabled(): ENABLE > 0,
+//          источник режима известен и у него есть данные), notch_warnings: [[…], […]] — предупреждения каждого notch,
 //   peaks: [{ freq, axes, bin (частота ближайшего бина), pre_dB, post_dB, by_axis: { X: { pre_dB, post_dB } },
 //           source: "main" }] — pre — средний спектр до фильтров, post — оценка после; pre_dB/post_dB пика — сумма
 //          мощностей перечисленных осей; rank_candidates дописывает сюда пики source: "post",
@@ -239,6 +241,8 @@ function evaluate_candidate(values, ctx) {
     return {
         values: values,
         warnings: filters.warnings,
+        notch_enabled: filters.notch.map((notch) => notch.enabled()),
+        notch_warnings: filters.notch.map((notch) => [...notch.warnings]),
         peaks: peaks,
         band_dB: bands[0].dB,
         bands: bands,
@@ -267,13 +271,23 @@ function log_post_peaks(log, rules) {
         .map((peak) => ({ freq: peak.freq, axes: peak.axes }))
 }
 
+// Применяется ли допуск задержки (max_lag_increase_ms) при опоре log — оценке «как в логе» (evaluate_candidate).
+// Нет, если первый notch лога не работает (log.notch_enabled[0] === false: ENABLE ≤ 0, режим неизвестен или у источника
+// нет данных): тогда опора — лог без notch, любой работающий notch добавляет к ней миллисекунды, и допуск +0.5 мс
+// отверг бы все варианты — на логе с выключенным notch автоподбор на −9.8 дБ отвергался за +3.5 мс, а рекомендовался
+// «как в логе + второй notch» на −0.25 дБ. Задержку такого варианта показывает таблица и называет вердикт
+// [наше, аудит 28.10.2026]. Без поля notch_enabled (оценки вручную) допуск применяется
+function lag_gate_applies(log) {
+    return !((log != null) && Array.isArray(log.notch_enabled) && (log.notch_enabled[0] === false))
+}
+
 // Выбор варианта. evaluations — объект id → evaluate_candidate(...) (порядок ключей — порядок вариантов, лог
 // первым), обязательно с id "log". Сначала в каждую оценку дописываются пики оценки «после» лога (log_post_peaks,
 // source: "post"; повторный вызов заменяет их, а не добавляет). Вариант отмечается:
 //   worse_peaks — частоты пиков (главных и «после»), где уровень хуже лога больше чем на max_peak_worsening_dB,
 //                 где разница нечисловая (NaN) или где у пика нет пары в оценке лога (и наоборот);
 //   lag_over    — задержка на старшей из lag_freqs_hz (30 Гц) больше задержки лога на max_lag_increase_ms
-//                 или нечисловая;
+//                 или нечисловая; когда допуск не применяется (lag_gate_applies(log) — false) — только нечисловая;
 //   incomplete  — оценки нет (null), нет списка пиков или спектра, мощность в полосе нечисловая; у всех вариантов,
 //                 кроме лога, — также если неполна оценка самого лога.
 // Проверки отказывают при сомнении: !(разница ≤ порога), поэтому NaN и undefined отмечают вариант [наше].
@@ -281,10 +295,12 @@ function log_post_peaks(log, rules) {
 // на 30 Гц, затем раньше перечисленный. Лог служит опорой и рекомендуется, если лучше никто не подошёл; без
 // оценки лога (или при неполной) сравнивать не с чем — все варианты incomplete; best_id — "log", если такой ключ
 // есть (даже с null), и null, если варианта «как в логе» нет вовсе.
-// Возвращает { best_id, flags: { id: { worse_peaks: [freq…], lag_over, incomplete } } }
+// Возвращает { best_id, flags: { id: { worse_peaks: [freq…], lag_over, incomplete } }, lag_gate } — lag_gate: применялся
+// ли допуск задержки (lag_gate_applies)
 function rank_candidates(evaluations, rules = candidate_rules) {
     const log = evaluations.log
     const lag_hz = rules.lag_freqs_hz[rules.lag_freqs_hz.length - 1]
+    const lag_gate = lag_gate_applies(log)
 
     // Пики оценки «после» лога — один раз на выбор, во все оценки
     const post_peaks = log_post_peaks(log, rules)
@@ -324,7 +340,8 @@ function rank_candidates(evaluations, rules = candidate_rules) {
                     worse_peaks.push(log_peak.freq)
                 }
             }
-            lag_over = !(evaluation.lag_ms?.[lag_hz] <= log.lag_ms?.[lag_hz] + rules.max_lag_increase_ms)
+            lag_over = lag_gate ? !(evaluation.lag_ms?.[lag_hz] <= log.lag_ms?.[lag_hz] + rules.max_lag_increase_ms)
+                                : !Number.isFinite(evaluation.lag_ms?.[lag_hz])
         }
         flags[id] = { worse_peaks: worse_peaks, lag_over: lag_over, incomplete: incomplete }
     }
@@ -346,7 +363,7 @@ function rank_candidates(evaluations, rules = candidate_rules) {
         }
     }
 
-    return { best_id: best_id, flags: flags }
+    return { best_id: best_id, flags: flags, lag_gate: lag_gate }
 }
 
 // Ширина пика в спектре amp_dB (одна ось, дБ) около частоты freq по уровню width_db ниже вершины. Вершина —
