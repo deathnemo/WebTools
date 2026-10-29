@@ -16,7 +16,7 @@ const SPEC_MAX_WINDOWS_PER_BATCH = 64
 const step1 = {
     fft_key: null,        // "batch:<окон на пакет>" или "raw:<окно>" — настройки посчитанного FFT
     filters_key: null,    // версия фильтра, с которой посчитаны фильтры и передаточная функция
-    error: null,          // ошибка загрузки гироскопа или FFT: показывается в вердикте вместо результатов
+    error: null,          // ошибка загрузки гироскопа, источников трекинга или FFT: показывается в вердикте вместо результатов
     fft_warnings: [],     // предупреждения последнего расчёта FFT (живут, пока FFT не пересчитан)
 }
 
@@ -190,7 +190,8 @@ function step1_reset() {
     step1.filters_key = null
     step1.error = null
     step1.fft_warnings = []
-    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note", "spec_wpb_hint"]) {
+    // Поле «Окон на пакет» — только для batch-лога, до загрузки лога скрыто (аудит, M9)
+    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note", "spec_wpb_hint", "spec_batch_field", "spec_sg_note"]) {
         document.getElementById(id).hidden = true
     }
     document.getElementById("spec_info").textContent = ""
@@ -232,11 +233,14 @@ function clear_step1_plots() {
 
 // ---------- Панель настроек ----------
 
-// Значения панели, которые применяются только кнопкой «Пересчитать»
+// Значения панели, которые применяются только кнопкой «Пересчитать». Пустое или нечисловое поле «Окон на пакет» —
+// 1 (как Math.max(parseInt(…), 1) в run_batch_fft); иначе NaN попадал в ключ FFT, и панель вечно считалась изменённой
+// (аудит, M4)
 function step1_pending() {
+    const window_per_batch = parseInt(document.getElementById("spec_window_per_batch").value)
     return {
         log_type: radio_value("spec_log") ?? state.spectrum.log_type,
-        window_per_batch: parseInt(document.getElementById("spec_window_per_batch").value),
+        window_per_batch: (Number.isFinite(window_per_batch) && (window_per_batch >= 1)) ? window_per_batch : 1,
         filter_version: parseInt(radio_value("spec_fv") ?? state.spectrum.filter_version),
     }
 }
@@ -265,8 +269,12 @@ function step1_view_changed() {
     step1_run(() => redraw_step1())
 }
 
-// Числа окон на пакет до SPEC_MAX_WINDOWS_PER_BATCH, при которых окно batch — степень двойки: формула run_batch_fft
-// floor(N / (1 + (w − 1)·0.5)) для длины пакета N каждого экземпляра (общие для всех экземпляров)
+// Наименьшее окно FFT, отсчётов — как min поля «Окно FFT» шага 0 и нижний предел window_size_changed (wizard.js)
+const SPEC_MIN_WINDOW = 64
+
+// Числа окон на пакет до SPEC_MAX_WINDOWS_PER_BATCH, при которых окно batch — степень двойки не меньше SPEC_MIN_WINDOW:
+// формула run_batch_fft floor(N / (1 + (w − 1)·0.5)) для длины пакета N каждого экземпляра (общие для всех экземпляров).
+// Окна меньше 64 (1, 2, …, 32 отсчёта) подсказка не предлагала бы осмысленно (аудит, M3)
 function valid_windows_per_batch(gyro) {
     let valid = null
     for (let i = 0; i < gyro.length; i++) {
@@ -277,7 +285,7 @@ function valid_windows_per_batch(gyro) {
         const list = []
         for (let w = 1; w <= SPEC_MAX_WINDOWS_PER_BATCH; w++) {
             const size = Math.floor(num_points / (1 + (w - 1) * 0.5))
-            if ((size >= 1) && Number.isInteger(Math.log2(size))) {
+            if ((size >= SPEC_MIN_WINDOW) && Number.isInteger(Math.log2(size))) {
                 list.push(w)
             }
         }
@@ -391,31 +399,72 @@ function default_spectrogram_selection() {
 
 // ---------- Расчёт ----------
 
-// Загрузить гироскоп, если ещё не загружен (или сменили тип лога): источники трекинга, логированные notch,
-// видимость трасс и выбор спектрограммы. false — данных нет, текст в step1.error; производные тогда сброшены
-function ensure_gyro() {
-    if (state.gyro != null) {
-        step1.error = state.gyro.error
-        return state.gyro.error == null
+// Поле «Окно FFT» шага 0: у raw-лога — окно из настроек (его правит пользователь), у batch — вычисленное окно
+// посчитанного FFT, только для сведения (поле выключено), как FilterReview подставляет его в FFTWindow_size (FR 843).
+// state.settings.window_size при этом не трогается: это окно raw-лога, и после смены типа лога на raw поле снова
+// показывает его. Раньше окно batch записывалось в настройки и подменяло окно raw (аудит, I5)
+function show_fft_window() {
+    const input = document.getElementById("FFTWindow_size")
+    const raw = raw_window_used()
+    input.disabled = !raw
+    let size = state.settings.window_size
+    if (!raw && (state.gyro != null) && (state.gyro.error == null) && (state.gyro.type === "batch")) {
+        const info = fft_info(state.gyro)
+        const first = [0, 1, 2].find((s) => info[s] != null)
+        if (first != null) {
+            size = info[first].window_size
+        }
     }
-    step1.fft_key = null
-    step1.filters_key = null
-    step1.fft_warnings = []
-    state.tracking = null
-    state.logged = null
-    state.filters = null
-    state.gyro = load_gyro(state.log, state.env, { log_type: state.spectrum.log_type })
-    if (state.gyro.error != null) {
+    input.value = size
+}
+
+// Загрузить гироскоп, если ещё не загружен (или сменили тип лога), и подготовить источники трекинга и логированные
+// notch (если ещё не готовы), видимость трасс и выбор спектрограммы. false — данных нет, текст в step1.error;
+// производные тогда сброшены.
+// Источники трекинга готовятся под try/catch: исключение в их конструкторе (неожиданный формат лога) раньше оставляло
+// state.gyro без state.tracking, и каждый следующий показ шагов 1–4 падал на null до перезагрузки лога (аудит, I2).
+// Теперь гироскоп остаётся загруженным, tracking — null, ошибка — в step1.error, и следующий расчёт («Пересчитать»,
+// показ шага) пробует подготовить источники снова
+function ensure_gyro() {
+    if (state.gyro == null) {
+        step1.fft_key = null
+        step1.filters_key = null
+        step1.fft_warnings = []
+        state.tracking = null
+        state.logged = null
+        state.filters = null
+        state.gyro = load_gyro(state.log, state.env, { log_type: state.spectrum.log_type })
+        if (state.gyro.error != null) {
+            step1.error = state.gyro.error
+            return false
+        }
+        state.spectrum.log_type = state.gyro.type
+        // Окно FFT шага 0 действует только на raw-лог
+        show_fft_window()
+        default_spectrum_visibility()
+        default_spectrogram_selection()
+    } else if (state.gyro.error != null) {
         step1.error = state.gyro.error
         return false
     }
-    state.spectrum.log_type = state.gyro.type
-    state.tracking = create_tracking(state.log, state.env, state.gyro)
-    state.logged = create_logged(state.log)
-    // Окно FFT шага 0 действует только на raw-лог
-    document.getElementById("FFTWindow_size").disabled = !raw_window_used()
-    default_spectrum_visibility()
-    default_spectrogram_selection()
+    if ((state.tracking == null) || (state.logged == null)) {
+        step1.fft_key = null
+        step1.filters_key = null
+        state.filters = null
+        try {
+            const tracking = create_tracking(state.log, state.env, state.gyro)
+            const logged = create_logged(state.log)
+            state.tracking = tracking
+            state.logged = logged
+        } catch (e) {
+            console.error(e)
+            state.tracking = null
+            state.logged = null
+            step1.error = "Не удалось подготовить источники трекинга notch по этому логу: " + e.message
+            return false
+        }
+    }
+    step1.error = null
     return true
 }
 
@@ -445,14 +494,9 @@ function ensure_fft() {
         interpolate_tracking(state.tracking, gyro)
         step1.fft_key = key
 
-        // В batch размер окна вычисляется: показать его в поле шага 0, как FilterReview (FR 843)
+        // В batch размер окна вычисляется: показать его в поле шага 0, как FilterReview (FR 843), не трогая окно raw
         if (batch) {
-            const info = fft_info(gyro)
-            const first = [0, 1, 2].find((s) => info[s] != null)
-            if (first != null) {
-                state.settings.window_size = info[first].window_size
-                document.getElementById("FFTWindow_size").value = info[first].window_size
-            }
+            show_fft_window()
         }
     }
 
@@ -616,6 +660,8 @@ function redraw_spectrogram1() {
     p.layout.xaxis.range = [state.settings.start, state.settings.end]
     heat.hovertemplate = "<extra></extra>%{x:.2f} с<br>" + spec_freq_hover("y") + "<br>" + spec_amp_hover("z")
     heat.colorbar.title.text = amp.label
+    const note = document.getElementById("spec_sg_note")
+    note.hidden = true
 
     if (step1_ready()) {
         const gyro = state.gyro
@@ -623,14 +669,22 @@ function redraw_spectrogram1() {
         const data = radio_value("spec_sg_data")
         const axis = radio_value("spec_sg_axis")
         const instance = find_instance(gyro, sensor, data === "post")
+        let spec = null
         if (instance != null) {
             const alias = alias_obj(gyro[instance].FFT, { mode: state.spectrum.aliasing, loop_rate: values_from_log().SCHED_LOOP_RATE })
-            const spec = spectrogram_matrix(gyro, instance, axis, data === "est", amp, alias)
+            spec = spectrogram_matrix(gyro, instance, axis, data === "est", amp, alias)
             if (spec != null) {
                 heat.x = spec.x
                 heat.y = freq.fun(spec.bins)
                 heat.z = spec.z
             }
+        }
+        if (spec == null) {
+            // Переключатели данных общие для всех гироскопов (have_pre/have_post), а у выбранного этих данных или окон
+            // FFT может не быть: пустая карта без объяснения читалась как сбой (аудит, M5)
+            const kind = (data === "post") ? "после фильтров" : "до фильтров" + ((data === "est") ? " (для оценки «после»)" : "")
+            note.textContent = "У гироскопа " + (sensor + 1) + " нет окон FFT " + kind + ": спектрограммы нет. Выберите другой гироскоп или данные."
+            note.hidden = false
         }
 
         // Линии логированных notch (FTN/FTNS), если они есть в логе. По умолчанию только в легенде — как флажок
@@ -714,7 +768,8 @@ function peak_method_text(analysis) {
     }
     let motor_text
     if (info.median_hz == null) {
-        motor_text = "Моторная частота не определена (нет ESC и цели газа) — все пики отнесены к раме."
+        // Без ESC цель газа берётся только при INS_HNTCH_MODE = 1, пик бортового FFT — при 4 (motor_fundamental)
+        motor_text = "Моторная частота не определена (нет ESC-телеметрии, а notch в логе следит не по газу и не по бортовому FFT) — все пики отнесены к раме."
     } else if (info.fundamental_hz !== info.median_hz) {
         motor_text = "Моторная частота: медиана ESC или цели газа за интервал " + info.median_hz.toFixed(1) +
                      " Гц, уточнена по пику первой гармоники до " + info.fundamental_hz.toFixed(1) + " Гц."

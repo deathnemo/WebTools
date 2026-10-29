@@ -371,7 +371,7 @@ details.more > .tablewrap{margin-top:8px}
           <label><input type="radio" name="spec_log" id="spec_log_raw" value="raw" disabled><span>raw (GYR)</span></label>
         </div>
       </fieldset>
-      <div class="fld" id="spec_batch_field">
+      <div class="fld" id="spec_batch_field" hidden>
         <label for="spec_window_per_batch">Окон на пакет</label>
         <input id="spec_window_per_batch" type="number" min="1" step="1" value="1">
       </div>
@@ -457,6 +457,7 @@ details.more > .tablewrap{margin-top:8px}
     </fieldset>
   </div>
   <div id="Spectrogram1" class="plot"></div>
+  <p class="note" id="spec_sg_note" hidden></p>
 
   <div class="head"><span class="eyebrow">Пики</span><h2>Заметные пики шума</h2></div>
   <div class="tablewrap" id="peaks1" hidden>
