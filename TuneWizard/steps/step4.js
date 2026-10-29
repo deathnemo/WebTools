@@ -4,7 +4,8 @@
 // Дизайн — docs/plans/2026-10-25-tune-wizard-stage4-design.md, разделы 3–5 и 7; план — …-stage4.md, задача 7.
 //
 // Данные PID — load_pid (core/pid.js) один раз на лог; FFT компонент (шум D, спектр D и выхода и отклик PIDReview на
-// графиках) — pid_run_batch_fft с окном шага. Измеренный отклик, проверки качества и прогноз от окна
+// графиках) — pid_run_batch_fft с окном шага, только Tar, Act, D и Out (step4_fft_keys). Измеренный отклик, проверки
+// качества и прогноз от окна
 // FFT не зависят: отбор отрезков КИХ — окнами pidtune_rules.window (512) с шагом 32, на них откалиброваны пороги
 // проверок (раздел 3 дизайна).
 // Регулятор лога и сверка модели регулятора — с коэффициентами и фильтрами FLTE/FLTD набора лога; регуляторы
@@ -66,6 +67,9 @@ const step4_axis_names = { roll: { nom: "Крен", gen: "крена" }, pitch: 
 const step4_pid_index = { roll: 0, pitch: 1, yaw: 2 }
 // Коэффициенты шага у оси
 const step4_gain_keys = ["P", "I", "D"]
+// Компоненты, по которым шагу нужен FFT (pid_run_batch_fft): Tar и Act — отклик PIDReview на графике (pid_step_response),
+// D — шум D и спектр, Out — спектр выхода; P, I, FF, DFF, Err шагу не нужны (их спектры — в PIDReview) [аудит области D, M-8]
+const step4_fft_keys = ["Tar", "Act", "D", "Out"]
 // Проверки качества по буквам дизайна
 const step4_check_letters = { ridge: "(а)", halves: "(б)", outer: "(в)" }
 // Лучший неотмеченный вариант: перерегулирования, отличающиеся от лучшего не больше чем на столько пунктов, считаются
@@ -472,18 +476,83 @@ function step4_log_gains(axis) {
     return step4_axis_gains(Object.fromEntries(step4_param_names().map((name) => [name, state.params.get(name)])), axis)
 }
 
+// Коэффициенты оси менялись после интервала анализа (AutoTune сохраняет при дизарме, ручная правка после посадки):
+// набор анализа res (step4_compute_axis) против значений в конце лога (state.params), как float32. Тогда «Как в логе» —
+// это «Набор интервала», а принятое (и «было» сводки — set_values) перепишет значения конца лога [аудит области D].
+// → { end: { P, I, D }, changed: ["P", …] } | null — нет набора (коэффициенты и так конца лога) или совпадают
+function step4_gains_after(res) {
+    if ((res == null) || (res.set_index == null) || (res.gains == null)) {
+        return null
+    }
+    const prefix = pidtune_axes[res.axis].rate
+    const end = step4_axis_gains(Object.fromEntries(step4_gain_keys.map((k) => [prefix + k, state.params.get(prefix + k)])), res.axis)
+    const changed = step4_gain_keys.filter((k) => !step4_same_value(res.gains[k], end[k]))
+    return (changed.length > 0) ? { end: end, changed: changed } : null
+}
+
+// Строка «Как в логе» оси res (step4_compute_axis), у которой коэффициенты менялись после интервала анализа, —
+// «Набор интервала» (id "log" остаётся: по нему выбор, сравнение и сводка)
+function step4_mark_log_row(res) {
+    const row = (res.candidates ?? []).find((c) => c.id === "log")
+    if ((row != null) && (step4_gains_after(res) != null)) {
+        row.title = "Набор интервала"
+    }
+}
+
+// Оси, у которых коэффициенты менялись после интервала анализа (step4_gains_after); нет расчёта — []
+function step4_axes_changed_after() {
+    return step4_axis_list.filter((axis) => step4_gains_after(step4.calc?.[axis]) != null)
+}
+
+// Шум D оси res, если он посчитан по окнам интервала: pidtune_d_noise берёт окна FFT набора от последнего до t0 до
+// первого после t1, и интервал без отобранных окон (нет отрезков или манёвров) или без окон FFT внутри получал бы одно
+// окно за его пределами — тогда null (плитка «—», без «горячих моторов») [аудит области D, M-6]
+function step4_d_noise_in(res) {
+    if ((res.d_noise == null) || (res.seg == null) || (res.seg.windows == 0)) {
+        return null
+    }
+    const times = res.source?.sets?.[res.set_index]?.FFT?.time ?? []
+    return times.some((t) => (t >= res.range[0]) && (t <= res.range[1])) ? res.d_noise : null
+}
+
+// Набор анализа каждой оси — объект имя → float32 (нет в логе — null): «было» принятого шага 4 для сводки
+// (state.steps[4].set_values — по нему сводка помечает строки, у которых конец лога отличается от набора интервала)
+function step4_set_values() {
+    const values = {}
+    for (const axis of step4_axis_list) {
+        const gains = step4_log_gains(axis)
+        for (const k of step4_gain_keys) {
+            values[pidtune_axes[axis].rate + k] = Number.isFinite(gains[k]) ? Math.fround(gains[k]) : null
+        }
+    }
+    return values
+}
+
 // Заполнить форму значениями лога и подписи «в логе»
 function step4_fill_form() {
     step4_set_form_values(step4_log_values())
     step4_render_inlog()
 }
 
-// Подписи «в логе: …» — значения набора анализа оси
+// Подписи «в логе: …» — значения набора анализа оси; у оси, где коэффициенты менялись после интервала анализа, —
+// «в наборе интервала: … (в конце лога …)»
 function step4_render_inlog() {
     const log_values = step4_log_values()
+    const after = Object.fromEntries(step4_axis_list.map((axis) => [axis, step4_gains_after(step4.calc?.[axis])]))
     for (const p of document.querySelectorAll("#pidf_form p.param")) {
-        const value = log_values[p.dataset.name]
-        p.querySelector(".inlog").textContent = Number.isFinite(value) ? "в логе: " + step_value_text(value) : "в логе нет"
+        const name = p.dataset.name
+        const axis = p.dataset.axis
+        const key = name.slice(pidtune_axes[axis].rate.length)
+        const value = log_values[name]
+        let text
+        if (!Number.isFinite(value)) {
+            text = "в логе нет"
+        } else if (after[axis] != null) {
+            text = "в наборе интервала: " + step_value_text(value) + (after[axis].changed.includes(key) ? " (в конце лога " + step_value_text(after[axis].end[key]) + ")" : "")
+        } else {
+            text = "в логе: " + step_value_text(value)
+        }
+        p.querySelector(".inlog").textContent = text
     }
 }
 
@@ -765,13 +834,14 @@ function step4_compute() {
         return
     }
 
-    // FFT компонент осей шага — один раз на окно: по нему шум D, спектр D и выхода (DSpec4) и отклик PIDReview (StepResp4)
+    // FFT компонент осей шага — один раз на окно и только нужных компонент (step4_fft_keys): по нему шум D, спектр D
+    // и выхода (DSpec4) и отклик PIDReview (StepResp4)
     if (step4.fft_window !== step4.window) {
         step4.fft_window = null
         for (const axis of step4_axis_list) {
             const source = step4_source(axis)
             if (source != null) {
-                pid_run_batch_fft(source.sets, step4.window)
+                pid_run_batch_fft(source.sets, step4.window, step4_fft_keys)
             }
         }
         step4.fft_window = step4.window
@@ -786,6 +856,7 @@ function step4_compute() {
     const calc = {}
     for (const axis of step4_axis_list) {
         calc[axis] = step4_compute_axis(axis, range, ctx)
+        step4_mark_log_row(calc[axis])
     }
 
     // Поправка фильтров гироскопа и прогнозы вариантов — у осей с достоверным прогнозом
@@ -969,25 +1040,32 @@ function step4_show() {
 
 // «Применить вариант»: значения выбранной строки оси открытой вкладки — в поля этой оси. Ось и строка запоминаются
 // до досчёта правок: досчёт выбирает в оси строку формы («Свой»), а щелчок шёл по строке, выбранной до него (ревью
-// задачи 7). Значения строки берутся после досчёта — по её id
+// задачи 7). Значения строки берутся после досчёта — по её id. Всё — внутри одного step_run, как «Принять»: при
+// устаревшем расчёте (новый интервал) досчёт правок идёт под оверлеем, и вложенные step_run выполняются сразу, а не
+// позже строки с чтением расчёта (аудит области D, M-5)
 function step4_apply() {
     if (!step4.filled) {
         return
     }
-    const axis = step4.axis
-    const row_id = step4_ready() ? (step4_selected_row(axis)?.id ?? null) : null
-    step4_flush_edits(true)
-    if (!step4_ready() || (row_id == null)) {
-        return
-    }
-    const row = step4_rows(axis).find((r) => r.id === row_id)
-    if (row == null) {
-        return
-    }
-    step4.selected[axis] = row.id
-    const prefix = pidtune_axes[axis].rate
-    step4_set_form_values(Object.fromEntries(step4_gain_keys.map((k) => [prefix + k, row.values[k]])))
-    step4_flush_edits(true)
+    step_run(() => {
+        if (!step4.filled || (state.log == null)) {
+            return
+        }
+        const axis = step4.axis
+        const row_id = step4_ready() ? (step4_selected_row(axis)?.id ?? null) : null
+        step4_flush_edits(true)
+        if (!step4_ready() || (row_id == null)) {
+            return
+        }
+        const row = step4_rows(axis).find((r) => r.id === row_id)
+        if (row == null) {
+            return
+        }
+        step4.selected[axis] = row.id
+        const prefix = pidtune_axes[axis].rate
+        step4_set_form_values(Object.fromEntries(step4_gain_keys.map((k) => [prefix + k, row.values[k]])))
+        step4_flush_edits(true)
+    }, "verdict4", "шага 4")
 }
 
 // «Интервал — участок ACRO»: интервал анализа — участок ACRO лога тестового полёта (step4_acro_interval) через поля
@@ -1004,14 +1082,15 @@ function step4_acro_apply() {
     step4_show()
 }
 
-// Поля, которые принять нельзя: пустые (значение неизвестно) и отрицательные → текст отказа или null
+// Поля, которые принять нельзя: пустые или нечисловые (step4_values_from_form даёт NaN — значение неизвестно)
+// и отрицательные → текст отказа или null
 function step4_accept_refusal(values) {
     const names = step4_param_names()
     const empty = names.filter((name) => !Number.isFinite(values[name]))
     const negative = names.filter((name) => values[name] < 0)
     const parts = []
     if (empty.length > 0) {
-        parts.push("не заполнены поля: " + empty.join(", "))
+        parts.push("не заполнены или не числа поля: " + empty.join(", "))
     }
     if (negative.length > 0) {
         parts.push("отрицательные значения: " + negative.join(", "))
@@ -1037,13 +1116,14 @@ function step4_metrics_summary(axis, row) {
         measured: (m == null) ? null : { rise_s: m.rise_s, overshoot_pct: m.overshoot_pct, plateau: m.plateau, settle_s: m.settle_s, osc: m.osc },
         log: pred_summary(res.pred_log),
         prediction: res.predict_ok ? pred_summary(row?.pred ?? null) : null,
-        d_noise_dB: res.d_noise?.dB ?? null,
+        d_noise_dB: step4_d_noise_in(res)?.dB ?? null,
     }
 }
 
-// «Принять»: значения формы, по каждой оси — строка формы (вариант или «custom»), её отметки и сводка метрик, ключ
-// расчёта и отпечаток входов (step_inputs_key — для «устарело» сводки) — в итог мастера, затем шаг 5. Правки полей
-// сначала досчитываются. Пустые и отрицательные значения принять нельзя (step4_accept_refusal)
+// «Принять»: значения формы, набор анализа каждой оси (set_values — «было» для сводки), по каждой оси — строка формы
+// (вариант или «custom»), её отметки и сводка метрик, ключ расчёта и отпечаток входов (step_inputs_key — для «устарело»
+// сводки) — в итог мастера, затем шаг 5. Правки полей сначала досчитываются. Пустые, нечисловые и отрицательные значения
+// принять нельзя (step4_accept_refusal)
 function step4_accept() {
     step4_flush_window(false)
     step4_flush_edits(true)
@@ -1075,7 +1155,9 @@ function step4_accept() {
                 metrics: step4_metrics_summary(axis, row),
             }
         }
-        state.steps[4] = { accepted: values, axes: axes, calc_key: step4.key, inputs: step_inputs_key(4), evaluated_at: Date.now() }
+        // set_values — набор анализа каждой оси («было» для сводки: конец лога может отличаться, step4_gains_after)
+        state.steps[4] = { accepted: values, set_values: step4_set_values(), axes: axes, calc_key: step4.key, inputs: step_inputs_key(4),
+                           evaluated_at: Date.now() }
         step4_redraw_all()
         set_step(5)
     }, "verdict4", "шага 4")
@@ -1184,6 +1266,11 @@ function step4_row_name(axis, id) {
 // Сводка над вкладками — главный вывод шага одной строкой: принятое; нет надёжного измерения ни на одной оси — это
 // и совет тестового полёта; иначе — что предлагается по осям
 function step4_render_summary() {
+    // Коэффициенты осей менялись после интервала анализа — кратко (подробности — вердикт оси)
+    const changed_after = step4_axes_changed_after()
+    const after_note = (changed_after.length == 0) ? ""
+        : " PID " + changed_after.map((axis) => step4_axis_names[axis].gen).join(", ") + " менялись после интервала анализа — принятое перепишет значения конца лога " +
+          "(подробности — во вкладках осей)."
     const accepted = step4_accepted_now()
     if (accepted != null) {
         if (accepted.calc_key !== step4_calc_key()) {
@@ -1194,9 +1281,9 @@ function step4_render_summary() {
         const flagged = step4_axis_list.filter((axis) => accepted.axes[axis].flags?.flagged)
         if (flagged.length > 0) {
             const worse = flagged.map((axis) => step4_axis_names[axis].nom.toLowerCase() + " — " + accepted.axes[axis].flags.reasons.join(", ")).join("; ")
-            step_verdict("verdict4", "warn", "Принято, но прогноз помечает: " + worse + ". Принято: " + names.join(", ") + ".")
+            step_verdict("verdict4", "warn", "Принято, но прогноз помечает: " + worse + ". Принято: " + names.join(", ") + "." + after_note)
         } else {
-            step_verdict("verdict4", "ok", "Принято: " + names.join(", ") + ".")
+            step_verdict("verdict4", (after_note === "") ? "ok" : "warn", "Принято: " + names.join(", ") + "." + after_note)
         }
         return
     }
@@ -1214,7 +1301,7 @@ function step4_render_summary() {
         const reasons = [...new Set(step4_axis_list.map((axis) => states[axis].reason))]
         const what = (reasons.length == 1) ? states.roll.all
             : "Надёжного измерения нет ни на одной оси: " + step4_axis_list.map((axis) => step4_axis_names[axis].nom.toLowerCase() + " — " + states[axis].reason).join(", ")
-        step_verdict("verdict4", "warn", what + " — правил и прогноза нет; " + flight_advice + " (подробности — во вкладках осей).")
+        step_verdict("verdict4", "warn", what + " — правил и прогноза нет; " + flight_advice + " (подробности — во вкладках осей)." + after_note)
         return
     }
 
@@ -1242,7 +1329,7 @@ function step4_render_summary() {
     }
     const unreliable = step4_axis_list.filter((axis) => step4.calc[axis].status !== "ok")
     const tail = (unreliable.length > 0) ? " По осям без надёжного измерения " + flight_advice + "." : ""
-    step_verdict("verdict4", status, "Предлагается: " + parts.join("; ") + "." + tail)
+    step_verdict("verdict4", (after_note === "") ? status : "warn", "Предлагается: " + parts.join("; ") + "." + tail + after_note)
 }
 
 // Панель оси: набор параметров, вердикт, заметки, плитки, качество измерения, таблица вариантов, графики. Графики
@@ -1432,8 +1519,7 @@ function step4_render_axis_verdict() {
                 warn()
                 parts.push("Прогноз недостоверен: " + res.validity.reasons.join("; ") + " — остаются только правила.")
             } else if (recommended != null) {
-                const title = (recommended.id === "log") ? "«Как в логе»" : "«" + recommended.title + "»"
-                parts.push("Прогноз " + title + ": " + step4_prediction_text(recommended, res.pred_log) + ".")
+                parts.push("Прогноз «" + recommended.title + "»: " + step4_prediction_text(recommended, res.pred_log) + ".")
                 if (recommended.flags?.flagged) {
                     warn()
                     const best = step4_best_unflagged(axis)
@@ -1460,7 +1546,7 @@ function step4_render_axis_verdict() {
                 action = "Принято."
             } else if (recommended != null) {
                 const form = step4_form_row(axis)
-                const name = (recommended.id === "log") ? "Значения лога" : "Значения «" + recommended.title + "»"
+                const name = (recommended.id !== "log") ? "Значения «" + recommended.title + "»" : ((step4_gains_after(res) != null) ? "Значения набора интервала" : "Значения лога")
                 if (form?.id === recommended.id) {
                     action = name + " уже в форме — нажмите «Принять»."
                 } else if (step4_selected_row(axis)?.id === recommended.id) {
@@ -1472,12 +1558,21 @@ function step4_render_axis_verdict() {
             break
         }
     }
+    // Коэффициенты менялись после интервала анализа (AutoTune сохраняет при дизарме): принятое перепишет конец лога
+    const after = step4_gains_after(res)
+    if (after != null) {
+        warn()
+        const list = (gains) => step4_gain_keys.map((k) => k + " = " + step_value_text(gains[k])).join(", ")
+        parts.push("После интервала анализа параметры менялись: в конце лога " + list(after.end) + " (в наборе интервала " + list(res.gains) + "). " +
+                   "Принятое перепишет значения конца лога.")
+    }
     // D выключен, шум D — у оси с данными
+    const d_noise = step4_d_noise_in(res)
     if (res.gains?.D === 0) {
         parts.push("D выключен (" + prefix + "D = 0): вариантов D ±" + Math.round(rules.gain_step * 100) + " % и шума D нет.")
-    } else if (res.d_noise?.over) {
+    } else if (d_noise?.over) {
         warn()
-        parts.push("Шум D выше " + rules.d_noise_hz + " Гц " + res.d_noise.dB.toFixed(1) + " дБ — выше порога " + rules.d_noise_threshold + " дБ: горячие моторы — " +
+        parts.push("Шум D выше " + rules.d_noise_hz + " Гц " + d_noise.dB.toFixed(1) + " дБ — выше порога " + rules.d_noise_threshold + " дБ: горячие моторы — " +
                    "снизьте D или FLTD (шаг 3).")
     }
     if (action != null) {
@@ -1498,9 +1593,21 @@ function step4_render_warnings() {
     if ((nef != null) && (nef != 0)) {
         lines.push("Notch-фильтр ошибки ПИД (" + prefix + "NEF = " + nef + ") в модели регулятора не учтён: сверка модели с данными и прогноз могут расходиться.")
     }
+    // NTF стоит до FLTT, цель в логе (Tar) записана после них (AC_PID::update_all, _pid_info.target) — измерение и прогноз
+    // считаются от цели после notch, его запаздывание до команды пилота в них не входит
+    const ntf = params.get(prefix + "NTF")
+    if ((ntf != null) && (ntf != 0)) {
+        lines.push("Notch-фильтр цели ПИД (" + prefix + "NTF = " + ntf + ") в модели регулятора не учтён: цель в логе записана после него — измеренный отклик и " +
+                   "прогноз считаются от цели после notch, его запаздывание до команды пилота в них не входит.")
+    }
     if (Number.isFinite(res.slew) && (res.slew > 0)) {
         lines.push("Ограничитель " + prefix + "SMAX = " + step_value_text(res.slew) + " не моделируется: при его срабатывании (резкие манёвры, шум) " +
                    "настоящий отклик медленнее прогноза.")
+    }
+    const pdmx = params.get(prefix + "PDMX")
+    if (Number.isFinite(pdmx) && (pdmx > 0)) {
+        lines.push("Ограничитель суммы P + D " + prefix + "PDMX = " + step_value_text(pdmx) + " не моделируется: при его срабатывании (резкие манёвры, большая ошибка) " +
+                   "настоящий отклик слабее и медленнее прогноза.")
     }
     const fast = params.get("FSTRATE_ENABLE")
     if (fast > 0) {
@@ -1566,13 +1673,15 @@ function step4_render_metrics() {
     const osc_sub = (m?.osc != null) ? "размах " + m.osc.amplitude_pp.toFixed(2) : "порог размаха " + rules.osc_min_pp
     tiles.push(step_tile("Колебания на плато", (m == null) ? "—" : ((m.osc != null) ? m.osc.freq_hz.toFixed(1) + " Гц" : "нет"),
                          (unreliable != null) ? unreliable + ", " + osc_sub : osc_sub, null))
-    const dn = res.d_noise
+    // Шум D — только по окнам интервала (step4_d_noise_in): без них плитка «—», а не число из окна за интервалом
+    const dn = step4_d_noise_in(res)
     if (res.gains?.D === 0) {
         tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "D выключен", null, null))
     } else if (dn?.off) {
         tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "D нулевой", "D-составляющая в окнах интервала — 0", null))
     } else if (dn == null) {
-        tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "—", res.is_rate ? "в RATE нет D-составляющей" : "нет спектра D", null))
+        tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", "—", res.is_rate ? "в RATE нет D-составляющей"
+            : ((res.d_noise != null) ? "нет окон в интервале" : "нет спектра D"), null))
     } else {
         tiles.push(step_tile("Шум D > " + rules.d_noise_hz + " Гц", (dn.dB != null) ? dn.dB.toFixed(1) + " дБ" : "нет", "порог " + rules.d_noise_threshold + " дБ, окно " +
                              step4.window, dn.over ? "bad" : null))
@@ -1626,9 +1735,10 @@ function step4_render_quality() {
     box.hidden = false
 }
 
-// Пояснение под названием строки: с какими вариантами совпала
-function step4_row_note(row) {
-    const titles = { log: "как в логе", rule: "по правилам", p_minus: "P −10 %", p_plus: "P +10 %", d_minus: "D −10 %", d_plus: "D +10 %" }
+// Пояснение под названием строки: с какими вариантами совпала; log_title — название строки лога строчными («как в логе»
+// или «набор интервала», step4_mark_log_row)
+function step4_row_note(row, log_title = "как в логе") {
+    const titles = { log: log_title, rule: "по правилам", p_minus: "P −10 %", p_plus: "P +10 %", d_minus: "D −10 %", d_plus: "D +10 %" }
     if ((row.same_as ?? []).length == 0) {
         return ""
     }
@@ -1684,13 +1794,16 @@ function step4_render_candidates() {
     const active = box.contains(document.activeElement) ? document.activeElement : null
     const focused = (active == null) ? "" : ((active.name === "cand4") ? "cand4_" + selected : active.id)
     const log_gains = res.gains
+    // Строка лога — «Как в логе» или «Набор интервала» (коэффициенты менялись после интервала, step4_gains_after)
+    const after = step4_gains_after(res)
+    const log_title = (rows.find((r) => r.id === "log")?.title ?? "Как в логе").toLowerCase()
     let body = ""
     for (const row of rows) {
         const id_attr = html_escape("cand4_" + row.id)
         const is_log = row.id === "log"
         body += '<tr' + ((row.id === recommended_id) ? ' class="recommended"' : '') + '>'
         body += '<td><input type="radio" name="cand4" id="' + id_attr + '" value="' + html_escape(row.id) + '"' + ((row.id === selected) ? ' checked' : '') + '></td>'
-        body += '<td><label for="' + id_attr + '">' + html_escape(row.title) + '</label>' + step4_row_note(row) + '</td>'
+        body += '<td><label for="' + id_attr + '">' + html_escape(row.title) + '</label>' + step4_row_note(row, log_title) + '</td>'
         for (const k of step4_gain_keys) {
             const changed = !step4_same_value(row.values[k], log_gains[k])
             body += step_cell(step_value_text(row.values[k]), changed ? "было " + step_value_text(log_gains[k]) : null, "", null)
@@ -1706,7 +1819,7 @@ function step4_render_candidates() {
         if (row.id === recommended_id) {
             verdict = '<span class="tag">рекомендуется</span>' + small
         } else if (is_log) {
-            verdict = "текущие настройки" + small
+            verdict = ((after != null) ? "набор интервала (в конце лога другие значения)" : "текущие настройки") + small
         } else if (row.id === "custom") {
             verdict = "ручные значения" + small
         } else if (!res.predict_ok) {
