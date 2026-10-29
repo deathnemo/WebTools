@@ -602,3 +602,22 @@ test('alias_obj: частота контура не положительное �
     }
     assert.ok(alias_obj(FFT, { mode: 'fold', loop_rate: 400 }).bins.length !== FFT.bins.length, 'с частотой контура сворачивание работает')
 })
+
+test('values_from_log: ESCMSK — по правилу escmsk_present (записан в лог или версия фильтра не ниже 4), как у шага 2', () => {
+    const with_params = (params, filter_version) => {
+        state.params = { get: (name) => (name in params) ? params[name] : null, has: (name) => name in params }
+        state.env = { params: state.params, build_type: 2, filter_version }
+        return values_from_log()
+    }
+    // Записанная в лог маска при версии фильтра 2 остаётся (раньше обнулялась, как в update_hidden_params FilterReview, и
+    // notch-база шага 3 расходилась с формой шага 2 из-за одной маски)
+    assert.equal(with_params({ INS_HNTCH_ESCMSK: 3, INS_HNTC2_ESCMSK: 5 }, 2).INS_HNTCH_ESCMSK, 3)
+    assert.equal(with_params({ INS_HNTCH_ESCMSK: 3, INS_HNTC2_ESCMSK: 5 }, 2).INS_HNTC2_ESCMSK, 5, 'маска второго notch — тем же правилом')
+    // Нет в логе и версия ниже 4 — 0 (умолчание и так 0); версия 4 без записи — 0 из умолчания, а записанная — из лога
+    assert.equal(with_params({}, 2).INS_HNTCH_ESCMSK, 0)
+    assert.equal(with_params({}, 4).INS_HNTCH_ESCMSK, 0)
+    assert.equal(with_params({ INS_HNTCH_ESCMSK: 12 }, 4).INS_HNTCH_ESCMSK, 12)
+    // Остальное прежнее: умолчания формы FilterReview и маска HMNCS без знака
+    const values = with_params({ INS_HNTCH_HMNCS: -128 }, 2)
+    assert.deepEqual([values.INS_GYRO_FILTER, values.SCHED_LOOP_RATE, values.INS_HNTCH_FREQ, values.INS_HNTCH_HMNCS], [20, 400, 80, 128])
+})

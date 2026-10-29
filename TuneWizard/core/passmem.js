@@ -317,8 +317,8 @@ function passmem_applied(pass, params, bits) {
 
 // Имена из принятого на шагах 2–3, от которых зависит прогноз шага 4: поля обоих notch и INS_GYRO_FILTER — поправка
 // фильтров гироскопа, FLTE и FLTD осей — регуляторы вариантов [код, step4_gyro_new и step4_new_filters]. То же, что
-// в ключе расчёта шага 4 (step4_calc_key) и в depends[4] контекста итога (step_depends4_names в steps/common.js —
-// ядро его не зовёт, список повторён здесь). SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER и пределы ускорения прогноз
+// в ключе расчёта шага 4 (step4_calc_key); depends[4] контекста итога страница берёт отсюда (step_depends4_names в
+// steps/common.js зовёт эту функцию) — список один. SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER и пределы ускорения прогноз
 // шага 4 не меняют: модель регулятора считается на частоте контура лога
 function passmem_depends4_names() {
     return [

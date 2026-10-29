@@ -53,6 +53,16 @@ function hmncs_bits(params, filter_version) {
     return ((params.get("INS_RAW_LOG_OPT") != null) || (filter_version >= 3)) ? 32 : 8
 }
 
+// Есть ли у аппарата INS_*_ESCMSK: параметр записан в лог (прошивка его знает) или версия фильтра не ниже 4 (с неё
+// он есть у всех прошивок). FilterReview (update_hidden_params) смотрит только на версию фильтра; у мастера версию
+// можно сменить на шаге 1, и записанная в лог маска моторов не должна от этого пропасть из значений лога, формы и
+// файла. Одно правило для значений лога шага 1 (values_from_log) и формы, файла и вариантов шага 2 — иначе notch-база
+// шага 3 и строка сравнения памяти считали бы принятый на шаге 2 notch «не логом» из-за одной маски. params —
+// параметры лога (has(name)) [наше, аудит 28.10.2026]
+function escmsk_present(params, filter_version) {
+    return params.has("INS_HNTCH_ESCMSK") || (filter_version >= 4)
+}
+
 // Маска размера bits без знака — как parameter_get_value: отрицательное (int8 −128) + 2^bits, затем лишние биты
 // отбрасываются. 32-битная маска не меняется (parameter_get_value её тоже не трогает)
 function mask_unsigned(value, bits) {

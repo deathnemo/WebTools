@@ -70,7 +70,7 @@ for (const file of ['Libraries/Array_Math.js', 'Libraries/fft.js', 'Libraries/Pa
                     'TuneWizard/core/tracking/FFT.js', 'TuneWizard/core/tracking/Logged.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/spectrum.js',
                     'TuneWizard/core/metrics.js', 'TuneWizard/core/autofit.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',
                     'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
-                    'TuneWizard/steps/common.js', 'TuneWizard/steps/step4.js']) {
+                    'TuneWizard/core/passmem.js', 'TuneWizard/steps/common.js', 'TuneWizard/steps/step4.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
 }

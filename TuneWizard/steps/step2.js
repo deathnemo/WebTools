@@ -4,7 +4,8 @@
 // Состояние шага 1 не меняется: state.filters и FFT.H остаются от параметров лога (их рисует шаг 1), а
 // передаточная функция значений формы считается отдельно (filter_transfer) и подставляется в копию-взгляд gyro.
 // Общие помощники шагов (step_…, plot_…) — steps/common.js; строка сравнения с прошлым проходом — memory_show
-// (steps/memory.js).
+// (steps/memory.js). Значения лога — values_from_log шага 1 (steps/step1.js; ESCMSK — по escmsk_present из
+// core/params.js), срез INS_GYRO_FILTER для модели ограничен lowpass_gyro_cutoff (core/lowpass.js), как на шаге 3.
 
 // Внутреннее состояние шага
 const step2 = {
@@ -347,25 +348,40 @@ function step2_harmonics_bits() {
     return hmncs_bits(state.params, state.env?.filter_version ?? 1)
 }
 
-// Есть ли у аппарата INS_*_ESCMSK: параметр записан в лог (прошивка его знает) или версия фильтра не ниже 4 (с неё
-// он есть у всех прошивок). FilterReview смотрит только на версию фильтра; у мастера версию можно сменить на шаге 1,
-// и записанная в лог маска моторов не должна от этого пропасть из формы и файла [наше, аудит 28.10.2026]
+// Есть ли у аппарата INS_*_ESCMSK — правило escmsk_present (core/params.js: записан в лог или версия фильтра не ниже 4)
+// для текущего лога и версии фильтра; то же правило у значений лога шага 1 (values_from_log), поэтому форма, варианты,
+// метрики и файл шага 2 согласованы и с ними, и между собой [наше, аудит 28.10.2026]
 function step2_escmsk_present() {
-    return state.params.has("INS_HNTCH_ESCMSK") || ((state.env?.filter_version ?? 1) >= 4)
+    return escmsk_present(state.params, state.env?.filter_version ?? 1)
 }
 
-// Значения лога для шага 2: values_from_log (steps/step1.js), но ESCMSK — по правилу step2_escmsk_present:
-// values_from_log обнуляет его при версии фильтра ниже 4, а записанную в лог маску прошивка знает. Так форма,
-// варианты, метрики и файл шага 2 согласованы между собой; нулевая маска вместо записанной сменила бы набор
-// моторов notch на аппарате
-function step2_log_values() {
-    const values = values_from_log()
-    if (step2_escmsk_present()) {
-        for (const names of notch_param_names()) {
-            values[names.esc_mask] = state.params.get(names.esc_mask) ?? 0
-        }
+// Частота выборки гироскопа, по которому считаются оценка и графики шага 2: экземпляр до фильтров первичного
+// гироскопа (step_gyro_sensor), без данных «до» — первый экземпляр с FFT; NaN — FFT ещё нет
+function step2_sample_rate() {
+    const gyro = state.gyro
+    const index = step_gyro_sensor() ?? gyro.findIndex((g) => g?.FFT != null)
+    return gyro[index]?.FFT?.average_sample_rate ?? NaN
+}
+
+// Значения для модели фильтров: INS_GYRO_FILTER выше 0.4 частоты гироскопа прошивка ограничивает (lowpass_gyro_cutoff,
+// core/lowpass.js — так же считает шаг 3), а DigitalBiquadFilter страницы — нет: оценка, спектр и бодэ формы давали NaN.
+// sample_rate — частота выборки экземпляра (FFT.average_sample_rate). → { values, warning }: values — те же или копия
+// с ограниченным срезом, warning — строка для предупреждений фильтров, если срез ограничен, иначе null
+function step2_model_values(values, sample_rate) {
+    const cutoff = lowpass_gyro_cutoff(values.INS_GYRO_FILTER, sample_rate)
+    return { values: (cutoff.warning != null) ? { ...values, INS_GYRO_FILTER: cutoff.hz } : values, warning: cutoff.warning }
+}
+
+// Оценка варианта values на контексте ctx — evaluate_candidate с ограниченным срезом INS_GYRO_FILTER (step2_model_values
+// по экземпляру ctx.sensor); предупреждение об ограничении — в warnings оценки, values в ней — исходные. null — как у
+// evaluate_candidate (у экземпляра нет данных «до»)
+function step2_evaluate(values, ctx) {
+    const model = step2_model_values(values, ctx.gyro[ctx.sensor]?.FFT?.average_sample_rate)
+    const evaluation = evaluate_candidate(model.values, ctx)
+    if ((evaluation == null) || (model.warning == null)) {
+        return evaluation
     }
-    return values
+    return { ...evaluation, values: values, warnings: [...evaluation.warnings, model.warning] }
 }
 
 // Значение как float32 — так прошивка хранит параметры: 0.7 из файла .param и 0.699999988 из лога — одно значение.
@@ -401,7 +417,7 @@ function step2_set_form_values(values) {
 // значение по умолчанию FilterReview, взятое вместо него
 function step2_fill_form(values) {
     step2_set_form_values(values)
-    const log_values = step2_log_values()
+    const log_values = values_from_log()
     for (const span of document.querySelectorAll("#notch_form .inlog")) {
         const name = span.dataset.for
         const value = state.params.get(name)
@@ -466,9 +482,9 @@ function step2_field_value(name, text, log_value, bits) {
 
 // Значения формы: объект имя → число float32, маски — целые. Каждое поле приводится к допустимому значению
 // (step2_field_value), и приведённое записывается обратно в поле, чтобы расчёт и файл .param не расходились с тем,
-// что видно в форме. ESCMSK без step2_escmsk_present — 0, как в step2_log_values
+// что видно в форме. ESCMSK без step2_escmsk_present — 0, как в values_from_log
 function values_from_form() {
-    const log_values = step2_log_values()
+    const log_values = values_from_log()
     const values = {}
     for (const name of step2_param_names()) {
         const field = document.getElementById(name)
@@ -493,7 +509,7 @@ function step2_mark_changed() {
     if (state.params == null) {
         return
     }
-    const log_values = step2_log_values()
+    const log_values = values_from_log()
     const values = values_from_form()
     for (const p of document.querySelectorAll("#notch_form p.param")) {
         const name = p.dataset.name
@@ -537,7 +553,7 @@ function step2_make_ctx(analysis) {
         range: [state.settings.start, state.settings.end],
         sensor: sensor,
         peaks: analysis.peaks.slice(0, candidate_rules.main_peaks),
-        loop_rate: step2_log_values().SCHED_LOOP_RATE,
+        loop_rate: values_from_log().SCHED_LOOP_RATE,
     }
 }
 
@@ -546,7 +562,7 @@ function step2_make_ctx(analysis) {
 function step2_fit() {
     const gyro = state.gyro
     const range = [state.settings.start, state.settings.end]
-    const log_values = step2_log_values()
+    const log_values = values_from_log()
     step2.key = step2_calc_key()
     step2.gyro_ref = gyro
     step2.current_row = null
@@ -562,14 +578,14 @@ function step2_fit() {
 
     const evaluations = {}
     for (const candidate of step2.candidates) {
-        evaluations[candidate.id] = evaluate_candidate(candidate.values, step2.ctx)
+        evaluations[candidate.id] = step2_evaluate(candidate.values, step2.ctx)
     }
     let ranking = rank_candidates(evaluations)
     const best = step2.candidates.find((c) => c.id === ranking.best_id)
     const second = ((best != null) && (evaluations[best.id] != null)) ? second_notch_candidate(best, evaluations[best.id], step2.analysis.peaks) : null
     if (second != null) {
         step2.candidates.push(second)
-        evaluations[second.id] = evaluate_candidate(second.values, step2.ctx)
+        evaluations[second.id] = step2_evaluate(second.values, step2.ctx)
         ranking = rank_candidates(evaluations)
     }
     step2.evaluations = evaluations
@@ -599,14 +615,19 @@ function step2_set_current(values) {
     step2.current = { values: values, key: step2_key(values), filters: null, tracking: null, filter_version: null, H: {} }
 }
 
-// Фильтры посчитанных значений: пересоздаются, если сменились источники трекинга или версия фильтра
+// Фильтры посчитанных значений (срез INS_GYRO_FILTER ограничен, как в прошивке, — step2_model_values; предупреждение
+// об этом — в filters.warnings): пересоздаются, если сменились источники трекинга или версия фильтра
 function step2_current() {
     const current = step2.current
     if (current == null) {
         return null
     }
     if ((current.filters == null) || (current.tracking !== state.tracking) || (current.filter_version !== state.env.filter_version)) {
-        current.filters = load_filters(current.values, state.env, state.tracking)
+        const model = step2_model_values(current.values, step2_sample_rate())
+        current.filters = load_filters(model.values, state.env, state.tracking)
+        if (model.warning != null) {
+            current.filters.warnings.push(model.warning)
+        }
         current.tracking = state.tracking
         current.filter_version = state.env.filter_version
         current.H = {}
@@ -655,19 +676,20 @@ function step2_gyro_view(index, H, bode_H) {
     return view
 }
 
-// Метрики посчитанных значений формы против лога для текущего интервала: { current, log } — evaluate_candidate.
-// Пока варианты не устарели, оценка лога (и совпадающего варианта) берётся из таблицы. null без данных «до»
+// Метрики посчитанных значений формы против лога для текущего интервала: { current, log } — step2_evaluate
+// (evaluate_candidate с ограниченным срезом INS_GYRO_FILTER). Пока варианты не устарели, оценка лога (и совпадающего
+// варианта) берётся из таблицы. null без данных «до»
 function step2_metrics(values) {
     if (step2_stale() || (step2.ctx == null) || (step2.evaluations == null)) {
         const ctx = step2_make_ctx(step1_peaks())
         if (ctx == null) {
             return null
         }
-        return { current: evaluate_candidate(values, ctx), log: evaluate_candidate(step2_log_values(), ctx) }
+        return { current: step2_evaluate(values, ctx), log: step2_evaluate(values_from_log(), ctx) }
     }
     const key = step2_key(values)
     const row = step2_rows().find((r) => (r.evaluation != null) && (step2_key(r.values) === key))
-    return { current: row ? row.evaluation : evaluate_candidate(values, step2.ctx), log: step2.evaluations.log }
+    return { current: row ? row.evaluation : step2_evaluate(values, step2.ctx), log: step2.evaluations.log }
 }
 
 // ---------- Действия ----------
@@ -683,7 +705,7 @@ function step2_show() {
     step2_build_form()
     step_run(() => {
         if (!step2.filled) {
-            step2_fill_form(step2_log_values())
+            step2_fill_form(values_from_log())
             step2.filled = true
         } else {
             step2_param_read()
@@ -745,7 +767,7 @@ function step2_recalc() {
         const match = step2_match(values)
         step2.current_row = null
         if ((step2.ctx != null) && (step2.evaluations?.log != null)) {
-            const evaluation = evaluate_candidate(values, step2.ctx)
+            const evaluation = step2_evaluate(values, step2.ctx)
             const flags = rank_candidates({ log: step2.evaluations.log, current: evaluation }).flags.current
             const title = "Текущий (из формы)" + ((match != null) ? " = " + match.title : "")
             step2.current_row = { id: "current", title: title, values: values, evaluation: evaluation, flags: flags }
