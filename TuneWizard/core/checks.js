@@ -20,8 +20,8 @@ const check_rules = {
                                     // от дрожания меток [наше; то же, что PID_STEP_RATE_MARGIN в core/pid.js, там и обоснование]
 }
 
-// info — из log_info, params — из log_params, vibe — из vibe_summary (может быть null).
-// Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }.
+// info — из log_info (в том числе info.esc — сводка ESC-телеметрии), params — из log_params, vibe — из vibe_summary
+// (может быть null). Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }.
 function run_checks(info, params, vibe) {
     const checks = []
     const add = (id, status, title, text, fix) => checks.push({ id, status, title, text, fix: fix ?? null })
@@ -89,9 +89,13 @@ function run_checks(info, params, vibe) {
         }
     }
 
-    // Источник трекинга notch
-    if (m.esc) {
+    // Источник трекинга notch. ESC хвалится, только если хоть один регулятор сообщал обороты (info.esc из esc_summary):
+    // телеметрия без оборотов (все 0 или NaN) для notch бесполезна (аудит, I4)
+    if (m.esc && ((info.esc?.with_rpm ?? 0) > 0)) {
         add("tracking", "ok", "Источник трекинга notch", "ESC-телеметрия (ESC): лучший источник, сам подстраивается под нагрузку")
+    } else if (m.esc) {
+        add("tracking", "warn", "Источник трекинга notch", "ESC-телеметрия (ESC) есть, но оборотов в ней нет (все значения 0 или NaN): трекинг по ESC (INS_HNTCH_MODE = 3) работать не будет",
+            "Проверьте телеметрию регуляторов (SERVO_BLH_MASK, SERVO_BLH_POLES, двунаправленный DShot): обороты должны приходить в полёте")
     } else if (m.rpm) {
         add("tracking", "ok", "Источник трекинга notch", "Датчик оборотов (RPM)")
     } else {

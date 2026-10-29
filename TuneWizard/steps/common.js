@@ -7,10 +7,10 @@
 //
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
 // steps/step2.js (step2_param_names), steps/step4.js (step4_param_names), core/spectrum.js (find_instance),
-// core/summary.js (summary_inputs_key, summary_stale), core/lowpass.js (lowpass_param_names), core/params.js
-// (hmncs_bits), core/filters.js (notch_param_names), core/pidtune.js (pidtune_axes), plots.js (plot, render_plot),
-// Libraries/LoadingOverlay.js (loading_call), Libraries/Param_Helpers.js (param_to_string). Все они нужны только при
-// вызове, поэтому модуль подключается перед steps/step1.js. Обработчики указателя ставятся при первой подписке
+// core/summary.js (summary_inputs_key, summary_stale), core/passmem.js (passmem_depends4_names), core/lowpass.js
+// (lowpass_param_names), core/params.js (hmncs_bits), plots.js (plot, render_plot), Libraries/LoadingOverlay.js
+// (loading_call), Libraries/Param_Helpers.js (param_to_string). Все они нужны только при вызове, поэтому модуль
+// подключается перед steps/step1.js. Обработчики указателя ставятся при первой подписке
 // (step_on_pointer_release), а не при загрузке этого модуля; шаги 3 и 4 подписываются при загрузке своих скриптов
 // (step3_edits, step4_edits), поэтому на странице обработчики фактически стоят с её загрузки, а тест модуля под Node
 // обходится без них.
@@ -89,17 +89,15 @@ function step_hmncs_bits() {
 }
 
 // Имена, от которых зависит прогноз шага 4, — depends[4] контекста итога: в отпечаток шага 4 входят изменения только
-// этих имён. Это то же, что входит в собственный ключ расчёта шага 4 (step4_calc_key): поля notch и INS_GYRO_FILTER —
-// поправка фильтров гироскопа (step4_gyro_new), FLTE и FLTD осей — регуляторы вариантов (step4_new_filters). Пределы
-// ускорения, FLTT и INS_ACCEL_FILTER шага 3 прогноз шага 4 не меняют, SCHED_LOOP_RATE шага 2 — тоже: модель регулятора
-// считается на частоте контура лога. Иначе новое «Принять» шага 3 с другим FLTT делало бы шаг 4 устаревшим в сводке, а
-// сам шаг 4 — нет. Шагам 2–3 списка нет: в их отпечаток входят все изменения шагов до них
+// этих имён. Список один на страницу и память прохода — passmem_depends4_names (core/passmem.js: поля notch и
+// INS_GYRO_FILTER — поправка фильтров гироскопа, step4_gyro_new; FLTE и FLTD осей — регуляторы вариантов,
+// step4_new_filters), то же входит в собственный ключ расчёта шага 4 (step4_calc_key). Пределы ускорения, FLTT и
+// INS_ACCEL_FILTER шага 3 прогноз шага 4 не меняют, SCHED_LOOP_RATE шага 2 — тоже: модель регулятора считается на
+// частоте контура лога. Иначе новое «Принять» шага 3 с другим FLTT делало бы шаг 4 устаревшим в сводке, а сам шаг 4 —
+// нет. Шагам 2–3 списка нет: в их отпечаток входят все изменения шагов до них. core/passmem.js подключён до этого
+// модуля, а вызов — во время работы
 function step_depends4_names() {
-    return [
-        ...notch_param_names().flatMap((notch) => Object.values(notch)),
-        "INS_GYRO_FILTER",
-        ...Object.values(pidtune_axes).flatMap((axis) => [axis.rate + "FLTE", axis.rate + "FLTD"]),
-    ]
+    return passmem_depends4_names()
 }
 
 // Контекст итога и отпечатка из состояния страницы: вход summary_rows (параметры лога, принятое шагов, имена

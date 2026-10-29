@@ -371,7 +371,7 @@ details.more > .tablewrap{margin-top:8px}
           <label><input type="radio" name="spec_log" id="spec_log_raw" value="raw" disabled><span>raw (GYR)</span></label>
         </div>
       </fieldset>
-      <div class="fld" id="spec_batch_field">
+      <div class="fld" id="spec_batch_field" hidden>
         <label for="spec_window_per_batch">Окон на пакет</label>
         <input id="spec_window_per_batch" type="number" min="1" step="1" value="1">
       </div>
@@ -457,6 +457,7 @@ details.more > .tablewrap{margin-top:8px}
     </fieldset>
   </div>
   <div id="Spectrogram1" class="plot"></div>
+  <p class="note" id="spec_sg_note" hidden></p>
 
   <div class="head"><span class="eyebrow">Пики</span><h2>Заметные пики шума</h2></div>
   <div class="tablewrap" id="peaks1" hidden>
@@ -542,7 +543,7 @@ details.more > .tablewrap{margin-top:8px}
       </div>
     </div>
     <p class="note" id="notch_file_note" hidden></p>
-    <p class="note">Значения — из лога. Подписи, описания (во всплывающей подсказке у имени), списки и флажки масок — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. Поля notch с ENABLE = 0 выключены, INS_*_ESCMSK показывается с версии фильтра 4. После правки нажмите «Пересчитать фильтры»: в таблицу вариантов добавится строка «Текущий», графики и метрики пересчитаются. В .param попадают параметры INS_* (как «Save Parameters» в FilterReview); ESCMSK — только с версии фильтра 4.</p>
+    <p class="note">Значения — из лога. Подписи, описания (во всплывающей подсказке у имени), списки и флажки масок — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. Поля notch с ENABLE = 0 выключены, INS_*_ESCMSK показывается, если он записан в логе или версия фильтра не ниже 4. После правки нажмите «Пересчитать фильтры»: в таблицу вариантов добавится строка «Текущий», графики и метрики пересчитаются. В .param попадают параметры INS_* (как «Save Parameters» в FilterReview); ESCMSK — только если он есть у аппарата (записан в логе или версия фильтра не ниже 4).</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Посчитанные значения формы против лога</h2></div>
@@ -613,7 +614,7 @@ details.more > .tablewrap{margin-top:8px}
     <div class="row">
       <div class="fld">
         <label for="prop_in">Размер винта, <span class="unit">″</span></label>
-        <input id="prop_in" type="number" step="0.5" min="1">
+        <input id="prop_in" type="number" step="any" min="4" max="40">
       </div>
     </div>
     <p class="note" id="prop_hint" hidden></p>
@@ -639,7 +640,7 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="lpf_form"></div>
-    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле и отрицательную частоту принять нельзя; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
+    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле, отрицательную частоту и отрицательный предел ускорения принять нельзя; INS_GYRO_FILTER выше 0.4 частоты гироскопа прошивка ограничит — метрики считаются с ограниченным срезом, об этом предупреждение; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>
@@ -689,6 +690,9 @@ details.more > .tablewrap{margin-top:8px}
   </div>
 
   <div class="verdict" id="verdict4" hidden></div>
+  <div class="row" id="step4_acro_row" hidden>
+    <button type="button" id="step4_acro_interval">Интервал — участок ACRO</button>
+  </div>
 
   <div class="tabs" id="step4_tabs" role="tablist" aria-label="Оси" hidden>
     <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span><span class="f"></span></button>
@@ -754,7 +758,7 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Коэффициенты регулятора скорости</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="pidf_form"></div>
-    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
+    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа; если PID менялись после интервала — например, AutoTune сохранил их при дизарме, — подпись показывает и значения конца лога, строка таблицы называется «Набор интервала», а принятое перепишет значения конца лога). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
   <div class="row">
     <button type="button" id="pidf_accept" disabled>Принять</button>
@@ -803,7 +807,7 @@ details.more > .tablewrap{margin-top:8px}
     <button type="button" id="step5_print">Печать</button>
   </div>
   <p class="note" id="step5_note" role="status" hidden></p>
-  <p class="note screen-only">В файл .param попадают только изменённые параметры: что поменяли в Mission Planner после полёта, файл не перезапишет. Маски HMNCS при 8 битах пишутся со знаком, как их хранит прошивка. Память прохода — изменённые параметры и оценки принятых шагов — хранится в этом браузере по аппарату (строке полётного контроллера из лога); она сохраняется при «Скачать .param» и кнопкой «Запомнить проход», если значения вводятся вручную.</p>
+  <p class="note screen-only">В файл .param попадают только изменённые параметры: что поменяли в Mission Planner после полёта, файл не перезапишет. Маски HMNCS при 8 битах пишутся со знаком, как их хранит прошивка. Память прохода — изменённые параметры и оценки принятых шагов — хранится в этом браузере по аппарату (строке полётного контроллера из лога); она сохраняется при «Скачать .param» и кнопкой «Запомнить проход», если значения вводятся вручную; «Запомнить проход» без изменений закрывает прошлый проход аппарата. Память привязана к адресу страницы: <span id="step5_origin"></span> — открывайте мастер всегда по одному адресу.</p>
 </section>
 
 </div>

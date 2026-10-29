@@ -1,6 +1,8 @@
 // Трекинг по ESC.
 // Перенос из FilterReview/tracking/ESC.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s; get_mean(range) принимает диапазон.
+// Отличие от upstream (аудит, C1): отсчёты с нечисловыми оборотами отбрасываются при чтении (см. конструктор); экземпляр
+// без единого числового отсчёта не регистрируется, а без таких экземпляров источник остаётся без данных.
 class ESCTarget extends NotchTarget {
     constructor(log, env) {
         super(null, env, null, null, "ESC", 3)
@@ -11,12 +13,41 @@ class ESCTarget extends NotchTarget {
             return
         }
 
-        // RPM по отдельности
+        // RPM по отдельности.
+        // Прошивка пишет в ESC.RPM quiet_nanf(), когда оборотов нет (AP_ESC_Telem.cpp): такой отсчёт — «нет данных»,
+        // а не ноль. В upstream NaN проходил в цель notch, и окно FFT рядом с ним давало NaN в передаточной функции,
+        // откуда NaN расходился по оценке «после» и метрикам. Отсчёт (время и частота вместе) отбрасывается, как и
+        // в прошивке, где недействительные обороты в цель не попадают; соседние отсчёты интерполируются через него
         for (const inst of Object.keys(log.messageTypes[msg].instances)) {
-            this.data[inst] = {
-                time: us_to_s(log.get_instance(msg, inst, "TimeUS")),
-                freq: array_scale(log.get_instance(msg, inst, "RPM"), 1 / 60)
+            const time_us = log.get_instance(msg, inst, "TimeUS")
+            const rpm = log.get_instance(msg, inst, "RPM")
+            if ((time_us == null) || (rpm == null)) {
+                // Экземпляр без строк или без поля оборотов — данных нет
+                continue
             }
+            const time = []
+            const freq = []
+            // Множитель как в array_scale(RPM, 1 / 60) upstream — те же числа до последнего бита
+            const scale = 1 / 60
+            const len = Math.min(time_us.length, rpm.length)
+            for (let j = 0; j < len; j++) {
+                if (!Number.isFinite(rpm[j])) {
+                    continue
+                }
+                time.push(time_us[j] * US2S)
+                freq.push(rpm[j] * scale)
+            }
+            if (time.length == 0) {
+                // Ни одного числового отсчёта (мотор без оборотов весь лог) — как экземпляр без строк: остальной код
+                // обходит this.data[i] == null, а пустой ряд давал бы в linear_interp цель NaN во всех окнах
+                continue
+            }
+            this.data[inst] = { time, freq }
+        }
+        if (this.data.length == 0) {
+            // Оборотов нет ни у одного мотора — источник без данных (have_data false): load_filters выключит notch
+            // с предупреждением вместо пустой цели
+            return
         }
 
         // Общий массив отсчётов всех моторов, отсортированный по времени — для расчёта среднего на лету

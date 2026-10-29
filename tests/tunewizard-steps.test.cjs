@@ -251,10 +251,10 @@ test('motor_fundamental: ESC — медиана среднего по мотор
     assert.equal(motor_fundamental(tracking, {}, [0, 1.5]), 87.5, 'медиана 100 и 75')
 })
 
-test('motor_fundamental: без ESC — медиана цели газа по RATE.AOut, без газа — null', () => {
+test('motor_fundamental: без ESC — медиана цели газа по RATE.AOut при INS_HNTCH_MODE = 1, без газа — null', () => {
     const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0.25, 0.25, 1.0] } } })
     const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
-    const values = { INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
+    const values = { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
     // Цель freq·√(thr/ref): 0 (газ 0 — отброшен), 100, 100, 200 → медиана 100
     assert.equal(motor_fundamental(tracking, values, [0, 3]), 100)
     assert.equal(motor_fundamental(tracking, values, [2.5, 3]), 200)
@@ -265,16 +265,36 @@ test('motor_fundamental: без ESC — медиана цели газа по RA
     assert.equal(motor_fundamental(empty, values, [0, 3]), null, 'нет ни ESC, ни газа')
     // FREQ = 0 — цель газа не определена
     assert.equal(motor_fundamental(tracking, { ...values, INS_HNTCH_FREQ: 0 }, [0, 3]), null)
+    // Notch в логе следит не по газу (аудит, I1): FREQ и REF режима ESC (3), RPM (2) или статического (0) к газу
+    // не относятся — цель газа из них не строится; без режима (старые значения) — тоже
+    for (const mode of [0, 2, 3, 5, undefined]) {
+        assert.equal(motor_fundamental(tracking, { ...values, INS_HNTCH_MODE: mode }, [0, 3]), null, 'режим ' + mode)
+    }
 })
 
-test('motor_fundamental: ESC есть, но обороты нулевые — берётся цель газа', () => {
+test('motor_fundamental: ESC есть, но обороты нулевые — берётся цель газа (режим 1)', () => {
     const log = fake_log({ messages: {
         ESC: { instances: { 0: { TimeUS: [0, 1e6, 2e6], RPM: [0, 0, 0] } } },
         RATE: { TimeUS: [0, 1e6, 2e6], AOut: [0.25, 0.25, 0.25] }
     } })
     const tracking = create_tracking(log, env, { start_time: 0, end_time: 2 })
     assert.equal(tracking.find((t) => t.name === 'ESC').have_data(), true, 'ESC в логе есть')
-    assert.equal(motor_fundamental(tracking, { INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }, [0, 2]), 80)
+    assert.equal(motor_fundamental(tracking, { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }, [0, 2]), 80)
+})
+
+test('motor_fundamental: INS_HNTCH_MODE = 4 без ESC — медиана центрального пика бортового FFT (FTN1.PkAvg) в диапазоне', () => {
+    const log = fake_log({ messages: {
+        FTN1: { TimeUS: [0, 1e6, 2e6, 3e6], PkAvg: [0, 90, 110, 130] },
+        RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0.25, 0.25, 0.25, 0.25] }
+    } })
+    const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const values = { INS_HNTCH_MODE: 4, INS_HNTCH_FREQ: 80, INS_HNTCH_REF: 1, INS_HNTCH_FM_RAT: 1 }
+    // Нулевой пик (моторы стоят) отброшен: медиана 90, 110, 130
+    assert.equal(motor_fundamental(tracking, values, [0, 3]), 110)
+    assert.equal(motor_fundamental(tracking, values, [1.5, 3]), 120)
+    // В режиме 4 цель газа не берётся, даже если FTN1 нет
+    const no_ftn = create_tracking(fake_log({ messages: { RATE: { TimeUS: [0, 1e6], AOut: [0.25, 0.25] } } }), env, { start_time: 0, end_time: 1 })
+    assert.equal(motor_fundamental(no_ftn, values, [0, 1]), null)
 })
 
 // ---------- Атрибуция по порядковому спектру и сравнение вариантов notch ----------
@@ -437,16 +457,21 @@ test('attribute_peaks_auto: по порядку при ESC, иначе по ме
     assert.deepEqual(order.peaks, attribute_peaks_order(peaks, motor_order_info(gyro, tracking, range, 0)))
     assert.equal(nearest_peak(order.peaks, 155).source, 'frame')
 
-    // Без ESC: цель газа 100·√(thr/0.25) — 100, 100, 200 Гц, медиана 100; первая гармоника среди пиков — 100 Гц
+    // Без ESC: цель газа (режим 1) 100·√(thr/0.25) — 100, 100, 200 Гц, медиана 100; первая гармоника среди пиков — 100 Гц
     const log = fake_log({ messages: { RATE: { TimeUS: [0, 1e6, 2e6, 3e6], AOut: [0, 0.25, 0.25, 1.0] } } })
     const throttle = create_tracking(log, env, { start_time: 0, end_time: 3 })
-    const values = { INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
+    const values = { INS_HNTCH_MODE: 1, INS_HNTCH_FREQ: 100, INS_HNTCH_REF: 0.25, INS_HNTCH_FM_RAT: 1 }
     const given = [{ freq: 100, excess_dB: 20 }, { freq: 200, excess_dB: 15 }, { freq: 57, excess_dB: 12 }]
     const median = attribute_peaks_auto(given, { gyro: [], tracking: throttle, range: [0, 3], esc_mask: 0, values })
     assert.equal(median.method, 'median')
     assert.deepEqual(median.info, { median_hz: 100, fundamental_hz: 100 })
     assert.deepEqual(median.peaks.map((p) => p.harmonic), [1, 2, null])
     assert.ok(median.peaks.every((p) => p.method === 'median'))
+    // Те же FREQ и REF при режиме ESC (3) без ESC-телеметрии — моторная частота не определена, все пики — рама (аудит, I1)
+    const mode3 = attribute_peaks_auto(given, { gyro: [], tracking: throttle, range: [0, 3], esc_mask: 0, values: { ...values, INS_HNTCH_MODE: 3 } })
+    assert.equal(mode3.method, 'median')
+    assert.deepEqual(mode3.info, { median_hz: null, fundamental_hz: null })
+    assert.ok(mode3.peaks.every((p) => (p.source === 'frame') && (p.harmonic === null)))
     // Ни ESC, ни газа — всё рама
     const none = attribute_peaks_auto(given, { gyro: [], tracking: create_tracking(fake_log(), env, { start_time: 0, end_time: 3 }), range: [0, 3], esc_mask: 0, values })
     assert.deepEqual(none.info, { median_hz: null, fundamental_hz: null })
@@ -563,6 +588,32 @@ test('evaluate_candidate: «как в логе» = estimate_post после calc
     assert.equal(evaluate_candidate(values, { ...ctx, sensor: 5 }), null)
     const post_only = [{ FFT: { ...FFT, Z1: null, Z2: null } }]
     assert.equal(evaluate_candidate(values, { ...ctx, gyro: post_only }), null)
+})
+
+test('evaluate_candidate: notch_enabled и notch_warnings — работает ли каждый notch и почему нет', () => {
+    const { gyro, env: log_env, tracking, range } = esc_setup({ esc_hz: [56, 58, 60, 60, 60, 62, 64] })
+    const ctx = { gyro, env: log_env, tracking, range, sensor: 0, peaks: [], loop_rate: 400 }
+    // ESC (MODE 3) с данными — работает; второй notch выключен
+    const esc = evaluate_candidate(log_values_7a, ctx)
+    assert.deepEqual(esc.notch_enabled, [true, false])
+    assert.deepEqual(esc.notch_warnings, [[], []])
+    // RPM1 (MODE 2) без сообщений RPM — включён, но не работает: фильтр посчитан без него, предупреждение источника
+    const rpm = evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 2 }, ctx)
+    assert.deepEqual(rpm.notch_enabled, [false, false])
+    assert.deepEqual(rpm.notch_warnings, [['Нет данных трекинга для notch RPM1'], []])
+    assert.deepEqual(rpm.warnings, ['Нет данных трекинга для notch RPM1'])
+    // Неизвестный режим 7
+    const unknown = evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 7 }, ctx)
+    assert.deepEqual(unknown.notch_enabled, [false, false])
+    assert.deepEqual(unknown.notch_warnings, [['Неподдерживаемый режим notch 7'], []])
+    // Выключенный notch не работает и не предупреждает (дефект upstream 7 исправлен)
+    const off = evaluate_candidate({ ...log_values_7a, INS_HNTCH_ENABLE: 0 }, ctx)
+    assert.deepEqual(off.notch_enabled, [false, false])
+    assert.deepEqual(off.notch_warnings, [[], []])
+    assert.deepEqual(off.warnings, [])
+    // Предупреждения — копии: правка списка оценки не трогает фильтры
+    rpm.notch_warnings[0].push('x')
+    assert.deepEqual(evaluate_candidate({ ...log_values_7a, INS_HNTCH_MODE: 2 }, ctx).notch_warnings[0], ['Нет данных трекинга для notch RPM1'])
 })
 
 // ---------- Оценка вариантов низкочастотных фильтров шага 3 (core/lowpass.js) ----------
@@ -803,6 +854,34 @@ test('evaluate_lowpass: нечисловой INS_GYRO_FILTER (пустое по�
     assert.equal(lowpass_flags(log, broken).incomplete, true, 'и лог с таким значением тоже не сравнивается')
 })
 
+test('evaluate_lowpass и lowpass_bode: INS_GYRO_FILTER выше 0.4 частоты гироскопа — срез ограничен, как в прошивке, числа конечные и как на 0.4·fs, предупреждение', () => {
+    // Прошивка: cutoff = MIN(cutoff, 0.4·sample_freq) (LowPassFilter2p.cpp); DigitalBiquadFilter страницы без ограничения
+    // на 0.5·fs и выше давал NaN в шуме гироскопа, шуме D и задержках — вариант «отмечался» вместо честной оценки
+    const { ctx } = lowpass_setup()
+    const rate = ctx.gyro[0].FFT.average_sample_rate
+    assert.ok(Math.abs(rate - 1000) < 1e-6, 'частота выборки синтетики: ' + rate)
+    const at_limit = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 400 }, ctx)
+    const bode_limit = lowpass_bode({ ...lowpass_values_8, INS_GYRO_FILTER: 400 }, ctx, 0.5)
+    assert.ok(Number.isFinite(at_limit.gyro.band_dB) && Number.isFinite(at_limit.dterm.roll.dB) && Number.isFinite(at_limit.lag_ms.roll.D[30]), 'ровно 0.4·fs считается')
+    assert.deepEqual(at_limit.warnings, load_filters(log_values_7a, ctx.env, ctx.tracking).warnings, 'на 0.4·fs предупреждения об ограничении нет')
+    for (const hz of [500, 1000, 1e6]) {
+        const values = { ...lowpass_values_8, INS_GYRO_FILTER: hz }
+        const e = evaluate_lowpass(values, ctx)
+        assert.deepEqual(lowpass_metrics(e), lowpass_metrics(at_limit), hz + ' Гц — та же оценка, что на 400 Гц')
+        assert.deepEqual(e.gyro.spectrum, at_limit.gyro.spectrum, hz + ' Гц — тот же спектр после фильтров')
+        assert.equal(e.values, values, 'значения варианта не подменяются')
+        assert.deepEqual(e.warnings, [...at_limit.warnings, 'INS_GYRO_FILTER ' + hz + ' выше 0.4 частоты гироскопа (1000 Гц): прошивка ограничит до 400 Гц — так и посчитано'])
+        assert.deepEqual(lowpass_flags(e, at_limit), { noisier: [], slower: [], incomplete: false, incomplete_axes: [], d_off_axes: [] }, hz + ' Гц против 400 Гц — без отметок')
+        const bode = lowpass_bode(values, ctx, 0.5)
+        assert.deepEqual([bode.gyro.amp_dB, bode.gyro.phase_deg, bode.roll.D.amp_dB], [bode_limit.gyro.amp_dB, bode_limit.gyro.phase_deg, bode_limit.roll.D.amp_dB], hz + ' Гц — бодэ как на 400 Гц')
+        assert.ok(bode.gyro.amp_dB.every(Number.isFinite), hz + ' Гц — бодэ конечный')
+    }
+    // Ниже порога ограничение не действует: 399 Гц даёт другие числа
+    const below = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 399 }, ctx)
+    assert.notEqual(below.gyro.band_dB, at_limit.gyro.band_dB)
+    assert.deepEqual(below.warnings, at_limit.warnings)
+})
+
 test('evaluate_lowpass: контур 1000 Гц на гироскопе 1000 Гц — полоса D 20…400 Гц, а не до 500 (min(band_hz[1], Найквист))', () => {
     const { base } = lowpass_setup()
     const ctx = lowpass_ctx(base, { ...log_values_7a, SCHED_LOOP_RATE: 1000 }, lowpass_kd_8)
@@ -1028,6 +1107,40 @@ test('rank_candidates: пики оценки «после» лога тоже п
     assert.equal(near_main.peaks.filter((p) => p.source === 'post').length, 0)
 })
 
+test('rank_candidates: notch лога не работает (notch_enabled[0] false) — допуск задержки не применяется, пики и нечисловая задержка отмечают', () => {
+    const good = [[78, -65], [153, -63]]
+    // Лог с выключенным notch (аудит 28.10.2026, E12): автоподбор лучше по полосе на 9.8 дБ, но медленнее на 3.5 мс —
+    // раньше отвергался за задержку, и рекомендовался «как в логе + второй notch» на −0.25 дБ
+    const log_off = { ...eval_7a(-48.4, 6.25, [[78, -35], [153, -48]]), notch_enabled: [false, false] }
+    const r = rank_candidates({ log: log_off, fit: eval_7a(-58.1, 9.8, [[78, -62], [153, -48]]), second: eval_7a(-48.6, 6.43, [[78, -35], [153, -74]]) })
+    assert.equal(r.lag_gate, false)
+    assert.equal(r.best_id, 'fit')
+    assert.deepEqual(r.flags.fit, no_flags)
+    assert.deepEqual(r.flags.second, no_flags)
+    // Пики проверяются по-прежнему
+    const worse = rank_candidates({ log: log_off, fit: eval_7a(-58.1, 9.8, [[78, -62], [153, -44]]) })
+    assert.equal(worse.best_id, 'log')
+    assert.deepEqual(worse.flags.fit, { worse_peaks: [153], lag_over: false, incomplete: false })
+    // Нечисловая задержка отмечает вариант и без допуска
+    for (const lag30 of [NaN, undefined]) {
+        const nan = rank_candidates({ log: log_off, fit: eval_7a(-58.1, lag30, [[78, -62], [153, -48]]) })
+        assert.equal(nan.flags.fit.lag_over, true, 'задержка ' + lag30)
+        assert.equal(nan.best_id, 'log')
+    }
+    // Notch лога работает — допуск как раньше; без поля notch_enabled (оценки вручную) — тоже
+    for (const log of [{ ...eval_7a(-40, 10, good), notch_enabled: [true, false] }, eval_7a(-40, 10, good)]) {
+        const on = rank_candidates({ log, fit: eval_7a(-45, 13.5, [[78, -66], [153, -64]]) })
+        assert.equal(on.lag_gate, true)
+        assert.equal(on.best_id, 'log')
+        assert.deepEqual(on.flags.fit, { worse_peaks: [], lag_over: true, incomplete: false })
+    }
+    // Решает только первый notch лога: не работающий второй допуск не снимает
+    assert.equal(lag_gate_applies({ notch_enabled: [true, false] }), true)
+    assert.equal(lag_gate_applies({ notch_enabled: [false, true] }), false)
+    assert.equal(lag_gate_applies(null), true)
+    assert.equal(lag_gate_applies({ notch_enabled: null }), true)
+})
+
 // Задержка дискретного ФНЧ Баттерворта 2-го порядка (DigitalBiquadFilter) на частоте f, мс — по формуле
 // H(z) = (b0 + b1·z⁻¹ + b2·z⁻²)/(1 + a1·z⁻¹ + a2·z⁻²) при z = e^(j·2πf/rate), без кода фильтров
 function biquad_lag_ms(cutoff, rate, f) {
@@ -1148,17 +1261,26 @@ test('second_notch_candidate: BW — удвоенная ширина пика п
     assert.equal(width.width_hz, 26)
 })
 
-test('notch_line_stats: NaN в ESC — среднее по числам (дефект upstream 8), без чисел — null', () => {
-    const esc_log = (rpm0) => fake_log({ messages: { ESC: { instances: {
-        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: rpm0 },
+test('notch_line_stats: NaN в целях трекинга — среднее по числам (дефект upstream 8), без чисел — null', () => {
+    // ESCTarget теперь отбрасывает NaN-отсчёты при чтении (аудит, C1; tests/tunewizard-audit-a.test.cjs), поэтому NaN
+    // подставляется в уже прочитанные данные источника (и в его общий ряд all) — проверяется сама статистика линий
+    const esc_log = () => fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [6000, 6000, 6000, 6000] },
         1: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [3000, 3000, 3000, 3000] }
     } } } })
     const values = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_REF: 1, INS_HNTCH_FREQ: 40, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 40, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 1, INS_HNTCH_ESCMSK: 0 }
-    const stats = (log, options) => {
-        const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const stats = (freq0, options) => {
+        const tracking = create_tracking(esc_log(), env, { start_time: 0, end_time: 3 })
+        const esc = tracking.find((t) => t.name === 'ESC')
+        esc.data[0].freq = freq0
+        for (const sample of esc.data.all) {
+            if (sample.inst == 0) {
+                sample.freq = freq0[esc.data[0].time.indexOf(sample.time)]
+            }
+        }
         return notch_line_stats(load_filters({ ...values, INS_HNTCH_OPTS: options }, env, tracking), [0, 3])[0].harmonics[0]
     }
-    const with_nan = esc_log([6000, NaN, 6000, 6000])
+    const with_nan = [100, NaN, 100, 100]
 
     // OPTS 2 — по моторам (многопиковая ветка): мотор 0 — 100 Гц без NaN-отсчёта, мотор 1 — 50 Гц
     const multi = stats(with_nan, 2)
@@ -1170,7 +1292,7 @@ test('notch_line_stats: NaN в ESC — среднее по числам (деф�
     assert.deepEqual([single.min, single.max], [75, 100])
 
     // Мотор 0 целиком NaN: по моторам — только мотор 1; в среднем по моторам все средние NaN → null
-    const all_nan = esc_log([NaN, NaN, NaN, NaN])
+    const all_nan = [NaN, NaN, NaN, NaN]
     const multi_nan = stats(all_nan, 2)
     assert.deepEqual([multi_nan.mean, multi_nan.min, multi_nan.max], [50, 50, 50])
     const single_nan = stats(all_nan, 0)

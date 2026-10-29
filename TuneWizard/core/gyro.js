@@ -294,9 +294,8 @@ function load_from_batch(log, gyro, num_gyro, gyro_rate, params, warnings) {
         while (ISBD.N[data_index] != seq_num) {
             data_index++
             if (data_index >= ISBD.N.length) {
-                // Ожидаемо в конце лога: сообщений больше нет.
-                // Строка минус число даёт NaN в тексте (в upstream та же опечатка, только console.log)
-                console.log("Could not find next sequence " + i + " of " + ISBH.N.length-1)
+                // Ожидаемо в конце лога: сообщений больше нет (в upstream без скобок — строка минус число давала NaN)
+                console.log("Could not find next sequence " + i + " of " + (ISBH.N.length-1))
                 // исправление дефекта upstream 3 (FR 2087–2095): upstream здесь прекращал разбор, и если сообщений ISBD
                 // этого пакета нет вовсе, а дальше лог продолжается, все следующие пакеты молча терялись. Поиск
                 // возвращается к своему началу, заголовок пропускается
@@ -487,6 +486,12 @@ function load_from_raw_log(log, gyro, num_gyro, gyro_rate, params, warnings) {
         post_filter = false
     }
 
+    if (!("instances" in log.messageTypes.GYR)) {
+        // Старый формат GYR без поля экземпляра I: upstream падал на Object.keys(undefined) (аудит, M1)
+        gyro.error = "Raw-лог: в сообщении GYR нет номера экземпляра (I) — такой формат не поддерживается"
+        return
+    }
+
     // Грузим одним большим пакетом, разрезая на больших разрывах лога
     for (const inst of Object.keys(log.messageTypes.GYR.instances)) {
         const i = parseFloat(inst)
@@ -662,6 +667,11 @@ function load_gyro(log, env, opts = {}) {
     } else {
         load_from_raw_log(log, gyro, num_gyro, gyro_rate, params, warnings)
 
+    }
+
+    // Загрузчик мог отказаться от формата (GYR без экземпляров)
+    if (gyro.error != null) {
+        return gyro
     }
 
     // Сообщения в логе могут быть, а данных в них — нет

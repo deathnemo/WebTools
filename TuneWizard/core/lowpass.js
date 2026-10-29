@@ -296,6 +296,27 @@ function lowpass_lag_hz(rules = lowpass_rules) {
     return Math.max(...rules.lag_freqs_hz)
 }
 
+// Доля частоты выборки, выше которой прошивка не пускает срез фильтра гироскопа: DigitalBiquadFilter::compute_params
+// (libraries/Filter/LowPassFilter2p.cpp) — cutoff = MIN(cutoff, 0.4·sample_freq) [код]
+const lowpass_gyro_cutoff_ratio = 0.4
+
+// Срез фильтра гироскопа hz для модели при частоте выборки sample_rate: прошивка ограничивает его
+// lowpass_gyro_cutoff_ratio·sample_rate [код], а DigitalBiquadFilter WebTools — нет: у 0.5·fs tan(π·fs/fc) уходит
+// в бесконечность, выше — коэффициенты меняют знак, и оценка даёт NaN или мусор. Частота выборки — FFT.average_sample_rate,
+// на ней модель фильтров считает всё остальное. → { hz, warning }: hz — срез для модели (ограниченный; нечисловой,
+// ≤ 0 и в пределах — как есть), warning — строка для evaluation.warnings, если ограничен, иначе null
+function lowpass_gyro_cutoff(hz, sample_rate) {
+    const limit = lowpass_gyro_cutoff_ratio * sample_rate
+    if (!(Number.isFinite(limit) && (limit > 0)) || !(hz > limit)) {
+        return { hz: hz, warning: null }
+    }
+    return {
+        hz: limit,
+        warning: "INS_GYRO_FILTER " + hz + " выше " + lowpass_gyro_cutoff_ratio + " частоты гироскопа (" + Number(sample_rate.toFixed(1)) +
+                 " Гц): прошивка ограничит до " + Number(limit.toFixed(1)) + " Гц — так и посчитано",
+    }
+}
+
 // Контекст оценки: контекст evaluate_candidate (gyro, env, tracking, range, sensor — индекс экземпляра в gyro,
 // как у шага 2) с пустыми пиками и loop_rate = notch.SCHED_LOOP_RATE; notch — значения notch-базы (принятые на шаге 2
 // или из лога: INS_GYRO_FILTER, SCHED_LOOP_RATE, INS_HNTCH_*, INS_HNTC2_*), kd — { roll: ATC_RAT_RLL_D,
@@ -336,11 +357,13 @@ function lowpass_dterm(bins, psd_dB, kd, flte, fltd, loop_rate) {
 }
 
 // Оценка варианта values (объект имя → число, имена lowpass_param_names) на контексте lowpass_ctx.
-// Гироскопная часть — notch-база с INS_GYRO_FILTER варианта; FLTE и FLTD крена и тангажа — из values
-// (lowpass_axis_filters; нечисловые дают NaN в задержке и шуме D).
+// Гироскопная часть — notch-база с INS_GYRO_FILTER варианта, срез которого ограничен, как в прошивке, 0.4 частоты
+// выборки (lowpass_gyro_cutoff); FLTE и FLTD крена и тангажа — из values (lowpass_axis_filters; нечисловые дают NaN
+// в задержке и шуме D).
 // Возвращает null, если у экземпляра нет FFT или Z1 (только «после») или контур ctx.loop_rate не положительное
 // конечное число, иначе {
-//   values, warnings (filters.warnings гироскопной части, как в evaluate_candidate),
+//   values, warnings (filters.warnings гироскопной части, как в evaluate_candidate; срез ограничен — ещё строка
+//            lowpass_gyro_cutoff),
 //   kd: { roll, pitch } — копия ctx.kd (нет оси или нет ctx.kd — null): по ней lowpass_flags отличают «Kd нет»
 //       от «D выключен»,
 //   gyro: { band_dB, lag_ms: { 10, 30 }, spectrum, pre_spectrum } — evaluate_candidate({ ...ctx.notch, INS_GYRO_FILTER }):
@@ -357,14 +380,18 @@ function evaluate_lowpass(values, ctx) {
     if (!(Number.isFinite(loop_rate) && (loop_rate > 0))) {
         return null
     }
-    const gyro_values = { ...ctx.notch, INS_GYRO_FILTER: values.INS_GYRO_FILTER }
+    const gyro = ctx.gyro
+    const index = ctx.sensor
+    const FFT = gyro[index]?.FFT ?? null
+    if (FFT == null) {
+        return null
+    }
+    const cutoff = lowpass_gyro_cutoff(values.INS_GYRO_FILTER, FFT.average_sample_rate)
+    const gyro_values = { ...ctx.notch, INS_GYRO_FILTER: cutoff.hz }
     const gyro_eval = evaluate_candidate(gyro_values, ctx)
     if (gyro_eval == null) {
         return null
     }
-    const gyro = ctx.gyro
-    const index = ctx.sensor
-    const FFT = gyro[index].FFT
 
     // PSD после фильтров варианта, свёрнутая к частоте Найквиста контура. Своя H на сетке FFT, как в
     // evaluate_candidate: FFT.H не трогаем; окна — до конца диапазона
@@ -393,7 +420,7 @@ function evaluate_lowpass(values, ctx) {
 
     return {
         values: values,
-        warnings: gyro_eval.warnings,
+        warnings: (cutoff.warning != null) ? [...gyro_eval.warnings, cutoff.warning] : gyro_eval.warnings,
         kd: kd,
         gyro: { band_dB: gyro_eval.band_dB, lag_ms: gyro_eval.lag_ms, spectrum: gyro_eval.spectrum, pre_spectrum: gyro_eval.pre_spectrum },
         dterm: dterm,
@@ -402,7 +429,8 @@ function evaluate_lowpass(values, ctx) {
 }
 
 // Бодэ для графика: гироскопная часть и пути P и D обеих осей одним вызовом (гироскопная часть считается один раз).
-// H гироскопной части (notch-база с INS_GYRO_FILTER варианта) на сетке 0…loop_rate / 2 шагом step (0.05 Гц, как
+// H гироскопной части (notch-база с INS_GYRO_FILTER варианта, срез ограничен 0.4 частоты выборки — lowpass_gyro_cutoff,
+// как в evaluate_lowpass) на сетке 0…loop_rate / 2 шагом step (0.05 Гц, как
 // в filters_lag_ms: get_phase считает спад больше 45° за шаг переносом фазы, поэтому сетка плотная и от нуля):
 // filter_transfer на exp_jw(сетка, FFT.average_sample_rate) по окнам до конца интервала, средние по окнам интервала
 // амплитуда (complex_abs) и развёрнутая фаза (get_phase). Путь P оси — она, умноженная на FLTE оси, путь D — ещё
@@ -429,7 +457,8 @@ function lowpass_bode(values, ctx, step = 0.05) {
         freq.push(k * step)
     }
 
-    const filters = load_filters({ ...ctx.notch, INS_GYRO_FILTER: values.INS_GYRO_FILTER }, ctx.env, ctx.tracking)
+    const cutoff = lowpass_gyro_cutoff(values.INS_GYRO_FILTER, FFT.average_sample_rate)
+    const filters = load_filters({ ...ctx.notch, INS_GYRO_FILTER: cutoff.hz }, ctx.env, ctx.tracking)
     const start_index = find_start_index(FFT.time, ctx.range)
     const end_index = find_end_index(FFT.time, ctx.range) + 1
     const Z = exp_jw(freq, FFT.average_sample_rate)

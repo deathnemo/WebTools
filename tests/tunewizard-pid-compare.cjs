@@ -78,7 +78,9 @@ function find_log() {
     if (!fs.existsSync(logs_dir)) {
         return null
     }
-    const bin = fs.readdirSync(logs_dir).find((name) => name.toLowerCase().endsWith('.bin'))
+    // В TuneWizard/logs/ рядом с тестовым логом лежит второй (другой аппарат), по алфавиту он первый — тестовый предпочтительнее
+    const names = fs.readdirSync(logs_dir).filter((name) => name.toLowerCase().endsWith('.bin'))
+    const bin = names.includes('2026-06-18 18-54-42_anon.bin') ? '2026-06-18 18-54-42_anon.bin' : names[0]
     return bin ? path.join(logs_dir, bin) : null
 }
 

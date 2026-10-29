@@ -101,3 +101,14 @@ test('mask_signed: 8-битная маска со старшим битом пи
         assert.equal(mask_signed(mask_unsigned(v, 8), 8), v)
     }
 })
+
+test('escmsk_present: INS_*_ESCMSK есть у аппарата, если записан в лог или версия фильтра не ниже 4', () => {
+    const params = (names) => ({ has: (name) => names.includes(name) })
+    // Записан в лог при версии фильтра 2 (например, версия сменена на шаге 1) — есть; FilterReview смотрел бы только на версию
+    assert.equal(escmsk_present(params(['INS_HNTCH_ESCMSK']), 2), true)
+    assert.equal(escmsk_present(params([]), 4), true, 'версия фильтра 4 без записи в логе')
+    assert.equal(escmsk_present(params([]), 2), false)
+    assert.equal(escmsk_present(params([]), null), false, 'версия не определена — как ниже 4')
+    // Решает маска первого notch: одна запись INS_HNTC2_ESCMSK правила не включает
+    assert.equal(escmsk_present(params(['INS_HNTC2_ESCMSK']), 3), false)
+})

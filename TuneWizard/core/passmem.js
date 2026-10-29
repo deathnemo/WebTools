@@ -8,10 +8,14 @@
 // в браузере его даёт страница, в тестах — объект над словарём. Сам localStorage ядро не трогает.
 //
 // Версии формата: формат записи в хранилище меняется только вместе с новой PASSMEM_VERSION. Память чужой версии
-// (в том числе более новой) читается как "corrupt" — память начинается заново, перевода между версиями нет [наше].
+// (в том числе более новой) читается как "version" и не используется; перевода между версиями нет. При чтении её
+// не затирают: заменяет её только явное сохранение прохода на шаге 5 («Запомнить проход», «Скачать .param») — иначе
+// первая же загрузка лога в старой версии мастера уничтожала бы память новой [наше].
+// Поле bits записи (размер маски HMNCS при сохранении) добавлено без смены версии: записи без него читаются как
+// прежде (passmem_applied).
 //
 // Нужны глобалы страницы: core/summary.js (summary_same; ему — core/params.js и Libraries/Param_Helpers.js),
-// core/lowpass.js (lowpass_pid_axes), core/pidtune.js (pidtune_axes).
+// core/filters.js (notch_param_names), core/lowpass.js (lowpass_pid_axes), core/pidtune.js (pidtune_axes).
 
 // Ключ в хранилище: { version: PASSMEM_VERSION, passes: { <ключ аппарата>: проход } }. Память по аппаратам, без
 // переноса между браузерами [решение пользователя 25.10.2026]; не больше PASSMEM_MAX аппаратов [наше]
@@ -40,32 +44,44 @@ function passmem_valid(key, record) {
           [2, 3, 4].every((n) => (record.estimates[n] == null) || passmem_is_object(record.estimates[n]))))
 }
 
-// Проходы из хранилища → { passes, error }: error null — прочитано (ключа нет — пусто); "unavailable" — хранилища нет
-// или оно бросает (приватный режим, запрет хранилища): страница пишет, что браузер не даёт сохранить память;
-// "corrupt" — JSON не разбирается, другая версия или passes не объект (passes — {}: память будет начата заново), либо
-// отброшены битые записи (passmem_valid; passes — остальные, страница перезапишет память без битых). Битая запись
-// иначе роняла бы загрузку любого лога [наше]
+// Проходы из хранилища → { passes, error, dropped }:
+// - error null — прочитано (ключа нет — пусто); dropped true — при этом отброшены битые записи (passmem_valid;
+//   passes — остальные): страница перезаписывает память без битых, иначе битая запись роняла бы загрузку любого
+//   лога [наше];
+// - "unavailable" — хранилища нет или оно бросает (приватный режим, запрет хранилища): страница пишет, что браузер не
+//   даёт сохранить память;
+// - "version" — память другой версии формата (version — число, не PASSMEM_VERSION): passes {}, не используется и при
+//   чтении не затирается — её заменит только явное сохранение прохода;
+// - "corrupt" — JSON не разбирается, не объект, version не число или passes не объект: passes {}, тоже не
+//   используется и не затирается (испорченное руками пусть чинят руками; затирает только сохранение) [наше]
 function passmem_read(storage) {
+    const result = (passes, error, dropped = false) => ({ passes: passes, error: error, dropped: dropped })
     if (storage == null) {
-        return { passes: {}, error: "unavailable" }
+        return result({}, "unavailable")
     }
     let text
     try {
         text = storage.getItem(PASSMEM_KEY)
     } catch {
-        return { passes: {}, error: "unavailable" }
+        return result({}, "unavailable")
     }
     if (text == null) {
-        return { passes: {}, error: null }
+        return result({}, null)
     }
     let data
     try {
         data = JSON.parse(text)
     } catch {
-        return { passes: {}, error: "corrupt" }
+        return result({}, "corrupt")
     }
-    if ((data?.version !== PASSMEM_VERSION) || !passmem_is_object(data.passes)) {
-        return { passes: {}, error: "corrupt" }
+    if (!passmem_is_object(data) || (typeof data.version !== "number")) {
+        return result({}, "corrupt")
+    }
+    if (data.version !== PASSMEM_VERSION) {
+        return result({}, "version")
+    }
+    if (!passmem_is_object(data.passes)) {
+        return result({}, "corrupt")
     }
     const passes = {}
     let dropped = false
@@ -76,7 +92,7 @@ function passmem_read(storage) {
             dropped = true
         }
     }
-    return { passes: passes, error: dropped ? "corrupt" : null }
+    return result(passes, null, dropped)
 }
 
 // Записать проходы passes (ключ аппарата → проход) в хранилище как { version, passes } → null или "unavailable"
@@ -197,13 +213,17 @@ function passmem_estimates4(step) {
     return estimates
 }
 
-// Проход для памяти. ctx = { key, info, file_name, rows, steps, saved_at, stale, conflicts }: key —
+// Проход для памяти. ctx = { key, info, file_name, rows, steps, saved_at, stale, conflicts, bits }: key —
 // passmem_aircraft_key; info — state.info; file_name — имя лога; rows и conflicts — строки итога и расхождения
 // (summary_rows(…).rows и .conflicts; conflicts нет — расхождений нет); steps — state.steps; saved_at — дата
-// сохранения, мс (Date.now()); stale — { 2, 3, 4 }: устарело ли принятое шага (step_accepted_stale; нет — не устарело).
-// → { key, board, frame, fw, file_name, saved_at, changed, estimates }:
+// сохранения, мс (Date.now()); stale — { 2, 3, 4 }: устарело ли принятое шага (step_accepted_stale; нет — не
+// устарело); bits — размер маски HMNCS лога (hmncs_bits), с которым считались строки итога.
+// → { key, board, frame, fw, file_name, saved_at, bits, changed, estimates }:
 // - подпись: board, frame, fw (info.fw_string) — для показа; нет — null;
-// - changed — строки итога с changed: { name, log, value, step } (log null — параметра не было в логе);
+// - bits — размер маски HMNCS при сохранении (нет — null): «применено» на логе с другим размером (смена версии
+//   фильтра 2 → 3) сравнивает маски по большему из размеров (passmem_applied);
+// - changed — строки итога с changed: { name, log, value, step } (log null — параметра не было в логе); изменений
+//   нет — []: такой проход закрывает прошлый (страница его не показывает — memory_has_changes);
 // - estimates — { 2, 3, 4 } для проверки прогноза (passmem_estimates2/3/4); null — шаг не принят, без метрик или его
 //   оценки не для применяемой конфигурации: шаг устарел, или его значение какого-то имени перекрыто другим шагом
 //   (в conflicts есть значение шага n, а used — другой шаг: расхождение INS_GYRO_FILTER) [наше].
@@ -219,6 +239,7 @@ function passmem_record(ctx) {
         fw: passmem_value(info.fw_string),
         file_name: passmem_value(ctx.file_name),
         saved_at: passmem_value(ctx.saved_at),
+        bits: passmem_number(ctx.bits),
         changed: ctx.rows.filter((row) => row.changed).map((row) => ({
             name: row.name, log: passmem_value(row.log), value: passmem_value(row.value), step: row.step,
         })),
@@ -262,7 +283,10 @@ function passmem_list(passes) {
 }
 
 // Что из предложенного в проходе pass стоит в новом логе. params — параметры лога (get, has), bits — размер маски
-// HMNCS нового лога (hmncs_bits).
+// HMNCS нового лога (hmncs_bits). Маски HMNCS сравниваются по большему из размеров — записи (pass.bits) и лога:
+// после смены версии фильтра 2 → 3 маска стала 32-битной, и 8-битная −128 прохода и −128 нового лога — уже не одна
+// гармоника 8 (mask_unsigned при 32 битах значение не трогает); запись без bits (старый формат) — по размеру лога,
+// как раньше [наше].
 // → { rows, applied, total, same_log }:
 // - rows — по изменённым прохода: { name, step, proposed, now, status }; now — значение в логе или null; status —
 //   "applied" (равно предложенному, summary_same: как float32, маски — целые, HMNCS без знака), "absent" (нет в логе),
@@ -271,17 +295,18 @@ function passmem_list(passes) {
 // - same_log — все значения лога равны «было» прохода (summary_same; нет в логе и не было — тоже равны) и изменения в
 //   проходе есть: похоже на лог прошлого прохода, значения ещё не применялись. Имя файла страница сравнивает сама
 function passmem_applied(pass, params, bits) {
+    const mask_bits = Math.max(Number.isFinite(pass.bits) ? pass.bits : bits, bits)
     const rows = pass.changed.map((change) => {
         const now = params.has(change.name) ? params.get(change.name) : null
         let status = "other"
-        if (summary_same(change.name, now, change.value, bits)) {
+        if (summary_same(change.name, now, change.value, mask_bits)) {
             status = "applied"
         } else if (now == null) {
             status = "absent"
         }
         return { name: change.name, step: change.step, proposed: change.value, now: now, status: status }
     })
-    const same_log = (rows.length > 0) && pass.changed.every((change, i) => summary_same(change.name, rows[i].now, change.log, bits))
+    const same_log = (rows.length > 0) && pass.changed.every((change, i) => summary_same(change.name, rows[i].now, change.log, mask_bits))
     return {
         rows: rows,
         applied: rows.filter((row) => row.status === "applied").length,
@@ -290,19 +315,37 @@ function passmem_applied(pass, params, bits) {
     }
 }
 
+// Имена из принятого на шагах 2–3, от которых зависит прогноз шага 4: поля обоих notch и INS_GYRO_FILTER — поправка
+// фильтров гироскопа, FLTE и FLTD осей — регуляторы вариантов [код, step4_gyro_new и step4_new_filters]. То же, что
+// в ключе расчёта шага 4 (step4_calc_key); depends[4] контекста итога страница берёт отсюда (step_depends4_names в
+// steps/common.js зовёт эту функцию) — список один. SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER и пределы ускорения прогноз
+// шага 4 не меняют: модель регулятора считается на частоте контура лога
+function passmem_depends4_names() {
+    return [
+        ...notch_param_names().flatMap((notch) => Object.values(notch)),
+        "INS_GYRO_FILTER",
+        ...Object.values(pidtune_axes).flatMap((axis) => [axis.rate + "FLTE", axis.rate + "FLTD"]),
+    ]
+}
+
 // Применены ли параметры, от которых зависит прогноз шага n (2–4) прошлого прохода. applied — passmem_applied(pass, …);
 // шаг строки — шаг прохода, который дал значение. axis — ось шага 4 (roll | pitch | yaw); не передана — весь шаг 4.
 // Прогноз шага 3 считался от notch шага 2, шага 4 — от notch шага 2 и фильтров шага 3 [код, шаги мастера], поэтому
-// учитываются изменённые строки шагов 2..n. На шаге 4 с осью строки с префиксом другой оси (pidtune_axes[a].rate,
-// a ≠ axis) не учитываются ни у шага 4, ни у шагов 2–3 (ATC_RAT_PIT_FLTD, ATC_RAT_YAW_FLTE для крена): другая ось на
-// неё не влияет [наше]. Строки без префикса оси (notch, INS_GYRO_FILTER, пределы ускорения ATC_ACC*) учитываются.
+// учитываются изменённые строки шагов 2..n; у шага 4 из строк шагов 2–3 — только имена, от которых его прогноз
+// зависит (passmem_depends4_names): неприменённый FLTT, INS_ACCEL_FILTER, предел ускорения или SCHED_LOOP_RATE
+// прогноз шага 4 не трогают и строку сравнения не отменяют [наше]. На шаге 4 с осью строки с префиксом другой оси
+// (pidtune_axes[a].rate, a ≠ axis) не учитываются ни у шага 4, ни у шагов 2–3 (ATC_RAT_PIT_FLTD, ATC_RAT_YAW_FLTE для
+// крена): другая ось на неё не влияет [наше]. Строки без префикса оси (notch, INS_GYRO_FILTER) учитываются.
 // → "none" — шаг n (на шаге 4 с осью — эта ось) в проходе ничего не менял: строки сравнения нет; "partial" — параметры
 //   шагов 2..n применены не все (другое значение или нет в логе); "applied" — все
 function passmem_step_status(applied, n, axis) {
     // Префиксы других осей: только на шаге 4 с осью
     const others = ((n === 4) && (axis != null)) ?
         Object.keys(pidtune_axes).filter((a) => a !== axis).map((a) => pidtune_axes[a].rate) : []
-    const rows = applied.rows.filter((row) => (row.step <= n) && !others.some((prefix) => row.name.startsWith(prefix)))
+    const depends = (n === 4) ? passmem_depends4_names() : null
+    const rows = applied.rows.filter((row) => (row.step <= n) &&
+        ((depends == null) || (row.step === n) || depends.includes(row.name)) &&
+        !others.some((prefix) => row.name.startsWith(prefix)))
     if (!rows.some((row) => row.step === n)) {
         return "none"
     }

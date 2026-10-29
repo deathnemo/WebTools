@@ -5,6 +5,7 @@
 //   no_data_error() возвращает текст сообщения, а не показывает его;
 //   TimeUS_to_seconds → us_to_s (core/log.js);
 //   find_start_index(time) / find_end_index(time) → (time, range): get_mean_value и get_mean принимают диапазон.
+// Отличие от upstream (аудит, I2): сообщение без строк или без поля — источник без данных, а не исключение.
 class NotchTarget {
     constructor(log, env, msg_name, key_name, name, mode_value) {
         this.name = name
@@ -24,8 +25,15 @@ class NotchTarget {
         }
 
         // Берём данные из лога
-        this.data.time = us_to_s(log.get(msg_name, "TimeUS"))
-        this.data.value = log.get(msg_name, key_name)
+        const time = log.get(msg_name, "TimeUS")
+        const value = log.get(msg_name, key_name)
+        if ((time == null) || (value == null)) {
+            // Сообщение объявлено без строк или без поля: parser.get возвращает undefined, и upstream падал в Array.from —
+            // исключение рушило всю подготовку трекинга (аудит, I2); источник остаётся без данных
+            return
+        }
+        this.data.time = us_to_s(time)
+        this.data.value = value
     }
 
     interpolate(instance, time) {

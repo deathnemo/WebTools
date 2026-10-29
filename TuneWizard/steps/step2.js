@@ -4,7 +4,8 @@
 // Состояние шага 1 не меняется: state.filters и FFT.H остаются от параметров лога (их рисует шаг 1), а
 // передаточная функция значений формы считается отдельно (filter_transfer) и подставляется в копию-взгляд gyro.
 // Общие помощники шагов (step_…, plot_…) — steps/common.js; строка сравнения с прошлым проходом — memory_show
-// (steps/memory.js).
+// (steps/memory.js). Значения лога — values_from_log шага 1 (steps/step1.js; ESCMSK — по escmsk_present из
+// core/params.js), срез INS_GYRO_FILTER для модели ограничен lowpass_gyro_cutoff (core/lowpass.js), как на шаге 3.
 
 // Внутреннее состояние шага
 const step2 = {
@@ -45,10 +46,17 @@ function step2_param_names() {
 // Короткие имена битов INS_*_OPTS (Libraries/ParameterMetadata — английские подписи из params.json)
 const STEP2_OPTS_NAMES = ["2×", "multi", "loop", "all IMU", "3×", "min freq", "5×"]
 
-// Маски словами: HMNCS — «гарм. 1, 3», OPTS — короткие имена битов
+// Значение словами для подписей и полей: маски — как есть (param_to_string округлил бы маску со старшими битами
+// до float32), остальные — кратчайшей записью того же float32 (param_to_string)
+function step2_value_text(name, value) {
+    return is_bitmask_param(name) ? String(value) : param_to_string(value)
+}
+
+// Маски словами: HMNCS — «гарм. 1, 3» (гармоник не больше MAX_NUM_HARMONICS — столько строит HarmonicNotchFilter),
+// OPTS — короткие имена битов
 function step2_masks_text(values, names) {
     const harmonics = []
-    for (let n = 0; n < 32; n++) {
+    for (let n = 0; n < MAX_NUM_HARMONICS; n++) {
         if ((values[names.harmonics] & (1 << n)) != 0) {
             harmonics.push(n + 1)
         }
@@ -69,7 +77,7 @@ function step2_short_values(values) {
             }
             continue
         }
-        const text = [n.freq, n.bandwidth, n.attenuation, n.harmonics, n.options].map((name) => param_to_string(values[name])).join("/") +
+        const text = [n.freq, n.bandwidth, n.attenuation, n.harmonics, n.options].map((name) => step2_value_text(name, values[name])).join("/") +
                      " (" + step2_masks_text(values, n) + ")"
         parts.push((i == 0) ? text : "+ notch 2: " + text)
     }
@@ -225,12 +233,13 @@ function step2_init() {
     document.getElementById("notch_save").addEventListener("click", step2_save_param)
     document.getElementById("notch_load_file").addEventListener("change", (e) => step2_load_param(e.target))
     document.getElementById("notch_accept").addEventListener("click", step2_accept)
-    // Выбор варианта в таблице (строки перерисовываются — слушаем таблицу)
+    // Выбор варианта в таблице (строки перерисовываются — слушаем таблицу); вердикт — под перехватом ошибок (step_try),
+    // как остальные действия шага: иначе ошибка ушла бы в консоль без слова в вердикте
     document.getElementById("candidates2").addEventListener("change", (e) => {
         if (e.target.name === "cand2") {
             step2.selected_id = e.target.value
             if (step1_ready() && (step2.error == null)) {
-                step2_render_verdict()
+                step_try(step2_render_verdict, "verdict2", "шага 2")
             }
         }
     })
@@ -339,6 +348,42 @@ function step2_harmonics_bits() {
     return hmncs_bits(state.params, state.env?.filter_version ?? 1)
 }
 
+// Есть ли у аппарата INS_*_ESCMSK — правило escmsk_present (core/params.js: записан в лог или версия фильтра не ниже 4)
+// для текущего лога и версии фильтра; то же правило у значений лога шага 1 (values_from_log), поэтому форма, варианты,
+// метрики и файл шага 2 согласованы и с ними, и между собой [наше, аудит 28.10.2026]
+function step2_escmsk_present() {
+    return escmsk_present(state.params, state.env?.filter_version ?? 1)
+}
+
+// Частота выборки гироскопа, по которому считаются оценка и графики шага 2: экземпляр до фильтров первичного
+// гироскопа (step_gyro_sensor), без данных «до» — первый экземпляр с FFT; NaN — FFT ещё нет
+function step2_sample_rate() {
+    const gyro = state.gyro
+    const index = step_gyro_sensor() ?? gyro.findIndex((g) => g?.FFT != null)
+    return gyro[index]?.FFT?.average_sample_rate ?? NaN
+}
+
+// Значения для модели фильтров: INS_GYRO_FILTER выше 0.4 частоты гироскопа прошивка ограничивает (lowpass_gyro_cutoff,
+// core/lowpass.js — так же считает шаг 3), а DigitalBiquadFilter страницы — нет: оценка, спектр и бодэ формы давали NaN.
+// sample_rate — частота выборки экземпляра (FFT.average_sample_rate). → { values, warning }: values — те же или копия
+// с ограниченным срезом, warning — строка для предупреждений фильтров, если срез ограничен, иначе null
+function step2_model_values(values, sample_rate) {
+    const cutoff = lowpass_gyro_cutoff(values.INS_GYRO_FILTER, sample_rate)
+    return { values: (cutoff.warning != null) ? { ...values, INS_GYRO_FILTER: cutoff.hz } : values, warning: cutoff.warning }
+}
+
+// Оценка варианта values на контексте ctx — evaluate_candidate с ограниченным срезом INS_GYRO_FILTER (step2_model_values
+// по экземпляру ctx.sensor); предупреждение об ограничении — в warnings оценки, values в ней — исходные. null — как у
+// evaluate_candidate (у экземпляра нет данных «до»)
+function step2_evaluate(values, ctx) {
+    const model = step2_model_values(values, ctx.gyro[ctx.sensor]?.FFT?.average_sample_rate)
+    const evaluation = evaluate_candidate(model.values, ctx)
+    if ((evaluation == null) || (model.warning == null)) {
+        return evaluation
+    }
+    return { ...evaluation, values: values, warnings: [...evaluation.warnings, model.warning] }
+}
+
 // Значение как float32 — так прошивка хранит параметры: 0.7 из файла .param и 0.699999988 из лога — одно значение.
 // Битовые маски — целые до 2^32, во float32 они потеряли бы младшие биты: их не округляем
 function step2_fround_value(name, value) {
@@ -359,11 +404,11 @@ function step2_key(values) {
 }
 
 // Записать значения в поля формы: числа — кратчайшей записью того же float32 (param_to_string), так что
-// 0.699999988 из лога показывается как 0.7
+// 0.699999988 из лога показывается как 0.7; маски — как есть (step2_value_text)
 function step2_set_form_values(values) {
     for (const name of step2_param_names()) {
         if (name in values) {
-            parameter_set_value(name, Number.isFinite(values[name]) ? param_to_string(values[name]) : values[name])
+            parameter_set_value(name, Number.isFinite(values[name]) ? step2_value_text(name, values[name]) : values[name])
         }
     }
 }
@@ -374,17 +419,21 @@ function step2_fill_form(values) {
     step2_set_form_values(values)
     const log_values = values_from_log()
     for (const span of document.querySelectorAll("#notch_form .inlog")) {
-        const value = state.params.get(span.dataset.for)
-        span.textContent = (value == null) ? "в логе нет (взято " + param_to_string(log_values[span.dataset.for]) + ")" : "в логе: " + param_to_string(value)
+        const name = span.dataset.for
+        const value = state.params.get(name)
+        span.textContent = (value == null) ? "в логе нет (взято " + step2_value_text(name, log_values[name]) + ")" : "в логе: " + step2_value_text(name, value)
     }
     step2_param_read()
 }
 
-// Аналог filter_param_read и update_hidden_params FilterReview: поля notch с ENABLE = 0 выключены, ESCMSK
-// виден только с версии фильтра 4 (иначе 0), размер маски HMNCS — 32 бита, если в логе есть INS_RAW_LOG_OPT
-// или версия фильтра не ниже 3, иначе 8. Затем пометки изменённых полей и подсветка «Пересчитать фильтры»
+// Аналог filter_param_read и update_hidden_params FilterReview: сначала поля приводятся к допустимым значениям
+// (step2_coerce_form), поля notch с ENABLE = 0 выключены, ESCMSK виден только когда он есть у аппарата
+// (step2_escmsk_present; иначе 0), размер маски HMNCS — 32 бита, если в логе есть INS_RAW_LOG_OPT или версия фильтра не
+// ниже 3, иначе 8. Затем пометки изменённых полей и подсветка «Пересчитать фильтры». Зовётся там, где форма менялась:
+// правка поля (step2_form_changed), «Применить вариант», загрузка .param, показ шага и готовность разметки
 function step2_param_read() {
-    const filter_version = state.env?.filter_version ?? 1
+    step2_coerce_form()
+    const escmsk_present = step2_escmsk_present()
     for (const names of notch_param_names()) {
         const enabled = parameter_get_value(names.enable) > 0
         for (const [key, name] of Object.entries(names)) {
@@ -392,9 +441,8 @@ function step2_param_read() {
                 parameter_set_disable(name, !enabled)
             }
         }
-        const esc_mask = document.getElementById(names.esc_mask)
-        esc_mask.closest("p").hidden = filter_version < 4
-        if (filter_version < 4) {
+        document.getElementById(names.esc_mask).closest("p").hidden = !escmsk_present
+        if (!escmsk_present) {
             parameter_set_value(names.esc_mask, 0)
         }
         // До разметки у поля нет data-type, и set_bitmask_size упал бы на вызове несуществующей error()
@@ -405,18 +453,71 @@ function step2_param_read() {
     step2_mark_changed()
 }
 
-// Значения формы: объект имя → число float32, маски — целые (через parameter_get_value). Пустое или нечисловое поле —
-// значение из лога: проверяется сам текст поля, потому что parameter_get_value у 8-битной маски даёт из NaN
-// число 0 (NaN & 0xFF). ESCMSK при версии фильтра ниже 4 — 0, как в values_from_log
+// Значение поля формы по его тексту text → { value, text }: value — число для расчёта, text — приведённый текст,
+// который нужно записать обратно в поле (null — поле не трогать). log_value — значение из лога, bits — размер маски
+// в битах (null — не маска). Правила [наше, аудит 28.10.2026]:
+// - пустое или нечисловое поле — значение из лога, поле не трогаем (проверяется сам текст поля, потому что
+//   parameter_get_value у 8-битной маски даёт из NaN число 0);
+// - SCHED_LOOP_RATE не больше нуля — значение из лога: иначе alias_obj строил бы new Array(NaN) и шаг падал бы
+//   с «Invalid array length»;
+// - маска — целая часть; 8-битная — без знака по модулю 2^8, как её читает parameter_get_value и пишет флажок бита 7
+//   в ParameterMetadata (int8 −128 — гармоника 8, 256 — 0); 32-битная отрицательная или не меньше 2^32 — значение из лога
+function step2_field_value(name, text, log_value, bits) {
+    const typed = parseFloat(text)
+    if (!Number.isFinite(typed)) {
+        return { value: log_value, text: null }
+    }
+    if (bits == null) {
+        if ((name === "SCHED_LOOP_RATE") && !(typed > 0)) {
+            return { value: log_value, text: step2_value_text(name, log_value) }
+        }
+        return { value: typed, text: null }
+    }
+    let value = Math.trunc(typed)
+    if (bits < 32) {
+        value = mask_unsigned(value, bits)
+    } else if ((value < 0) || (value >= 2**32)) {
+        value = log_value
+    }
+    return { value: value, text: step2_value_text(name, value) }
+}
+
+// Размер маски поля формы в битах для step2_field_value: HMNCS — по логу и версии фильтра (step2_harmonics_bits),
+// прочие маски — 32, не маска — null
+function step2_field_bits(name) {
+    return is_bitmask_param(name) ? (name.endsWith("_HMNCS") ? step2_harmonics_bits() : 32) : null
+}
+
+// Приведение полей формы к допустимым значениям (step2_field_value): приведённый текст записывается в поле, чтобы
+// расчёт и файл .param не расходились с тем, что видно в форме. Только из step2_param_read — после правки поля,
+// «Применить вариант», загрузки .param и показа шага; геттер values_from_form поля не трогает (его зовёт и отрисовка —
+// побочный эффект там не место) [ревью исправлений аудита]
+function step2_coerce_form() {
+    const log_values = values_from_log()
+    for (const name of step2_param_names()) {
+        const field = document.getElementById(name)
+        if (field == null) {
+            continue
+        }
+        const result = step2_field_value(name, field.value, log_values[name], step2_field_bits(name))
+        if ((result.text != null) && (result.text !== field.value)) {
+            parameter_set_value(name, result.text)
+        }
+    }
+}
+
+// Значения формы: объект имя → число float32, маски — целые. Каждое поле читается приведённым к допустимому
+// значению (step2_field_value) — тем же, что step2_coerce_form записывает в поле; сама функция чистая, поля не
+// меняет. ESCMSK без step2_escmsk_present — 0, как в values_from_log
 function values_from_form() {
     const log_values = values_from_log()
     const values = {}
     for (const name of step2_param_names()) {
         const field = document.getElementById(name)
-        const typed = (field != null) && Number.isFinite(parseFloat(field.value))
-        values[name] = step2_fround_value(name, typed ? parameter_get_value(name) : log_values[name])
+        const result = step2_field_value(name, (field != null) ? field.value : "", log_values[name], step2_field_bits(name))
+        values[name] = step2_fround_value(name, result.value)
     }
-    if ((state.env?.filter_version ?? 1) < 4) {
+    if (!step2_escmsk_present()) {
         for (const names of notch_param_names()) {
             values[names.esc_mask] = 0
         }
@@ -499,14 +600,14 @@ function step2_fit() {
 
     const evaluations = {}
     for (const candidate of step2.candidates) {
-        evaluations[candidate.id] = evaluate_candidate(candidate.values, step2.ctx)
+        evaluations[candidate.id] = step2_evaluate(candidate.values, step2.ctx)
     }
     let ranking = rank_candidates(evaluations)
     const best = step2.candidates.find((c) => c.id === ranking.best_id)
     const second = ((best != null) && (evaluations[best.id] != null)) ? second_notch_candidate(best, evaluations[best.id], step2.analysis.peaks) : null
     if (second != null) {
         step2.candidates.push(second)
-        evaluations[second.id] = evaluate_candidate(second.values, step2.ctx)
+        evaluations[second.id] = step2_evaluate(second.values, step2.ctx)
         ranking = rank_candidates(evaluations)
     }
     step2.evaluations = evaluations
@@ -536,14 +637,19 @@ function step2_set_current(values) {
     step2.current = { values: values, key: step2_key(values), filters: null, tracking: null, filter_version: null, H: {} }
 }
 
-// Фильтры посчитанных значений: пересоздаются, если сменились источники трекинга или версия фильтра
+// Фильтры посчитанных значений (срез INS_GYRO_FILTER ограничен, как в прошивке, — step2_model_values; предупреждение
+// об этом — в filters.warnings): пересоздаются, если сменились источники трекинга или версия фильтра
 function step2_current() {
     const current = step2.current
     if (current == null) {
         return null
     }
     if ((current.filters == null) || (current.tracking !== state.tracking) || (current.filter_version !== state.env.filter_version)) {
-        current.filters = load_filters(current.values, state.env, state.tracking)
+        const model = step2_model_values(current.values, step2_sample_rate())
+        current.filters = load_filters(model.values, state.env, state.tracking)
+        if (model.warning != null) {
+            current.filters.warnings.push(model.warning)
+        }
         current.tracking = state.tracking
         current.filter_version = state.env.filter_version
         current.H = {}
@@ -592,19 +698,20 @@ function step2_gyro_view(index, H, bode_H) {
     return view
 }
 
-// Метрики посчитанных значений формы против лога для текущего интервала: { current, log } — evaluate_candidate.
-// Пока варианты не устарели, оценка лога (и совпадающего варианта) берётся из таблицы. null без данных «до»
+// Метрики посчитанных значений формы против лога для текущего интервала: { current, log } — step2_evaluate
+// (evaluate_candidate с ограниченным срезом INS_GYRO_FILTER). Пока варианты не устарели, оценка лога (и совпадающего
+// варианта) берётся из таблицы. null без данных «до»
 function step2_metrics(values) {
     if (step2_stale() || (step2.ctx == null) || (step2.evaluations == null)) {
         const ctx = step2_make_ctx(step1_peaks())
         if (ctx == null) {
             return null
         }
-        return { current: evaluate_candidate(values, ctx), log: evaluate_candidate(values_from_log(), ctx) }
+        return { current: step2_evaluate(values, ctx), log: step2_evaluate(values_from_log(), ctx) }
     }
     const key = step2_key(values)
     const row = step2_rows().find((r) => (r.evaluation != null) && (step2_key(r.values) === key))
-    return { current: row ? row.evaluation : evaluate_candidate(values, step2.ctx), log: step2.evaluations.log }
+    return { current: row ? row.evaluation : step2_evaluate(values, step2.ctx), log: step2.evaluations.log }
 }
 
 // ---------- Действия ----------
@@ -664,7 +771,7 @@ function step2_apply() {
 
 // «Пересчитать фильтры» после правки формы: строка «Текущий (из формы)» в таблице вариантов (заменяет прежнюю),
 // графики и метрики по значениям формы. Устаревшие варианты сначала подбираются заново, чтобы строки сравнивались
-// на одном интервале
+// на одном интервале; выбранная строка при этом остаётся выбранной, если такая есть и среди новых (иначе — рекомендованная)
 function step2_recalc() {
     step_run(() => {
         step2.error = step_ensure_step1()
@@ -672,7 +779,9 @@ function step2_recalc() {
             step2_redraw_all()
             return
         }
-        if ((step2.candidates == null) || step2_stale()) {
+        const selected = step2.selected_id
+        const refit = (step2.candidates == null) || step2_stale()
+        if (refit) {
             step2_fit()
         }
         const values = values_from_form()
@@ -680,53 +789,61 @@ function step2_recalc() {
         const match = step2_match(values)
         step2.current_row = null
         if ((step2.ctx != null) && (step2.evaluations?.log != null)) {
-            const evaluation = evaluate_candidate(values, step2.ctx)
+            const evaluation = step2_evaluate(values, step2.ctx)
             const flags = rank_candidates({ log: step2.evaluations.log, current: evaluation }).flags.current
             const title = "Текущий (из формы)" + ((match != null) ? " = " + match.title : "")
             step2.current_row = { id: "current", title: title, values: values, evaluation: evaluation, flags: flags }
+        }
+        if (refit && (selected != null) && step2_rows().some((r) => r.id === selected)) {
+            step2.selected_id = selected
         }
         step2_param_read()
         step2_redraw_all()
     }, "verdict2", "шага 2")
 }
 
-// Подсказка про второй notch: в логе он выключен, а в значениях включён — на аппарате остальные INS_HNTC2_*
-// появляются только после записи INS_HNTC2_ENABLE = 1 и обновления списка параметров; null — подсказка не нужна.
-// Проверка и текст — из ядра (summary_notch_enabling, summary_notch_enable_hint): тот же пункт есть в «что
-// перелететь» сводки
-function step2_second_notch_hint(values) {
-    const enable = notch_param_names()[1].enable
-    const log = state.params.get(enable)
-    if (!summary_notch_enabling(log, values[enable])) {
-        return null
+// Подсказки про включаемые notch: в логе notch выключен (или его ENABLE не записан), а в значениях включён — на
+// аппарате остальные параметры этого notch появляются только после записи ENABLE = 1 и обновления списка параметров.
+// По одной на каждый такой notch (первый и второй), пустой массив — подсказки не нужны. Проверка и текст — из ядра
+// (summary_notch_enabling, summary_notch_enable_hint): тот же пункт есть в «что перелететь» сводки
+function step2_notch_enable_hints(values) {
+    const hints = []
+    for (const names of notch_param_names()) {
+        const log = state.params.get(names.enable)
+        if (summary_notch_enabling(log, values[names.enable])) {
+            hints.push(summary_notch_enable_hint(names.enable, log))
+        }
     }
-    return summary_notch_enable_hint(enable, log)
+    return hints
 }
 
-// «Сохранить .param»: параметры INS_* формы (как save_parameters FilterReview); ESCMSK — только с версии
-// фильтра 4: у прошивок ниже его нет, а 0 вместо настоящей маски сменил бы набор моторов. 8-битная маска HMNCS
-// (прошивки без INS_RAW_LOG_OPT и с версией фильтра ниже 3) со старшим битом пишется со знаком (−128…127):
-// так её хранит прошивка и так пишет FilterReview
+// «Сохранить .param»: параметры INS_* формы (как save_parameters FilterReview); ESCMSK — только когда он есть у
+// аппарата (step2_escmsk_present): у прошивок без него 0 вместо настоящей маски сменил бы набор моторов. 8-битная
+// маска HMNCS (прошивки без INS_RAW_LOG_OPT и с версией фильтра ниже 3) со старшим битом пишется со знаком
+// (−128…127): так её хранит прошивка и так пишет FilterReview. Маски пишет param_file_text через param_to_string
+// (float32): 32-битная маска с битом 31 и младшими битами в нём не представима — как и в самой прошивке (AP_Param
+// хранит значения во float32), поэтому так и остаётся
 function step2_save_param() {
     const values = values_from_form()
     const names = notch_param_names()
     const esc_masks = names.map((n) => n.esc_mask)
     const harmonics = names.map((n) => n.harmonics)
     const bits = step2_harmonics_bits()
+    const escmsk_present = step2_escmsk_present()
     const out = {}
     for (const name of step2_param_names()) {
         if (!name.startsWith("INS_")) {
             continue
         }
-        if (esc_masks.includes(name) && ((state.env?.filter_version ?? 1) < 4)) {
+        if (esc_masks.includes(name) && !escmsk_present) {
             continue
         }
         out[name] = harmonics.includes(name) ? mask_signed(values[name], bits) : values[name]
     }
     saveAs(new Blob([param_file_text(out)], { type: "text/plain;charset=utf-8" }), "notch.param")
-    const hint = step2_second_notch_hint(values)
+    const hints = step2_notch_enable_hints(values)
     const note = document.getElementById("notch_file_note")
-    note.textContent = "Файл notch.param сохранён: параметров " + Object.keys(out).length + "." + ((hint != null) ? " " + hint : "")
+    note.textContent = "Файл notch.param сохранён: параметров " + Object.keys(out).length + "." + ((hints.length > 0) ? " " + hints.join(" ") : "")
     note.hidden = false
 }
 
@@ -747,11 +864,30 @@ async function step2_load_param(input) {
         return
     }
     const names = step2_param_names().filter((name) => name in parsed)
+    // Список значений из метаданных (select) не принимает значение вне списка: поле стало бы пустым, а расчёт молча
+    // взял бы значение из лога. Такие значения пропускаются — поле остаётся прежним, имена и значения — в заметке
+    const before = Object.fromEntries(names.map((name) => [name, document.getElementById(name)?.value ?? null]))
     step2_set_form_values(Object.fromEntries(names.map((name) => [name, parsed[name]])))
-    note.textContent = (names.length > 0) ? "Из файла «" + file.name + "» взято параметров формы: " + names.length + " из " + step2_param_names().length + "."
-                                          : "В файле «" + file.name + "» нет параметров формы — значения не изменились."
+    const skipped = names.filter((name) => {
+        const field = document.getElementById(name)
+        return (field != null) && (field.tagName === "SELECT") && (field.value === "")
+    })
+    for (const name of skipped) {
+        parameter_set_value(name, before[name])
+    }
+    const taken = names.length - skipped.length
+    const parts = []
+    if (names.length == 0) {
+        parts.push("В файле «" + file.name + "» нет параметров формы — значения не изменились.")
+    } else if (taken > 0) {
+        parts.push("Из файла «" + file.name + "» взято параметров формы: " + taken + " из " + step2_param_names().length + ".")
+    }
+    if (skipped.length > 0) {
+        parts.push("Пропущены значения вне списка (поля не изменились): " + skipped.map((name) => name + " = " + param_to_string(parsed[name])).join(", ") + ".")
+    }
+    note.textContent = parts.join(" ")
     note.hidden = false
-    if (names.length > 0) {
+    if (taken > 0) {
         step2_param_read()
         step2_recalc()
     }
@@ -863,12 +999,13 @@ function step2_default_selection() {
     document.getElementById("sg2_est").disabled = !gyro.have_pre
     document.getElementById(gyro.have_pre ? "sg2_est" : "sg2_post").checked = true
 
-    // Спектр: до и оценка видны, записанное «после» — в легенде (оно от параметров лога, а не формы)
+    // Спектр: до и оценка видны, записанное «после» — в легенде (оно от параметров лога, а не формы); у лога без
+    // данных «до» записанное «после» — единственная трасса, и она видна
     const data = plot("Spectrum2").data
     for (let a = 0; a < SPEC_AXES.length; a++) {
         data[spec2_trace_index(0, a)].visible = true
         data[spec2_trace_index(1, a)].visible = true
-        data[spec2_trace_index(2, a)].visible = "legendonly"
+        data[spec2_trace_index(2, a)].visible = gyro.have_pre ? "legendonly" : true
     }
 }
 
@@ -938,17 +1075,18 @@ function step2_peak(evaluation, column) {
     return evaluation.peaks.find((p) => (p.freq === column.freq) && ((p.source === "post") === (column.source === "post"))) ?? null
 }
 
-// Пояснение под названием строки: у второго notch — измеренная ширина пика и BW из неё
+// Пояснение под названием строки: у второго notch — измеренная ширина пика и BW из неё; у варианта, включающего
+// notch, выключенный в логе, — подсказка про запись ENABLE = 1 на аппарате (step2_notch_enable_hints)
 function step2_row_note(row) {
+    const parts = []
     const width = row.peak?.width
-    if ((width == null) || !Number.isFinite(width.width_hz)) {
-        return ""
+    if ((width != null) && Number.isFinite(width.width_hz)) {
+        const bandwidth = row.values[notch_param_names()[1].bandwidth]
+        parts.push("пик " + row.peak.freq.toFixed(1) + " Гц выше шума на " + row.peak.excess_dB.toFixed(1) + " дБ (ось " + row.peak.axis +
+                   "), ширина пика " + width.width_hz.toFixed(1) + " Гц → BW " + param_to_string(bandwidth) + " Гц")
     }
-    const bandwidth = row.values[notch_param_names()[1].bandwidth]
-    const hint = step2_second_notch_hint(row.values)
-    return '<small>' + html_escape("пик " + row.peak.freq.toFixed(1) + " Гц выше шума на " + row.peak.excess_dB.toFixed(1) + " дБ (ось " + row.peak.axis +
-        "), ширина пика " + width.width_hz.toFixed(1) + " Гц → BW " + param_to_string(bandwidth) + " Гц") + '</small>' +
-        ((hint != null) ? '<small>' + html_escape(hint) + '</small>' : "")
+    parts.push(...step2_notch_enable_hints(row.values))
+    return parts.map((text) => '<small>' + html_escape(text) + '</small>').join("")
 }
 
 // Почему вариант не рекомендован: отметки ранжирования, иначе — полоса не лучше рекомендованного.
@@ -995,6 +1133,10 @@ function step2_render_candidates() {
     const columns = log.peaks
     const with_f2 = log.band_f2_dB != null
     const best_id = step2.ranking.best_id
+    // Опора «как в логе» не смоделирована (step2_log_unmodeled) — пометки «рекомендуется» нет: сравнение недостоверно.
+    // Допуск задержки не применялся (lag_gate_applies: notch лога не работает) — ячейки задержки не красятся «хуже»
+    const unmodeled = step2_log_unmodeled(log) != null
+    const lag_gate = step2.ranking.lag_gate !== false
 
     // Две строки заголовка: над столбцами пиков — общая подпись, остальные столбцы — на обе строки
     let head = '<tr><th rowspan="2"></th><th rowspan="2">Вариант</th><th rowspan="2">FREQ/BW/ATT/HMNCS/OPTS</th>' +
@@ -1019,7 +1161,7 @@ function step2_render_candidates() {
     for (const row of rows) {
         const e = row.evaluation
         const id_attr = html_escape("cand2_" + row.id)
-        body += '<tr' + ((row.id === best_id) ? ' class="recommended"' : '') + '>'
+        body += '<tr' + (((row.id === best_id) && !unmodeled) ? ' class="recommended"' : '') + '>'
         body += '<td><input type="radio" name="cand2" id="' + id_attr + '" value="' + html_escape(row.id) + '"' + ((row.id === selected) ? ' checked' : '') + '></td>'
         body += '<td><label for="' + id_attr + '">' + html_escape(row.title) + '</label>' + step2_row_note(row) + '</td>'
         body += '<td class="num">' + step2_short_values(row.values).map(html_escape).join('<br>') + '</td>'
@@ -1040,11 +1182,15 @@ function step2_render_candidates() {
         }
         for (const freq of lag_freqs) {
             const delta = is_log ? null : e.lag_ms[freq] - log.lag_ms[freq]
-            // Допуск задержки — только на старшей частоте, как в rank_candidates
-            body += step2_delta_cell(e.lag_ms[freq], delta, 2, (freq === lag_hz) ? rules.max_lag_increase_ms : Infinity, 0.005)
+            // Допуск задержки — только на старшей частоте и только пока применяется, как в rank_candidates
+            body += step2_delta_cell(e.lag_ms[freq], delta, 2, ((freq === lag_hz) && lag_gate) ? rules.max_lag_increase_ms : Infinity, 0.005)
         }
         let verdict
-        if (row.id === best_id) {
+        if (unmodeled) {
+            verdict = is_log ? "текущие настройки — notch лога не смоделирован"
+                             : ((row.id === best_id) ? "лучший по полосе, но опора «как в логе» не смоделирована — сравнение недостоверно"
+                                                     : html_escape(step2_reason(row, log)))
+        } else if (row.id === best_id) {
             verdict = '<span class="tag">рекомендуется</span>'
         } else if (is_log) {
             verdict = "текущие настройки"
@@ -1061,7 +1207,8 @@ function step2_render_candidates() {
         "для настроек лога (столбцы «пик «после» лога»), в мелкой строке — разница с логом. Полоса — средняя по бинам мощность X+Y+Z" +
         (with_f2 ? "; полоса с весом f² — та же мощность с весом (f / " + rules.f2_ref_hz + " Гц)², для справки, в выборе не участвует" : "") + ". Задержка — фазовая задержка всей цепочки фильтров. " +
         "Зелёный — лучше лога, красный — хуже больше допуска (пик +" + rules.max_peak_worsening_dB + " дБ, задержка на " + lag_hz + " Гц +" + rules.max_lag_increase_ms +
-        " мс). Гироскоп " + ((state.gyro.primary ?? state.gyro.first_gyro) + 1) + " до фильтров, интервал " + JSON.parse(step2.key).slice(0, 2).join("–") + " с."
+        " мс). Гироскоп " + ((state.gyro.primary ?? state.gyro.first_gyro) + 1) + " до фильтров, интервал " + JSON.parse(step2.key).slice(0, 2).join("–") + " с." +
+        (lag_gate ? "" : " Notch лога не работает: допуск задержки не применяется, задержки показаны к логу без notch.")
     note.hidden = false
 }
 
@@ -1155,7 +1302,8 @@ function step2_render_metrics() {
     }
     for (const freq of rules.lag_freqs_hz) {
         const delta = cur.lag_ms[freq] - log.lag_ms[freq]
-        const mod = ((freq === lag_hz) && (delta > rules.max_lag_increase_ms)) ? "bad" : null
+        // Допуск задержки — пока применяется (lag_gate_applies), как в rank_candidates
+        const mod = ((freq === lag_hz) && lag_gate_applies(log) && (delta > rules.max_lag_increase_ms)) ? "bad" : null
         tiles.push(step_tile("Задержка на " + freq + " Гц", cur.lag_ms[freq].toFixed(2) + " мс", "к логу " + step_signed(delta, 2) + " мс", mod))
     }
     box.innerHTML = tiles.join("")
@@ -1166,9 +1314,11 @@ function step2_render_metrics() {
     warnings_box.hidden = warnings.length == 0
 }
 
-// Вердикт: принятые значения (всегда первыми); без данных «до» — предупреждение; рекомендация или «менять
-// не нужно» с причинами по отвергнутым вариантам; неудача автоподбора — приставкой к обычному тексту. Под ним — строка
-// сравнения с прошлым проходом (memory_show, steps/memory.js): при любом исходе вердикта
+// Вердикт: принятые значения (всегда первыми; приняты значения лога, а рекомендовался другой вариант — он назван);
+// без данных «до» — предупреждение; notch лога включён, но не смоделирован — предупреждение без рекомендации;
+// рекомендация или «менять не нужно», в обоих случаях с причинами по отвергнутым вариантам; неудача автоподбора —
+// приставкой к обычному тексту. Под ним — строка сравнения с прошлым проходом (memory_show, steps/memory.js): при
+// любом исходе вердикта
 function step2_render_verdict() {
     memory_show(2)
     const accepted = state.steps[2]
@@ -1182,6 +1332,11 @@ function step2_render_verdict() {
         const match = step2_match(accepted.accepted)
         const metrics = accepted.metrics
         const name = (match != null) ? "«" + match.title + "»" : "значения формы"
+        // Приняты значения лога, а рекомендовался другой вариант («Принять» без «Применить вариант» — ловушка первого
+        // прохода) — назвать его
+        const best = ((accepted.candidate_id === "log") && !step2_stale() && (step2.ranking?.best_id != null) && (step2.ranking.best_id !== "log"))
+                   ? step2.candidates.find((c) => c.id === step2.ranking.best_id) : null
+        const advice = (best != null) ? "; рекомендовался «" + best.title + "»" : ""
         let tail = ""
         if (metrics != null) {
             const lag_hz = candidate_rules.lag_freqs_hz[candidate_rules.lag_freqs_hz.length - 1]
@@ -1192,7 +1347,7 @@ function step2_render_verdict() {
         if (step2_flagged(accepted.flags)) {
             step_verdict("verdict2", "warn", "Принято, но хуже лога: " + step2_accepted_flags_text(accepted) + ". " + name + tail + ".")
         } else {
-            step_verdict("verdict2", "ok", "Принято: " + name + tail + ".")
+            step_verdict("verdict2", "ok", "Принято: " + name + tail + advice + ".")
         }
         return
     }
@@ -1211,6 +1366,15 @@ function step2_render_verdict() {
         step_verdict("verdict2", "fail", "Сравнение вариантов не выбрало ни одного варианта." + stale)
         return
     }
+    // Notch лога включён, но не смоделирован (режим неизвестен или у источника трекинга нет данных): опора «как в логе»
+    // посчитана без него, и сравнение с ней ничего не значит — без рекомендации, таблица остаётся для справки
+    // [наше, аудит 28.10.2026]
+    const unmodeled = step2_log_unmodeled(step2.evaluations.log)
+    if (unmodeled != null) {
+        step_verdict("verdict2", "warn", "Опору «как в логе» смоделировать нельзя: " + unmodeled + ". Сравнение вариантов недостоверно — " +
+            "проверьте режим notch и данные лога; таблица ниже только для справки." + stale)
+        return
+    }
     // Оценка лога неполная — rank_candidates отмечает все остальные варианты incomplete, рекомендуется лог
     const others = step2_rows().filter((r) => (r.id !== "log") && (r.id !== "current"))
     if ((others.length > 0) && others.every((r) => r.flags?.incomplete)) {
@@ -1227,10 +1391,11 @@ function step2_render_verdict() {
         return
     }
     const log = step2.evaluations.log
+    const lag_gate = step2.ranking.lag_gate !== false
     if (best_id === "log") {
         const reasons = others.filter((r) => r.evaluation != null).map((r) => r.title + ": " + step2_reason(r, log))
         step_verdict("verdict2", fit_failed ? "warn" : "ok", fit_prefix + "Текущие настройки лучше " + (fit_failed ? "других вариантов" : "вариантов автоподбора") +
-            " с учётом задержки; менять notch не нужно." + ((reasons.length > 0) ? " " + reasons.join(". ") + "." : "") + stale)
+            (lag_gate ? " с учётом задержки" : "") + "; менять notch не нужно." + ((reasons.length > 0) ? " " + reasons.join(". ") + "." : "") + stale)
         return
     }
     const best = step2.candidates.find((c) => c.id === best_id)
@@ -1245,11 +1410,17 @@ function step2_render_verdict() {
             biggest = { freq: peak.freq, delta: delta }
         }
     }
+    // Задержка — к логу; если notch лога не работает, опора — лог без notch, и допуск задержки не применялся
+    // (lag_gate_applies) — так и сказано
+    const lag_text = "задержка на " + lag_hz + " Гц " + step_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс" +
+        (lag_gate ? "" : " к логу без работающего notch (допуск +" + candidate_rules.max_lag_increase_ms + " мс не применялся)")
+    // Причины по остальным вариантам — всегда, чтобы было видно, за что отвергнут автоподбор (задержка или пик)
+    const rejected = others.filter((r) => (r.id !== best_id) && (r.evaluation != null)).map((r) => r.title + ": " + step2_reason(r, log))
     const selected = radio_value("cand2") === best_id
     step_verdict("verdict2", fit_failed ? "warn" : "ok", fit_prefix + "Рекомендуется «" + best.title + "»: " +
         ((biggest != null) ? biggest.freq.toFixed(1) + " Гц " + step_signed(biggest.delta, 1) + " дБ, " : "") +
-        "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step_signed(e.band_dB - log.band_dB, 2) +
-        " дБ к логу, задержка на " + lag_hz + " Гц " + step_signed(e.lag_ms[lag_hz] - log.lag_ms[lag_hz], 2) + " мс. " +
+        "полоса " + candidate_rules.band_hz.join("–") + " Гц " + step_signed(e.band_dB - log.band_dB, 2) + " дБ к логу, " + lag_text + ". " +
+        ((rejected.length > 0) ? "Остальные — " + rejected.join(". ") + ". " : "") +
         (selected ? "Он выбран — нажмите «Применить вариант», затем «Принять»." : "Выберите его в таблице и нажмите «Применить вариант», затем «Принять».") + stale)
 }
 
@@ -1257,6 +1428,25 @@ function step2_render_verdict() {
 // задержка сверх допуска; flags null — сравнения не было, отметок нет. Вердикт шага 2 и сводка шага 5
 function step2_flagged(flags) {
     return (flags != null) && (flags.incomplete || (flags.worse_peaks.length > 0) || flags.lag_over)
+}
+
+// Почему notch лога не смоделирован: у оценки «как в логе» log (evaluate_candidate: values, notch_enabled, notch_warnings)
+// есть notch с ENABLE > 0, который не работает (режим неизвестен или у источника трекинга нет данных — тогда фильтр
+// посчитан без него). Текст — предупреждения таких notch через «; », null — все включённые notch лога смоделированы
+// или оценки нет. Предупреждения источников трекинга (filters.warnings) сюда не входят: они не про notch лога
+function step2_log_unmodeled(log) {
+    if ((log == null) || !Array.isArray(log.notch_enabled)) {
+        return null
+    }
+    const names = notch_param_names()
+    const reasons = []
+    for (let i = 0; i < names.length; i++) {
+        if ((log.values?.[names[i].enable] > 0) && !log.notch_enabled[i]) {
+            const warnings = [...new Set(log.notch_warnings?.[i] ?? [])]
+            reasons.push((warnings.length > 0) ? warnings.join("; ") : "notch " + (i + 1) + " включён, но не смоделирован")
+        }
+    }
+    return (reasons.length > 0) ? reasons.join("; ") : null
 }
 
 // Отметки принятого набора против лога словами (сохранены в state.steps[2].flags; пики — из сводки метрик)
@@ -1318,9 +1508,9 @@ function redraw_spectrum2() {
         fill(2, post, mean_spectrum(gyro[post].FFT, amp, range, alias), alias)
     }
     // Трассы без данных — вне легенды; с данными — видимость, выбранная пользователем (после очистки — только
-    // в легенде, на графике скрыта)
+    // в легенде, на графике скрыта; у лога без данных «до» записанное «после» — единственная трасса, она видна)
     for (const trace of p.data) {
-        plot_trace_visibility(trace, "legendonly")
+        plot_trace_visibility(trace, (!gyro.have_pre && (trace.legendgroup === "post")) ? true : "legendonly")
     }
 
     // Линии notch: на логарифмической оси неположительные частоты не рисуются

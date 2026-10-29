@@ -4,6 +4,8 @@
 // поэтому не нужна); get_filter_version() → this.env.filter_version; alert → this.warnings.push;
 // no_data_error возвращает текст; TimeUS_to_seconds → us_to_s.
 // Исправлен дефект upstream 4 (задача 8): без RATE и CTUN источник остаётся режимом 1 без данных.
+// Отличие от upstream (аудит, I2): выход мотора в отсутствующем сообщении (RCO2/RCO3) — «нет данных по моторам»,
+// а не исключение.
 class ThrottleTarget extends NotchTarget {
     constructor(log, env) {
         const build_type = env.build_type
@@ -251,9 +253,17 @@ class ThrottleTarget extends NotchTarget {
             const log_name = get_log_msg_name(channel)
             const field_name = "C" + (channel + 1)
             const PWM = log.get(log_name, field_name)
-            const len = PWM.length
-
             const time = log.get(log_name, "TimeUS")
+            if ((PWM == null) || (time == null)) {
+                // Выход мотора в сообщении, которого в логе нет (моторы на каналах 15–18 без RCO2, 19–32 без RCO3) или
+                // без строк: parser.get возвращает undefined, и upstream падал на PWM.length — исключение рушило
+                // всю подготовку трекинга (аудит, I2). Газ по моторам нужен для всех моторов сразу, поэтому уже
+                // собранные ряды убираются: источник остаётся без данных по моторам
+                console.log("No " + log_name + "." + field_name + " logging for motor function " + motor)
+                this.data.length = 0
+                return
+            }
+            const len = PWM.length
 
             // Интерполируем поправки батареи и барометра ко времени PWM
             const density_correction = linear_interp(air_density_correction, baro_time, time)

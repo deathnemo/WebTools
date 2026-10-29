@@ -46,10 +46,11 @@ globalThis.step2_param_names = () => ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...n
 globalThis.step4_param_names = () => Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
 
 // В порядке index.html: core/summary.js и то, что ему нужно (Param_Helpers.js, filters.js, pid.js и pidtune.js,
-// params.js), lowpass.js (ему при загрузке — candidates.js), затем общий модуль шагов
+// params.js), lowpass.js (ему при загрузке — candidates.js), core/passmem.js (passmem_depends4_names — список имён,
+// от которых зависит шаг 4, у страницы и памяти один), затем общий модуль шагов
 for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',
                     'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
-                    'TuneWizard/steps/common.js']) {
+                    'TuneWizard/core/passmem.js', 'TuneWizard/steps/common.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
 }
@@ -390,8 +391,10 @@ test('step_inputs_key, step_accepted_stale: отпечаток из состоя
     assert.equal(ctx.params, state.params)
     assert.deepEqual([ctx.start, ctx.end, ctx.fft_key], [10, 100, 'batch:1'])
     // Имена, от которых зависит шаг 4, — только у шага 4: поля обоих notch, INS_GYRO_FILTER, FLTE и FLTD трёх осей; без
-    // SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER, пределов ускорения и коэффициентов
+    // SCHED_LOOP_RATE, FLTT, INS_ACCEL_FILTER, пределов ускорения и коэффициентов. Список — один с памятью прохода
+    // (passmem_depends4_names)
     assert.deepEqual(Object.keys(ctx.depends), ['4'])
+    assert.deepEqual(ctx.depends[4], passmem_depends4_names(), 'depends[4] — список ядра памяти прохода')
     assert.deepEqual([...ctx.depends[4]].sort(), [...notch_param_names().flatMap((notch) => Object.values(notch)), 'INS_GYRO_FILTER',
         'ATC_RAT_RLL_FLTE', 'ATC_RAT_RLL_FLTD', 'ATC_RAT_PIT_FLTE', 'ATC_RAT_PIT_FLTD', 'ATC_RAT_YAW_FLTE', 'ATC_RAT_YAW_FLTD'].sort())
     for (const name of ['SCHED_LOOP_RATE', 'ATC_RAT_RLL_FLTT', 'INS_ACCEL_FILTER', 'ATC_ACCEL_R_MAX', 'ATC_ACC_R_MAX', 'ATC_RAT_RLL_P']) {

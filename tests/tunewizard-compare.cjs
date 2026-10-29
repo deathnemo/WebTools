@@ -30,6 +30,10 @@
 // Δ = (окно/2)·(новый период − старый) (при одном окне на пакет). У raw-лога окон в пакете много и сдвиг времени
 // у них разный — эти массивы только в отчёте. Без действующих дефектов всё должно совпадать с upstream; при других
 // сочетаниях — только отчёт (точность обеспечивает сравнение с эталоном).
+// Намеренное отличие от FilterReview, не связанное с дефектами: INS_*_ESCMSK, записанный в лог при версии фильтра ниже 4,
+// мастер берёт из лога (escmsk_present в core/params.js), а FilterReview при такой версии обнуляет (update_hidden_params) —
+// notch по ESC с ненулевой маской у него считается по всем моторам. Если это так на логе (escmsk_log), оценка «после»
+// и бодэ с обоими FilterReview сравниваются только в отчёте.
 // Нужны те же лог, браузер и python, что для tests/tunewizard-browser.cjs; без лога тест пропускается.
 // Логика правил (upstream_plan, check_upstream) без браузера проверяется в tests/tunewizard-compare-rules.test.cjs.
 const assert = require('node:assert/strict')
@@ -59,7 +63,9 @@ function find_log() {
     if (!fs.existsSync(logs_dir)) {
         return null
     }
-    const bin = fs.readdirSync(logs_dir).find((name) => name.toLowerCase().endsWith('.bin'))
+    // В TuneWizard/logs/ рядом с тестовым логом лежит второй (другой аппарат), по алфавиту он первый — тестовый предпочтительнее
+    const names = fs.readdirSync(logs_dir).filter((name) => name.toLowerCase().endsWith('.bin'))
+    const bin = names.includes('2026-06-18 18-54-42_anon.bin') ? '2026-06-18 18-54-42_anon.bin' : names[0]
     return bin ? path.join(logs_dir, bin) : null
 }
 
@@ -264,7 +270,7 @@ function wizard_trace_name(sensor, type, axis) {
 }
 
 // Поэлементное сравнение снимков FilterReview и мастера одной конфигурации; label — подпись конфигурации
-function compare_snapshots(label, fr_snap, wz_snap, sensor) {
+function compare_snapshots(label, fr_snap, wz_snap, sensor, escmsk_log = false) {
     const results = []
     for (let t = 0; t < 3; t++) {
         for (let a = 0; a < 3; a++) {
@@ -272,6 +278,11 @@ function compare_snapshots(label, fr_snap, wz_snap, sensor) {
             const name = wizard_trace_name(sensor, t, a)
             if ((fr_trace.y == null) || (fr_trace.y.length == 0)) {
                 console.log('  ' + label + ': пропуск ' + name + ' — в FilterReview нет данных (' + FR_TYPES[t] + ' ' + AXES[a] + ')')
+                continue
+            }
+            if (escmsk_log && (t == 2)) {
+                // Оценка «после» считана с маской ESCMSK из лога, у FilterReview маска обнулена — намеренное отличие, в отчёте
+                console.log('  ' + label + ': пропуск ' + name + ' — ESCMSK из лога при версии фильтра ниже 4 (намеренное отличие, см. отчёт)')
                 continue
             }
             const wz_trace = wz_snap.traces[name]
@@ -437,14 +448,16 @@ function check_upstream(item) {
 }
 
 // План сверки с FilterReview как есть — без браузера (его проверяет tests/tunewizard-compare-rules.test.cjs).
-// ctx = { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates }:
+// ctx = { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates, escmsk_log }:
 //   up / fix — результаты run_filterreview для FilterReview как есть и с исправлениями (нужны gyro, snap, bode,
 //   bode_other); settings — настройки, с которыми считали оба инструмента; wz_* — снимки мастера и средние частоты
-//   его экземпляров до/после фильтров этого сенсора.
+//   его экземпляров до/после фильтров этого сенсора; escmsk_log (необязательный) — мастер считает notch по ESC с
+//   маской ESCMSK из лога, которую FilterReview обнулил (версия фильтра ниже 4): всё, что зависит от фильтров
+//   (оценка «после», амплитуда и фаза бодэ), — только в отчёте, независимо от дефектов.
 // Возвращает { active, reasons, checks, items }: действующие исправления, их описание, проверки средних частот
 // ({ ok, line }) и массивы с правилами для check_upstream
 function upstream_plan(ctx) {
-    const { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates } = ctx
+    const { up, fix, sensor, settings, wz_snap, wz_step2, wz_step2_other, wz_rates, escmsk_log = false } = ctx
     // Какие исправления действуют на этом логе — по данным самого FilterReview
     const fixed = { pre: (up.gyro.pre != null) ? fixed_rate(up.gyro.pre) : null, post: (up.gyro.post != null) ? fixed_rate(up.gyro.post) : null }
     const defect1 = ['pre', 'post'].some((k) => (fixed[k] != null) && (fixed[k].rate !== up.gyro[k].average_sample_rate))
@@ -485,10 +498,16 @@ function upstream_plan(ctx) {
         grow: 'дефект 1 — сетка бодэ 0…Найквист шагом 0.05 Гц, с тем же началом',
         filters: 'дефект 1 — notch и ФНЧ заданы в герцах, их доля частоты дискретизации другая',
         other: 'дефекты ' + active.join(', ') + ' — проверено точным сравнением с FilterReview с исправлениями',
+        escmsk: 'намеренное отличие — INS_*_ESCMSK при версии фильтра ниже 4 взят из лога, где он записан (escmsk_present); ' +
+                'FilterReview (update_hidden_params) при такой версии маску обнуляет и считает notch по ESC по всем моторам',
     }
-    // Правило массива: без действующих дефектов всё совпадает; только дефект 1 — по виду массива; иначе — отчёт.
+    // Правило массива: маска ESCMSK из лога — всё, что зависит от фильтров, только в отчёте; без действующих дефектов
+    // всё совпадает; только дефект 1 — по виду массива; иначе — отчёт.
     // Сдвиг и «без изменений» — только у batch-лога (у raw-лога время окон сдвигается неравномерно)
     const rule = (kind, k) => {
+        if (escmsk_log && (kind == 'filters')) {
+            return { rule: { kind: 'report' }, reason: why.escmsk }
+        }
         if (active.length == 0) {
             return { rule: { kind: 'same' }, reason: '' }
         }
@@ -656,6 +675,16 @@ async function main() {
         await wz.click('#wizbar button:nth-child(3)')
         await wait_overlay(wz)
         assert.equal(await wz.evaluate(() => candidate_key(values_from_form()) === candidate_key(values_from_log())), true, 'форма шага 2 — значения лога')
+        // Намеренное отличие: включённый notch по ESC (режим 3) с ненулевой маской ESCMSK, записанной в лог при версии фильтра
+        // ниже 4, — мастер считает его по маске (escmsk_present), FilterReview маску обнулил; оценка «после» и бодэ тогда
+        // только в отчёте (upstream_plan с escmsk_log)
+        const escmsk_log = await wz.evaluate(() => (state.env.filter_version < 4) && notch_param_names().some((n) => {
+            const v = values_from_log()
+            return (v[n.enable] > 0) && (v[n.mode] == 3) && (v[n.esc_mask] != 0)
+        }))
+        if (escmsk_log) {
+            console.log('tunewizard-compare: INS_*_ESCMSK записан в лог при версии фильтра ' + wz_fv + ' — мастер берёт маску из лога, FilterReview обнуляет: оценка «после» и бодэ только в отчёте о расхождениях')
+        }
         const set_bode = async (inst, wrap) => {
             if (!(await wz.isChecked('#bode2_inst' + inst))) {
                 await wz.check('#bode2_inst' + inst)
@@ -694,9 +723,13 @@ async function main() {
             assert.ok(results.some((r) => r.count > 0), step2_label + ': нет ни одного сравненного значения')
             return results
         }
-        configs.push([step2_label, null, null])
+        if (escmsk_log) {
+            console.log('tunewizard-compare: ' + step2_label + ' — точное сравнение пропущено: маска ESCMSK из лога (намеренное отличие, см. отчёт)')
+        } else {
+            configs.push([step2_label, null, null])
+        }
         for (const [label, fr_s, wz_s] of configs) {
-            const results = (fr_s == null) ? step2_results() : compare_snapshots(label, fr_s, wz_s, sensor)
+            const results = (fr_s == null) ? step2_results() : compare_snapshots(label, fr_s, wz_s, sensor, escmsk_log)
             const failed = results.filter((r) => !r.ok)
             const count = results.reduce((sum, r) => sum + r.count, 0)
             const max_rel = results.reduce((max, r) => Math.max(max, r.max_rel), 0)
@@ -720,7 +753,7 @@ async function main() {
             // Без своего экземпляра у FilterReview как есть сравнивать нечего: снимки сняты для другого гироскопа
             console.log('tunewizard-compare: FilterReview как есть показывает гироскоп ' + (up.sensor + 1) + ', с исправлениями — ' + (sensor + 1) + '; отчёт о расхождениях с upstream пропущен')
         } else {
-            const plan = upstream_plan({ up, fix, sensor, settings: fr_settings, wz_snap, wz_step2, wz_step2_other, wz_rates })
+            const plan = upstream_plan({ up, fix, sensor, settings: fr_settings, wz_snap, wz_step2, wz_step2_other, wz_rates, escmsk_log })
             const checked = plan.items.map(check_upstream)
             const same = checked.filter((c) => c.ok && c.same)
             const differ = checked.filter((c) => c.ok && !c.same)
