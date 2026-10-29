@@ -542,17 +542,20 @@ async function main() {
             create_tracking = () => { throw new Error('тестовая ошибка трекинга') }
             state.gyro = null
         })
-        await page.click('#spec_recalc')
-        await wait_overlay(page)
-        const broken1 = await page.evaluate(() => ({ verdict: document.getElementById('verdict1').textContent, cls: document.getElementById('verdict1').className,
-                                                      gyro: state.gyro != null, tracking: state.tracking, ready: step1_ready() }))
-        assert.deepEqual([broken1.cls, broken1.gyro, broken1.tracking, broken1.ready], ['verdict verdict--fail', true, null, false], 'ошибка трекинга: гироскоп загружен, трекинга нет')
-        assert.equal(broken1.verdict, 'Не удалось подготовить источники трекинга notch по этому логу: тестовая ошибка трекинга')
-        assert.equal((await step1_summary(page)).with_data, 0, 'при ошибке трекинга графики пусты')
-        const tracking_error = problems.findIndex((text) => text.includes('тестовая ошибка трекинга'))
-        assert.ok(tracking_error >= 0, 'ошибка трекинга записана в консоль: ' + JSON.stringify(problems))
-        problems.splice(tracking_error, 1)
-        await page.evaluate(() => { create_tracking = window.__create_tracking })
+        try {
+            await page.click('#spec_recalc')
+            await wait_overlay(page)
+            const broken1 = await page.evaluate(() => ({ verdict: document.getElementById('verdict1').textContent, cls: document.getElementById('verdict1').className,
+                                                          gyro: state.gyro != null, tracking: state.tracking, ready: step1_ready() }))
+            assert.deepEqual([broken1.cls, broken1.gyro, broken1.tracking, broken1.ready], ['verdict verdict--fail', true, null, false], 'ошибка трекинга: гироскоп загружен, трекинга нет')
+            assert.equal(broken1.verdict, 'Не удалось подготовить источники трекинга notch по этому логу: тестовая ошибка трекинга')
+            assert.equal((await step1_summary(page)).with_data, 0, 'при ошибке трекинга графики пусты')
+            const tracking_error = problems.findIndex((text) => text.includes('тестовая ошибка трекинга'))
+            assert.ok(tracking_error >= 0, 'ошибка трекинга записана в консоль: ' + JSON.stringify(problems))
+            problems.splice(tracking_error, 1)
+        } finally {
+            await page.evaluate(() => { create_tracking = window.__create_tracking })
+        }
         await page.click('#wizbar button:nth-child(1)')
         await page.click('#wizbar button:nth-child(2)')
         await wait_overlay(page)
@@ -672,31 +675,34 @@ async function main() {
             state.params.has = (name) => (name in values) ? true : (missing(name) ? false : orig.has(name))
         }, [values, missing_prefix])
         const restore_params = () => page.evaluate(() => { Object.assign(state.params, window.__params) })
-        await substitute_params({ INS_HNTCH_ENABLE: 0 }, 'INS_HNTCH_')
-        await reshow2()
-        const i1 = await page.evaluate(() => ({ lag_gate: step2.ranking.lag_gate, verdict: document.getElementById('verdict2').textContent,
-                                                 note: document.getElementById('candidates2_note').textContent, enable: document.getElementById('INS_HNTCH_ENABLE').value }))
-        assert.equal(i1.enable, '0', 'подмена: notch лога выключен')
-        assert.equal(i1.lag_gate, false, 'подмена: допуск задержки не применяется')
-        assert.match(i1.verdict, /^Рекомендуется «Автоподбор \(ESC-телеметрия\) \+ второй notch на 153 Гц»/, i1.verdict)
-        assert.match(i1.verdict, /к логу без работающего notch \(допуск \+0\.5 мс не применялся\)/, i1.verdict)
-        assert.ok(i1.note.endsWith('Notch лога не работает: допуск задержки не применяется, задержки показаны к логу без notch.'), i1.note)
-        await restore_params()
-        await substitute_params({ INS_HNTCH_MODE: 2 })
-        await reshow2()
-        const i2 = await step2_summary(page)
-        assert.match(i2.verdict_class, /verdict--warn/, 'подмена: опора не смоделирована — предупреждение')
-        assert.ok(i2.verdict.startsWith('Опору «как в логе» смоделировать нельзя: Нет данных трекинга для notch RPM1.'), i2.verdict)
-        assert.equal(i2.recommended_marks, 0, 'подмена: пометки «рекомендуется» нет')
-        await restore_params()
-        await substitute_params({ INS_HNTCH_ESCMSK: 3 })
-        await reshow2()
-        assert.equal(await page.isVisible('#INS_HNTCH_ESCMSK'), true, 'подмена: ESCMSK записан в лог — поле видно и при версии фильтра ниже 4')
-        assert.equal(await page.inputValue('#INS_HNTCH_ESCMSK'), '3')
-        assert.equal(await page.evaluate(() => values_from_log().INS_HNTCH_ESCMSK), 3, 'значения лога шага 1 — та же маска')
-        const [download_esc] = await Promise.all([page.waitForEvent('download'), page.click('#notch_save')])
-        assert.match(fs.readFileSync(await download_esc.path(), 'utf8'), /^INS_HNTCH_ESCMSK,3$/m, 'в .param — записанная маска')
-        await restore_params()
+        try {
+            await substitute_params({ INS_HNTCH_ENABLE: 0 }, 'INS_HNTCH_')
+            await reshow2()
+            const i1 = await page.evaluate(() => ({ lag_gate: step2.ranking.lag_gate, verdict: document.getElementById('verdict2').textContent,
+                                                     note: document.getElementById('candidates2_note').textContent, enable: document.getElementById('INS_HNTCH_ENABLE').value }))
+            assert.equal(i1.enable, '0', 'подмена: notch лога выключен')
+            assert.equal(i1.lag_gate, false, 'подмена: допуск задержки не применяется')
+            assert.match(i1.verdict, /^Рекомендуется «Автоподбор \(ESC-телеметрия\) \+ второй notch на 153 Гц»/, i1.verdict)
+            assert.match(i1.verdict, /к логу без работающего notch \(допуск \+0\.5 мс не применялся\)/, i1.verdict)
+            assert.ok(i1.note.endsWith('Notch лога не работает: допуск задержки не применяется, задержки показаны к логу без notch.'), i1.note)
+            await restore_params()
+            await substitute_params({ INS_HNTCH_MODE: 2 })
+            await reshow2()
+            const i2 = await step2_summary(page)
+            assert.match(i2.verdict_class, /verdict--warn/, 'подмена: опора не смоделирована — предупреждение')
+            assert.ok(i2.verdict.startsWith('Опору «как в логе» смоделировать нельзя: Нет данных трекинга для notch RPM1.'), i2.verdict)
+            assert.equal(i2.recommended_marks, 0, 'подмена: пометки «рекомендуется» нет')
+            await restore_params()
+            await substitute_params({ INS_HNTCH_ESCMSK: 3 })
+            await reshow2()
+            assert.equal(await page.isVisible('#INS_HNTCH_ESCMSK'), true, 'подмена: ESCMSK записан в лог — поле видно и при версии фильтра ниже 4')
+            assert.equal(await page.inputValue('#INS_HNTCH_ESCMSK'), '3')
+            assert.equal(await page.evaluate(() => values_from_log().INS_HNTCH_ESCMSK), 3, 'значения лога шага 1 — та же маска')
+            const [download_esc] = await Promise.all([page.waitForEvent('download'), page.click('#notch_save')])
+            assert.match(fs.readFileSync(await download_esc.path(), 'utf8'), /^INS_HNTCH_ESCMSK,3$/m, 'в .param — записанная маска')
+        } finally {
+            await restore_params()
+        }
         await reshow2()
         assert.equal(await page.isHidden('#INS_HNTCH_ESCMSK'), true, 'подмена снята — ESCMSK снова скрыт')
         assert.deepEqual((await step2_summary(page)).titles, v1.titles, 'подмены сняты — прежние варианты')
@@ -1248,189 +1254,200 @@ async function main() {
             step4.key = null
             step4_show()
         })
-        await wait_overlay(page)
-        await page.click('#step4_tab_pitch')
-        const sub4 = await step4_summary(page)
-        assert.equal(sub4.status, 'ok', 'подмена: измерение тангажа надёжно')
-        assert.equal(sub4.predict_ok, true, 'подмена: прогноз тангажа достоверен')
-        assert.match(sub4.axis_verdict, /Лог тестового полёта Acro «Rate Loop Only»/, 'подмена: вердикт тангажа — тестовый полёт')
-        assert.ok(sub4.titles.length >= 4, 'подмена: варианты тангажа: ' + sub4.titles.join('; '))
-        assert.equal(sub4.recommended.length, 1, 'подмена: одна строка рекомендуется: ' + sub4.recommended.join('; '))
-        assert.equal(sub4.recommended_marks, 1, 'подмена: одна пометка «рекомендуется»')
-        assert.equal(sub4.quality[2], 'не применяется (Rate Loop Only)', 'подмена: (в) в Rate Loop Only не применяется')
-        const unstable4 = await page.evaluate(() => step4_rows('pitch').filter((r) => ['log', 'p_minus', 'p_plus', 'd_minus', 'd_plus'].includes(r.id))
-            .map((r) => [r.id, r.flags.unstable, r.pred.noncausal]))
-        assert.equal(unstable4.length, 5, 'подмена: «Как в логе», P ±10 % и D ±10 %: ' + JSON.stringify(unstable4))
-        assert.ok(unstable4.every(([, unstable]) => unstable === false), 'подмена: с фильтрами шагов 2–3 нет ложного «прогноз неустойчив»: ' + JSON.stringify(unstable4))
-        const sub_title = (id) => page.evaluate((id) => step4_rows('pitch').find((r) => r.id === id).title, id)
-        const gs1 = await step4_plots(page)
-        assert.equal(gs1.LBode4.with_data, 4, 'подмена: бодэ L — амплитуда и фаза лога и выбранного')
-        assert.equal(gs1.LBode4.xtype, 'log', 'бодэ L — логарифмическая ось частот')
-        assert.ok(gs1.LBode4.min_x >= 0.5 && gs1.LBode4.min_x < 0.6, 'бодэ L — от 0.5 Гц, без 0 Гц: ' + gs1.LBode4.min_x)
-        assert.deepEqual(gs1.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm', 'sel:fc', 'sel:fc', 'sel:pm'], 'подмена: отметки частоты среза и запаса фазы')
-        assert.match(gs1.LBode4.traces[0].name, /^лог · срез [\d.]+ Гц · запас [\d.]+°$/, 'частота среза и запас лога в легенде: ' + gs1.LBode4.traces[0].name)
-        assert.equal(gs1.LBode4.note, null, 'подмена: подписи-причины у бодэ нет')
-        const sel_title = await sub_title(sub4.selected)
-        assert.equal(gs1.StepResp4.traces[4].name, 'прогноз «' + sel_title + '»', 'подмена: на графике отклика — прогноз выбранного варианта')
-        assert.ok(gs1.StepResp4.traces[4].finite > 0, 'подмена: прогноз выбранного варианта с данными')
-        assert.match(gs1.StepResp4.traces[2].name, /^измеренный \(КИХ МНК\)$/, 'подмена: без пометки «ненадёжно»')
-        // Фильтры шагов 2–3 отличаются от лога — прогноз «как в логе» с ними, только в легенде
-        assert.equal(gs1.StepResp4.traces[3].name, 'прогноз «как в логе» (фильтры шагов 2–3)')
-        assert.ok((gs1.StepResp4.traces[3].finite > 0) && (gs1.StepResp4.traces[3].visible === 'legendonly'), 'подмена: прогноз «как в логе» с фильтрами — в легенде с данными')
-        // Выбор другой строки щелчком — прогноз на графиках меняется
-        const other4 = await page.evaluate(() => step4_rows('pitch').find((r) => (r.id !== step4.selected.pitch) && (r.pred?.step != null))?.id ?? null)
-        assert.ok(other4 != null, 'подмена: есть другой устойчивый вариант')
-        await page.check('#cand4_' + other4)
-        const gs2 = await step4_plots(page)
-        const other_title = await sub_title(other4)
-        assert.equal(gs2.StepResp4.traces[4].name, 'прогноз «' + other_title + '»', 'выбор строки — прогноз этой строки на графике отклика')
-        assert.notEqual(gs2.StepResp4.traces[4].sum, gs1.StepResp4.traces[4].sum, 'выбор строки — данные прогноза на графике отклика сменились')
-        assert.equal(gs2.StepResp4.traces[3].sum, gs1.StepResp4.traces[3].sum, 'выбор строки — прогноз «как в логе» прежний')
-        assert.ok(gs2.LBode4.traces[1].name.startsWith('«' + other_title + '» · срез'), 'выбор строки — название на бодэ: ' + gs2.LBode4.traces[1].name)
-        assert.notEqual(gs2.LBode4.traces[1].sum, gs1.LBode4.traces[1].sum, 'выбор строки — данные выбранного на бодэ сменились')
-        assert.equal(gs2.LBode4.traces[0].sum, gs1.LBode4.traces[0].sum, 'выбор строки — бодэ лога прежнее')
-        // Стрелки в таблице меняют выбранную строку, а с ней и графики
-        await page.focus('#cand4_' + other4)
-        await page.keyboard.press('ArrowDown')
-        const arrow4 = await step4_summary(page)
-        assert.notEqual(arrow4.selected, other4, 'стрелка вниз — выбрана другая строка')
-        assert.equal(await page.evaluate(() => step4.selected.pitch), arrow4.selected, 'выбор стрелкой — в step4.selected')
-        assert.notEqual((await step4_plots(page)).LBode4.traces[1].sum, gs2.LBode4.traces[1].sum, 'выбор стрелкой — бодэ выбранного сменилось')
-        // Неустойчивый вариант: «Свой» тангажа P = I = 0.5 (×5 к логу) — линии прогноза на графике отклика нет, причина
-        // в подписи; на бодэ L варианта есть (по ней видно, почему), запас фазы не больше 0
-        await type_into('#pidf_ATC_RAT_PIT_P', '0.5')
-        await type_into('#pidf_ATC_RAT_PIT_I', '0.5')
-        await page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed && (step4.selected.pitch === 'custom') &&
-            (step4_rows('pitch').find((r) => r.id === 'custom')?.values.I === Math.fround(0.5)), null, { timeout: 30000 })
-        const gu = await step4_plots(page)
-        assert.equal(gu.StepResp4.traces[4].n, 0, 'неустойчивый «Свой» — линии прогноза нет')
-        assert.match(gu.StepResp4.note, /Прогноз «Свой»: контур неустойчив \(запас фазы -[\d.]+°\) — линии отклика нет\./, 'причина в подписи: ' + gu.StepResp4.note)
-        assert.ok(gu.LBode4.traces[1].finite > 0, 'неустойчивый «Свой» — L на бодэ есть')
-        assert.match(gu.LBode4.traces[1].name, /^«Свой» · срез [\d.]+ Гц · запас -[\d.]+°$/, 'запас фазы неустойчивого — не больше 0: ' + gu.LBode4.traces[1].name)
-        assert.match(gu.LBode4.note, /^«Свой»: контур неустойчив/, 'причина под бодэ: ' + gu.LBode4.note)
-        // «Свой» тангажа D ×4 (P и I — лога): неустойчив по причинности отклика при запасе первого пересечения больше 0 —
-        // запас недостоверен: в таблице «—», на бодэ без чисел и без отметок выбранного, как в таблице
+        // Варианты и бодэ тангажа под подменой и строка сравнения оси — для итоговой строки прогона (после снятия подмен)
+        let sub_lines = null
+        let line4 = null
+        try {
+            await wait_overlay(page)
+            await page.click('#step4_tab_pitch')
+            const sub4 = await step4_summary(page)
+            assert.equal(sub4.status, 'ok', 'подмена: измерение тангажа надёжно')
+            assert.equal(sub4.predict_ok, true, 'подмена: прогноз тангажа достоверен')
+            assert.match(sub4.axis_verdict, /Лог тестового полёта Acro «Rate Loop Only»/, 'подмена: вердикт тангажа — тестовый полёт')
+            assert.ok(sub4.titles.length >= 4, 'подмена: варианты тангажа: ' + sub4.titles.join('; '))
+            assert.equal(sub4.recommended.length, 1, 'подмена: одна строка рекомендуется: ' + sub4.recommended.join('; '))
+            assert.equal(sub4.recommended_marks, 1, 'подмена: одна пометка «рекомендуется»')
+            assert.equal(sub4.quality[2], 'не применяется (Rate Loop Only)', 'подмена: (в) в Rate Loop Only не применяется')
+            const unstable4 = await page.evaluate(() => step4_rows('pitch').filter((r) => ['log', 'p_minus', 'p_plus', 'd_minus', 'd_plus'].includes(r.id))
+                .map((r) => [r.id, r.flags.unstable, r.pred.noncausal]))
+            assert.equal(unstable4.length, 5, 'подмена: «Как в логе», P ±10 % и D ±10 %: ' + JSON.stringify(unstable4))
+            assert.ok(unstable4.every(([, unstable]) => unstable === false), 'подмена: с фильтрами шагов 2–3 нет ложного «прогноз неустойчив»: ' + JSON.stringify(unstable4))
+            const sub_title = (id) => page.evaluate((id) => step4_rows('pitch').find((r) => r.id === id).title, id)
+            const gs1 = await step4_plots(page)
+            assert.equal(gs1.LBode4.with_data, 4, 'подмена: бодэ L — амплитуда и фаза лога и выбранного')
+            assert.equal(gs1.LBode4.xtype, 'log', 'бодэ L — логарифмическая ось частот')
+            assert.ok(gs1.LBode4.min_x >= 0.5 && gs1.LBode4.min_x < 0.6, 'бодэ L — от 0.5 Гц, без 0 Гц: ' + gs1.LBode4.min_x)
+            assert.deepEqual(gs1.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm', 'sel:fc', 'sel:fc', 'sel:pm'], 'подмена: отметки частоты среза и запаса фазы')
+            assert.match(gs1.LBode4.traces[0].name, /^лог · срез [\d.]+ Гц · запас [\d.]+°$/, 'частота среза и запас лога в легенде: ' + gs1.LBode4.traces[0].name)
+            assert.equal(gs1.LBode4.note, null, 'подмена: подписи-причины у бодэ нет')
+            const sel_title = await sub_title(sub4.selected)
+            assert.equal(gs1.StepResp4.traces[4].name, 'прогноз «' + sel_title + '»', 'подмена: на графике отклика — прогноз выбранного варианта')
+            assert.ok(gs1.StepResp4.traces[4].finite > 0, 'подмена: прогноз выбранного варианта с данными')
+            assert.match(gs1.StepResp4.traces[2].name, /^измеренный \(КИХ МНК\)$/, 'подмена: без пометки «ненадёжно»')
+            // Фильтры шагов 2–3 отличаются от лога — прогноз «как в логе» с ними, только в легенде
+            assert.equal(gs1.StepResp4.traces[3].name, 'прогноз «как в логе» (фильтры шагов 2–3)')
+            assert.ok((gs1.StepResp4.traces[3].finite > 0) && (gs1.StepResp4.traces[3].visible === 'legendonly'), 'подмена: прогноз «как в логе» с фильтрами — в легенде с данными')
+            // Выбор другой строки щелчком — прогноз на графиках меняется
+            const other4 = await page.evaluate(() => step4_rows('pitch').find((r) => (r.id !== step4.selected.pitch) && (r.pred?.step != null))?.id ?? null)
+            assert.ok(other4 != null, 'подмена: есть другой устойчивый вариант')
+            await page.check('#cand4_' + other4)
+            const gs2 = await step4_plots(page)
+            const other_title = await sub_title(other4)
+            assert.equal(gs2.StepResp4.traces[4].name, 'прогноз «' + other_title + '»', 'выбор строки — прогноз этой строки на графике отклика')
+            assert.notEqual(gs2.StepResp4.traces[4].sum, gs1.StepResp4.traces[4].sum, 'выбор строки — данные прогноза на графике отклика сменились')
+            assert.equal(gs2.StepResp4.traces[3].sum, gs1.StepResp4.traces[3].sum, 'выбор строки — прогноз «как в логе» прежний')
+            assert.ok(gs2.LBode4.traces[1].name.startsWith('«' + other_title + '» · срез'), 'выбор строки — название на бодэ: ' + gs2.LBode4.traces[1].name)
+            assert.notEqual(gs2.LBode4.traces[1].sum, gs1.LBode4.traces[1].sum, 'выбор строки — данные выбранного на бодэ сменились')
+            assert.equal(gs2.LBode4.traces[0].sum, gs1.LBode4.traces[0].sum, 'выбор строки — бодэ лога прежнее')
+            // Стрелки в таблице меняют выбранную строку, а с ней и графики
+            await page.focus('#cand4_' + other4)
+            await page.keyboard.press('ArrowDown')
+            const arrow4 = await step4_summary(page)
+            assert.notEqual(arrow4.selected, other4, 'стрелка вниз — выбрана другая строка')
+            assert.equal(await page.evaluate(() => step4.selected.pitch), arrow4.selected, 'выбор стрелкой — в step4.selected')
+            assert.notEqual((await step4_plots(page)).LBode4.traces[1].sum, gs2.LBode4.traces[1].sum, 'выбор стрелкой — бодэ выбранного сменилось')
+            // Неустойчивый вариант: «Свой» тангажа P = I = 0.5 (×5 к логу) — линии прогноза на графике отклика нет, причина
+            // в подписи; на бодэ L варианта есть (по ней видно, почему), запас фазы не больше 0
+            await type_into('#pidf_ATC_RAT_PIT_P', '0.5')
+            await type_into('#pidf_ATC_RAT_PIT_I', '0.5')
+            await page.waitForFunction(() => (step4.edit_timer == null) && !step4.edit_postponed && (step4.selected.pitch === 'custom') &&
+                (step4_rows('pitch').find((r) => r.id === 'custom')?.values.I === Math.fround(0.5)), null, { timeout: 30000 })
+            const gu = await step4_plots(page)
+            assert.equal(gu.StepResp4.traces[4].n, 0, 'неустойчивый «Свой» — линии прогноза нет')
+            assert.match(gu.StepResp4.note, /Прогноз «Свой»: контур неустойчив \(запас фазы -[\d.]+°\) — линии отклика нет\./, 'причина в подписи: ' + gu.StepResp4.note)
+            assert.ok(gu.LBode4.traces[1].finite > 0, 'неустойчивый «Свой» — L на бодэ есть')
+            assert.match(gu.LBode4.traces[1].name, /^«Свой» · срез [\d.]+ Гц · запас -[\d.]+°$/, 'запас фазы неустойчивого — не больше 0: ' + gu.LBode4.traces[1].name)
+            assert.match(gu.LBode4.note, /^«Свой»: контур неустойчив/, 'причина под бодэ: ' + gu.LBode4.note)
+            // «Свой» тангажа D ×4 (P и I — лога): неустойчив по причинности отклика при запасе первого пересечения больше 0 —
+            // запас недостоверен: в таблице «—», на бодэ без чисел и без отметок выбранного, как в таблице
+            await page.evaluate(() => {
+                const gains = step4.calc.pitch.gains
+                step4_set_form_values({ ATC_RAT_PIT_P: gains.P, ATC_RAT_PIT_I: gains.I, ATC_RAT_PIT_D: gains.D * 4 })
+                step4_flush_edits(true)
+            })
+            const d4 = await page.evaluate(() => {
+                const row = step4_rows('pitch').find((r) => r.id === 'custom')
+                const tr = [...document.querySelectorAll('#candidates4 tbody tr')].find((tr) => tr.querySelector('input').value === 'custom')
+                return { selected: step4.selected.pitch, unstable: row.pred.unstable, pm: row.pred.pm_deg, cells: [...tr.querySelectorAll('td.num')].slice(3, 5).map((td) => td.firstChild.textContent) }
+            })
+            assert.equal(d4.selected, 'custom', 'D ×4: выбрана строка «Свой»')
+            assert.ok(d4.unstable && (d4.pm > 0), 'D ×4: неустойчив по причинности при запасе больше 0: ' + JSON.stringify(d4))
+            assert.deepEqual(d4.cells, ['—', '—'], 'D ×4: в таблице запас и срез — «—»')
+            const gd4 = await step4_plots(page)
+            assert.equal(gd4.LBode4.traces[1].name, '«Свой» · запас недостоверен', 'D ×4: на бодэ — «запас недостоверен» без чисел')
+            assert.ok(gd4.LBode4.traces[1].finite > 0, 'D ×4: L варианта на бодэ есть')
+            assert.deepEqual(gd4.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm'], 'D ×4: отметок выбранного нет, у лога — есть')
+            assert.match(gd4.LBode4.note, /^«Свой»: прогноз неустойчив .* — частота среза и запас фазы недостоверны\.$/, 'D ×4: причина под бодэ: ' + gd4.LBode4.note)
+            // Пустое поле D тангажа: прогноз неполный — линий выбранного нет, причина в подписях отклика и бодэ
+            await page.evaluate(() => {
+                document.getElementById('pidf_ATC_RAT_PIT_D').value = ''
+                step4_flush_edits(true)
+            })
+            const ge = await step4_plots(page)
+            assert.equal(ge.LBode4.traces[1].n, 0, 'пустое поле: линии выбранного на бодэ нет')
+            assert.match(ge.LBode4.note, /^«Свой»: прогноз неполный: .* — линии нет\.$/, 'пустое поле: причина под бодэ: ' + ge.LBode4.note)
+            assert.match(ge.StepResp4.note, /Прогноз «Свой»: прогноз неполный: .* — линии отклика нет\./, 'пустое поле: причина под откликом: ' + ge.StepResp4.note)
+            await page.evaluate(() => {
+                step4_set_form_values(step4_log_values_of('pitch'))
+                step4_flush_edits(true)
+            })
+            assert.deepEqual((await step4_summary(page)).titles, sub4.titles, 'поля тангажа снова из лога — строки «Свой» нет')
+            // Строка сравнения оси с прошлым проходом при надёжном измерении. Синтетический проход — только в memory_state
+            // (хранилище не трогается): тангаж менял D, значение применено. Фильтры шагов 2–3 приняты другими, а запас фазы
+            // «в этом логе» есть: прогноз лога — с фильтрами лога. Прогноз оси сейчас недостоверен — у запаса фазы два числа
+            // и пояснение; прогноз прохода неустойчив — его чисел нет; недостоверен — запаса фазы нет совсем; D тангажа не
+            // применён — «применены не все». memory_state, прогноз оси и вердикт оси — вернуть
+            line4 = await page.evaluate(() => {
+                const res = step4.calc.pitch
+                const record = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
+                                 prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
+                const d = state.params.get('ATC_RAT_PIT_D')
+                const pass = { key: memory_state.key, saved_at: Date.now(), changed: [{ name: 'ATC_RAT_PIT_D', log: d * 2, value: d, step: 4 }],
+                               estimates: { 2: null, 3: null, 4: { roll: null, pitch: record, yaw: null } } }
+                const saved = { ...memory_state }
+                const predict_ok = res.predict_ok
+                const bits = hmncs_bits(state.params, state.spectrum.filter_version ?? 1)
+                const text = () => {
+                    step4_render_axis_verdict()
+                    const box = document.getElementById('memory4')
+                    return box.hidden ? null : box.textContent
+                }
+                try {
+                    Object.assign(memory_state, { pass: pass, applied: passmem_applied(pass, state.params, bits) })
+                    const lines = { gyro_changed: step4_gyro_changed(), ok: text() }
+                    res.predict_ok = false
+                    lines.invalid_now = text()
+                    res.predict_ok = predict_ok
+                    record.prediction.unstable = true
+                    lines.unstable = text()
+                    record.prediction = null
+                    lines.invalid_was = text()
+                    pass.changed[0].value = d * 3
+                    memory_state.applied = passmem_applied(pass, state.params, bits)
+                    lines.partial = text()
+                    return { ...lines, head: 'Прошлый проход (' + memory_date_text(pass.saved_at) + ')',
+                             now: [res.metrics.overshoot_pct.toFixed(1), (res.metrics.rise_s * 1000).toFixed(1), res.pred_log.pm_deg.toFixed(1)] }
+                } finally {
+                    res.predict_ok = predict_ok
+                    Object.assign(memory_state, saved)
+                    step4_render_axis_verdict()
+                }
+            })
+            const [os4, rise4, pm4] = line4.now
+            const head4 = line4.head + ', было → прогноз → в этом логе: '
+            assert.equal(line4.gyro_changed, true, 'фильтры гироскопа шагов 2–3 отличаются от лога')
+            assert.equal(line4.ok, head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; нарастание 55.0 → 50.0 → ' + rise4 + ' мс; запас фазы 48.0 → 55.0 → ' + pm4 + '°.',
+                         'строка оси: измерение и запас фазы лога')
+            assert.ok(line4.invalid_now.startsWith(head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; '), line4.invalid_now)
+            assert.ok(line4.invalid_now.endsWith('; запас фазы 48.0 → 55.0°; запас фазы этого лога — только при достоверном прогнозе.'),
+                      'прогноз оси сейчас недостоверен — у запаса фазы два числа и пояснение: ' + line4.invalid_now)
+            assert.ok(line4.unstable.includes('перерегулирование 12.5 → — → ' + os4 + ' %; ') && line4.unstable.includes('; запас фазы 48.0 → — → ' + pm4 + '°; ') &&
+                      line4.unstable.endsWith('; прогноз был неустойчив.'), 'прогноз прохода неустойчив — без его чисел: ' + line4.unstable)
+            assert.ok(line4.invalid_was.startsWith(head4 + 'перерегулирование 12.5 → — → ' + os4 + ' %; нарастание 55.0 → — → ' + rise4 + ' мс; ') &&
+                      !line4.invalid_was.includes('запас фазы') && line4.invalid_was.endsWith('; прогноз был недостоверен.'),
+                      'прогноз прохода недостоверен — запаса фазы нет: ' + line4.invalid_was)
+            assert.equal(line4.partial, line4.head + ': параметры шагов 2–3 и этой оси применены не все — сравнивать нечего.')
+            assert.deepEqual(await page.evaluate(() => [document.getElementById('memory4').hidden, step4.calc.pitch.predict_ok]), [true, true],
+                             'проход и прогноз оси вернули — строки оси нет')
+            sub_lines = { titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
+            // ПОДМЕНА поверх прежней: запас фазы не определён (развёртка фазы недостоверна — pidtune_margins даёт pm_deg null с
+            // причиной pm_note): в таблице «—» с причиной в подсказке ячейки, в оценке строки — «запас фазы не определён (…)»,
+            // неустойчивым прогноз не считается, в легенде бодэ и плитке лога — «запас не определён» (аудит D)
+            await page.evaluate(() => {
+                window.__step4_orig.margins = pidtune_margins
+                pidtune_margins = (...args) => ({ ...window.__step4_orig.margins(...args), pm_deg: null, gm_db: null, pm_note: 'тест: развёртка фазы недостоверна' })
+                step4.key = null
+                step4_show()
+            })
+            await wait_overlay(page)
+            await page.click('#step4_tab_pitch')
+            const margins4 = await page.evaluate(() => {
+                const tr = [...document.querySelectorAll('#candidates4 tbody tr')].find((tr) => tr.querySelector('input').value === 'p_plus')
+                const cells = [...tr.querySelectorAll('td.num')]
+                return { pm: cells[3].firstChild.textContent, title: cells[3].title, verdict: tr.lastElementChild.textContent,
+                         unstable: step4_rows('pitch').map((r) => r.pred?.unstable ?? null), legend: document.getElementById('LBode4').data[0].name,
+                         tile: [...document.querySelectorAll('#metrics4 .stat')].map((tile) => tile.textContent).find((text) => text.startsWith('Срез · запас фазы (лог)')) ?? null,
+                         axis_verdict: document.getElementById('axis_verdict4').textContent }
+            })
+            assert.deepEqual([margins4.pm, margins4.title], ['—', 'тест: развёртка фазы недостоверна'], 'запас не определён — «—» с причиной в подсказке')
+            assert.match(margins4.verdict, /запас фазы не определён \(тест: развёртка фазы недостоверна\)/, 'оценка строки: ' + margins4.verdict)
+            assert.doesNotMatch(margins4.verdict, /неустойчив/, 'без «неустойчив»: ' + margins4.verdict)
+            assert.ok(margins4.unstable.every((u) => u === false), 'прогнозы не помечены неустойчивыми: ' + JSON.stringify(margins4.unstable))
+            assert.match(margins4.legend, /^лог · срез [\d.]+ Гц · запас не определён$/, 'легенда бодэ лога: ' + margins4.legend)
+            assert.match(margins4.tile ?? '', /Срез · запас фазы \(лог\)[\d.]+ Гц · не определёнтест: развёртка фазы недостоверна/, 'плитка лога: ' + margins4.tile)
+            assert.match(margins4.axis_verdict, /запас фазы не определён \(лог не определён\)/, 'вердикт оси: ' + margins4.axis_verdict)
+        } finally {
+            // Снять подмены (и при упавшей проверке); pidtune_margins подменяется позже остальных — вернуть, только если была
+            await page.evaluate(() => {
+                pidtune_log_mode = window.__step4_orig.mode
+                pidtune_quality = window.__step4_orig.quality
+                if (window.__step4_orig.margins != null) {
+                    pidtune_margins = window.__step4_orig.margins
+                }
+            })
+        }
+        // Пересчитать без подмен: снова ненадёжно на всех осях, бодэ пуст
         await page.evaluate(() => {
-            const gains = step4.calc.pitch.gains
-            step4_set_form_values({ ATC_RAT_PIT_P: gains.P, ATC_RAT_PIT_I: gains.I, ATC_RAT_PIT_D: gains.D * 4 })
-            step4_flush_edits(true)
-        })
-        const d4 = await page.evaluate(() => {
-            const row = step4_rows('pitch').find((r) => r.id === 'custom')
-            const tr = [...document.querySelectorAll('#candidates4 tbody tr')].find((tr) => tr.querySelector('input').value === 'custom')
-            return { selected: step4.selected.pitch, unstable: row.pred.unstable, pm: row.pred.pm_deg, cells: [...tr.querySelectorAll('td.num')].slice(3, 5).map((td) => td.firstChild.textContent) }
-        })
-        assert.equal(d4.selected, 'custom', 'D ×4: выбрана строка «Свой»')
-        assert.ok(d4.unstable && (d4.pm > 0), 'D ×4: неустойчив по причинности при запасе больше 0: ' + JSON.stringify(d4))
-        assert.deepEqual(d4.cells, ['—', '—'], 'D ×4: в таблице запас и срез — «—»')
-        const gd4 = await step4_plots(page)
-        assert.equal(gd4.LBode4.traces[1].name, '«Свой» · запас недостоверен', 'D ×4: на бодэ — «запас недостоверен» без чисел')
-        assert.ok(gd4.LBode4.traces[1].finite > 0, 'D ×4: L варианта на бодэ есть')
-        assert.deepEqual(gd4.LBode4.shapes, ['ref:zero', 'ref:m180', 'log:fc', 'log:fc', 'log:pm'], 'D ×4: отметок выбранного нет, у лога — есть')
-        assert.match(gd4.LBode4.note, /^«Свой»: прогноз неустойчив .* — частота среза и запас фазы недостоверны\.$/, 'D ×4: причина под бодэ: ' + gd4.LBode4.note)
-        // Пустое поле D тангажа: прогноз неполный — линий выбранного нет, причина в подписях отклика и бодэ
-        await page.evaluate(() => {
-            document.getElementById('pidf_ATC_RAT_PIT_D').value = ''
-            step4_flush_edits(true)
-        })
-        const ge = await step4_plots(page)
-        assert.equal(ge.LBode4.traces[1].n, 0, 'пустое поле: линии выбранного на бодэ нет')
-        assert.match(ge.LBode4.note, /^«Свой»: прогноз неполный: .* — линии нет\.$/, 'пустое поле: причина под бодэ: ' + ge.LBode4.note)
-        assert.match(ge.StepResp4.note, /Прогноз «Свой»: прогноз неполный: .* — линии отклика нет\./, 'пустое поле: причина под откликом: ' + ge.StepResp4.note)
-        await page.evaluate(() => {
-            step4_set_form_values(step4_log_values_of('pitch'))
-            step4_flush_edits(true)
-        })
-        assert.deepEqual((await step4_summary(page)).titles, sub4.titles, 'поля тангажа снова из лога — строки «Свой» нет')
-        // Строка сравнения оси с прошлым проходом при надёжном измерении. Синтетический проход — только в memory_state
-        // (хранилище не трогается): тангаж менял D, значение применено. Фильтры шагов 2–3 приняты другими, а запас фазы
-        // «в этом логе» есть: прогноз лога — с фильтрами лога. Прогноз оси сейчас недостоверен — у запаса фазы два числа
-        // и пояснение; прогноз прохода неустойчив — его чисел нет; недостоверен — запаса фазы нет совсем; D тангажа не
-        // применён — «применены не все». memory_state, прогноз оси и вердикт оси — вернуть
-        const line4 = await page.evaluate(() => {
-            const res = step4.calc.pitch
-            const record = { reliable: true, measured: { overshoot_pct: 12.5, rise_s: 0.055 }, log: { pm_deg: 48, crossover_hz: 11.2 },
-                             prediction: { overshoot_pct: 8.5, rise_s: 0.05, pm_deg: 55, unstable: false } }
-            const d = state.params.get('ATC_RAT_PIT_D')
-            const pass = { key: memory_state.key, saved_at: Date.now(), changed: [{ name: 'ATC_RAT_PIT_D', log: d * 2, value: d, step: 4 }],
-                           estimates: { 2: null, 3: null, 4: { roll: null, pitch: record, yaw: null } } }
-            const saved = { ...memory_state }
-            const predict_ok = res.predict_ok
-            const bits = hmncs_bits(state.params, state.spectrum.filter_version ?? 1)
-            const text = () => {
-                step4_render_axis_verdict()
-                const box = document.getElementById('memory4')
-                return box.hidden ? null : box.textContent
-            }
-            try {
-                Object.assign(memory_state, { pass: pass, applied: passmem_applied(pass, state.params, bits) })
-                const lines = { gyro_changed: step4_gyro_changed(), ok: text() }
-                res.predict_ok = false
-                lines.invalid_now = text()
-                res.predict_ok = predict_ok
-                record.prediction.unstable = true
-                lines.unstable = text()
-                record.prediction = null
-                lines.invalid_was = text()
-                pass.changed[0].value = d * 3
-                memory_state.applied = passmem_applied(pass, state.params, bits)
-                lines.partial = text()
-                return { ...lines, head: 'Прошлый проход (' + memory_date_text(pass.saved_at) + ')',
-                         now: [res.metrics.overshoot_pct.toFixed(1), (res.metrics.rise_s * 1000).toFixed(1), res.pred_log.pm_deg.toFixed(1)] }
-            } finally {
-                res.predict_ok = predict_ok
-                Object.assign(memory_state, saved)
-                step4_render_axis_verdict()
-            }
-        })
-        const [os4, rise4, pm4] = line4.now
-        const head4 = line4.head + ', было → прогноз → в этом логе: '
-        assert.equal(line4.gyro_changed, true, 'фильтры гироскопа шагов 2–3 отличаются от лога')
-        assert.equal(line4.ok, head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; нарастание 55.0 → 50.0 → ' + rise4 + ' мс; запас фазы 48.0 → 55.0 → ' + pm4 + '°.',
-                     'строка оси: измерение и запас фазы лога')
-        assert.ok(line4.invalid_now.startsWith(head4 + 'перерегулирование 12.5 → 8.5 → ' + os4 + ' %; '), line4.invalid_now)
-        assert.ok(line4.invalid_now.endsWith('; запас фазы 48.0 → 55.0°; запас фазы этого лога — только при достоверном прогнозе.'),
-                  'прогноз оси сейчас недостоверен — у запаса фазы два числа и пояснение: ' + line4.invalid_now)
-        assert.ok(line4.unstable.includes('перерегулирование 12.5 → — → ' + os4 + ' %; ') && line4.unstable.includes('; запас фазы 48.0 → — → ' + pm4 + '°; ') &&
-                  line4.unstable.endsWith('; прогноз был неустойчив.'), 'прогноз прохода неустойчив — без его чисел: ' + line4.unstable)
-        assert.ok(line4.invalid_was.startsWith(head4 + 'перерегулирование 12.5 → — → ' + os4 + ' %; нарастание 55.0 → — → ' + rise4 + ' мс; ') &&
-                  !line4.invalid_was.includes('запас фазы') && line4.invalid_was.endsWith('; прогноз был недостоверен.'),
-                  'прогноз прохода недостоверен — запаса фазы нет: ' + line4.invalid_was)
-        assert.equal(line4.partial, line4.head + ': параметры шагов 2–3 и этой оси применены не все — сравнивать нечего.')
-        assert.deepEqual(await page.evaluate(() => [document.getElementById('memory4').hidden, step4.calc.pitch.predict_ok]), [true, true],
-                         'проход и прогноз оси вернули — строки оси нет')
-        const sub_lines = { titles: sub4.titles, recommended: sub4.recommended, log: gs1.LBode4.traces[0].name }
-        // ПОДМЕНА поверх прежней: запас фазы не определён (развёртка фазы недостоверна — pidtune_margins даёт pm_deg null с
-        // причиной pm_note): в таблице «—» с причиной в подсказке ячейки, в оценке строки — «запас фазы не определён (…)»,
-        // неустойчивым прогноз не считается, в легенде бодэ и плитке лога — «запас не определён» (аудит D)
-        await page.evaluate(() => {
-            window.__step4_orig.margins = pidtune_margins
-            pidtune_margins = (...args) => ({ ...window.__step4_orig.margins(...args), pm_deg: null, gm_db: null, pm_note: 'тест: развёртка фазы недостоверна' })
-            step4.key = null
-            step4_show()
-        })
-        await wait_overlay(page)
-        await page.click('#step4_tab_pitch')
-        const margins4 = await page.evaluate(() => {
-            const tr = [...document.querySelectorAll('#candidates4 tbody tr')].find((tr) => tr.querySelector('input').value === 'p_plus')
-            const cells = [...tr.querySelectorAll('td.num')]
-            return { pm: cells[3].firstChild.textContent, title: cells[3].title, verdict: tr.lastElementChild.textContent,
-                     unstable: step4_rows('pitch').map((r) => r.pred?.unstable ?? null), legend: document.getElementById('LBode4').data[0].name,
-                     tile: [...document.querySelectorAll('#metrics4 .stat')].map((tile) => tile.textContent).find((text) => text.startsWith('Срез · запас фазы (лог)')) ?? null,
-                     axis_verdict: document.getElementById('axis_verdict4').textContent }
-        })
-        assert.deepEqual([margins4.pm, margins4.title], ['—', 'тест: развёртка фазы недостоверна'], 'запас не определён — «—» с причиной в подсказке')
-        assert.match(margins4.verdict, /запас фазы не определён \(тест: развёртка фазы недостоверна\)/, 'оценка строки: ' + margins4.verdict)
-        assert.doesNotMatch(margins4.verdict, /неустойчив/, 'без «неустойчив»: ' + margins4.verdict)
-        assert.ok(margins4.unstable.every((u) => u === false), 'прогнозы не помечены неустойчивыми: ' + JSON.stringify(margins4.unstable))
-        assert.match(margins4.legend, /^лог · срез [\d.]+ Гц · запас не определён$/, 'легенда бодэ лога: ' + margins4.legend)
-        assert.match(margins4.tile ?? '', /Срез · запас фазы \(лог\)[\d.]+ Гц · не определёнтест: развёртка фазы недостоверна/, 'плитка лога: ' + margins4.tile)
-        assert.match(margins4.axis_verdict, /запас фазы не определён \(лог не определён\)/, 'вердикт оси: ' + margins4.axis_verdict)
-        // Снять подмены и пересчитать: снова ненадёжно на всех осях, бодэ пуст
-        await page.evaluate(() => {
-            pidtune_log_mode = window.__step4_orig.mode
-            pidtune_quality = window.__step4_orig.quality
-            pidtune_margins = window.__step4_orig.margins
             step4.key = null
             step4_show()
         })
@@ -1452,28 +1469,34 @@ async function main() {
             step4.key = null
             step4_show()
         }, seg4)
-        await wait_overlay(page)
-        await page.click('#step4_tab_roll')
-        const acro4 = await step4_summary(page)
-        const hint4 = 'сузьте интервал анализа до участка ACRO (' + acro_interval.start + '–' + acro_interval.end + ' с)'
-        assert.equal(await page.isVisible('#step4_acro_row'), true, 'подмена: кнопка «Интервал — участок ACRO» видна')
-        assert.ok(acro4.verdict.includes(hint4) && !acro4.verdict.includes('нужен тестовый полёт'), 'подмена: сводка советует сузить интервал: ' + acro4.verdict)
-        assert.ok(acro4.axis_verdict.includes(hint4), 'подмена: вердикт оси советует сузить интервал: ' + acro4.axis_verdict)
-        assert.match(acro4.axis_verdict, /В интервале режимы STABILIZE, ACRO: смешение режимов ломает проверку \(б\)/, acro4.axis_verdict)
-        await page.click('#step4_acro_interval')
-        await wait_overlay(page)
-        assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, step4.key !== window.__step4_key, step4_stale(),
-                                                     document.getElementById('TimeStart').value, document.getElementById('TimeEnd').value]),
-                         [acro_interval.start, acro_interval.end, true, false, String(acro_interval.start), String(acro_interval.end)],
-                         '«Интервал — участок ACRO»: интервал анализа — участок, шаг пересчитан')
-        await page.evaluate(([s, e]) => {
-            pidtune_log_mode = window.__step4_orig.mode
-            document.getElementById('TimeStart').value = s
-            document.getElementById('TimeEnd').value = e
-            interval_input_changed()
+        try {
+            await wait_overlay(page)
+            await page.click('#step4_tab_roll')
+            const acro4 = await step4_summary(page)
+            const hint4 = 'сузьте интервал анализа до участка ACRO (' + acro_interval.start + '–' + acro_interval.end + ' с)'
+            assert.equal(await page.isVisible('#step4_acro_row'), true, 'подмена: кнопка «Интервал — участок ACRO» видна')
+            assert.ok(acro4.verdict.includes(hint4) && !acro4.verdict.includes('нужен тестовый полёт'), 'подмена: сводка советует сузить интервал: ' + acro4.verdict)
+            assert.ok(acro4.axis_verdict.includes(hint4), 'подмена: вердикт оси советует сузить интервал: ' + acro4.axis_verdict)
+            assert.match(acro4.axis_verdict, /В интервале режимы STABILIZE, ACRO: смешение режимов ломает проверку \(б\)/, acro4.axis_verdict)
+            await page.click('#step4_acro_interval')
+            await wait_overlay(page)
+            assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, step4.key !== window.__step4_key, step4_stale(),
+                                                         document.getElementById('TimeStart').value, document.getElementById('TimeEnd').value]),
+                             [acro_interval.start, acro_interval.end, true, false, String(acro_interval.start), String(acro_interval.end)],
+                             '«Интервал — участок ACRO»: интервал анализа — участок, шаг пересчитан')
+        } finally {
+            // Снять подмену и вернуть интервал (и при упавшей проверке), затем пересчитать шаг
+            await page.evaluate(([s, e]) => {
+                pidtune_log_mode = window.__step4_orig.mode
+                document.getElementById('TimeStart').value = s
+                document.getElementById('TimeEnd').value = e
+                interval_input_changed()
+            }, [start, end])
+        }
+        await page.evaluate(() => {
             step4.key = null
             step4_show()
-        }, [start, end])
+        })
         await wait_overlay(page)
         assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, document.getElementById('step4_acro_row').hidden]), [start, end, true],
                          'подмена снята, интервал прежний — кнопки нет')
@@ -1491,34 +1514,37 @@ async function main() {
             step4_show()
             return set_value
         })
-        await wait_overlay(page)
-        await page.click('#step4_tab_pitch')
-        const after4 = await step4_summary(page)
-        assert.deepEqual(after4.titles, ['Набор интервала'], 'подмена: строка лога — «Набор интервала»')
-        assert.match(await page.evaluate(() => document.querySelector('#pidf_form p[data-name="ATC_RAT_PIT_P"] .inlog').textContent),
-                     /^в наборе интервала: [\d.]+ \(в конце лога [\d.]+\)$/, 'подпись поля P тангажа')
-        assert.match(await page.evaluate(() => document.querySelector('#pidf_form p[data-name="ATC_RAT_PIT_I"] .inlog').textContent),
-                     /^в наборе интервала: [\d.]+$/, 'подпись поля I тангажа — без значения конца лога (оно то же)')
-        assert.match(after4.verdict, / PID тангажа менялись после интервала анализа — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/, after4.verdict)
-        assert.match(after4.verdict_class, /verdict--warn/)
-        assert.match(after4.axis_verdict, /После интервала анализа параметры менялись: в конце лога P = [\d.]+, I = [\d.]+, D = [\d.]+ \(в наборе интервала P = [\d.]+, I = [\d.]+, D = [\d.]+\)\. Принятое перепишет значения конца лога\./,
-                     after4.axis_verdict)
-        assert.match(await page.textContent('#candidates4 tbody tr:first-child td:last-child'), /^набор интервала \(в конце лога другие значения\)/, 'оценка строки лога')
-        await page.click('#pidf_accept')
-        await wait_overlay(page)
-        assert.deepEqual(await visible_steps(page), ['5'], '«Принять» под подменой открывает шаг 5')
-        const acc_after = await page.evaluate(() => ({
-            set: state.steps[4].set_values.ATC_RAT_PIT_P, accepted: state.steps[4].accepted.ATC_RAT_PIT_P, verdict: document.getElementById('verdict5').textContent,
-            row: [...document.querySelectorAll('#changes5 tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)).find((cells) => cells[0] === 'ATC_RAT_PIT_P') ?? null,
-        }))
-        assert.deepEqual([acc_after.set, acc_after.accepted], [Math.fround(pit_p), Math.fround(pit_p)], 'set_values и принятое — набор интервала')
-        assert.ok((acc_after.row != null) && /в конце лога другое значение: параметры менялись после интервала анализа/.test(acc_after.row[4]),
-                  'в изменениях сводки — пометка: ' + JSON.stringify(acc_after.row))
-        assert.match(acc_after.verdict, /PID менялись после интервала анализа: принятое перепишет значения конца лога \(см\. пометки\)/, acc_after.verdict)
-        await page.evaluate(() => {
-            state.params.get = window.__params_get
-            step4.key = null
-        })
+        try {
+            await wait_overlay(page)
+            await page.click('#step4_tab_pitch')
+            const after4 = await step4_summary(page)
+            assert.deepEqual(after4.titles, ['Набор интервала'], 'подмена: строка лога — «Набор интервала»')
+            assert.match(await page.evaluate(() => document.querySelector('#pidf_form p[data-name="ATC_RAT_PIT_P"] .inlog').textContent),
+                         /^в наборе интервала: [\d.]+ \(в конце лога [\d.]+\)$/, 'подпись поля P тангажа')
+            assert.match(await page.evaluate(() => document.querySelector('#pidf_form p[data-name="ATC_RAT_PIT_I"] .inlog').textContent),
+                         /^в наборе интервала: [\d.]+$/, 'подпись поля I тангажа — без значения конца лога (оно то же)')
+            assert.match(after4.verdict, / PID тангажа менялись после интервала анализа — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/, after4.verdict)
+            assert.match(after4.verdict_class, /verdict--warn/)
+            assert.match(after4.axis_verdict, /После интервала анализа параметры менялись: в конце лога P = [\d.]+, I = [\d.]+, D = [\d.]+ \(в наборе интервала P = [\d.]+, I = [\d.]+, D = [\d.]+\)\. Принятое перепишет значения конца лога\./,
+                         after4.axis_verdict)
+            assert.match(await page.textContent('#candidates4 tbody tr:first-child td:last-child'), /^набор интервала \(в конце лога другие значения\)/, 'оценка строки лога')
+            await page.click('#pidf_accept')
+            await wait_overlay(page)
+            assert.deepEqual(await visible_steps(page), ['5'], '«Принять» под подменой открывает шаг 5')
+            const acc_after = await page.evaluate(() => ({
+                set: state.steps[4].set_values.ATC_RAT_PIT_P, accepted: state.steps[4].accepted.ATC_RAT_PIT_P, verdict: document.getElementById('verdict5').textContent,
+                row: [...document.querySelectorAll('#changes5 tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)).find((cells) => cells[0] === 'ATC_RAT_PIT_P') ?? null,
+            }))
+            assert.deepEqual([acc_after.set, acc_after.accepted], [Math.fround(pit_p), Math.fround(pit_p)], 'set_values и принятое — набор интервала')
+            assert.ok((acc_after.row != null) && /в конце лога другое значение: параметры менялись после интервала анализа/.test(acc_after.row[4]),
+                      'в изменениях сводки — пометка: ' + JSON.stringify(acc_after.row))
+            assert.match(acc_after.verdict, /PID менялись после интервала анализа: принятое перепишет значения конца лога \(см\. пометки\)/, acc_after.verdict)
+        } finally {
+            await page.evaluate(() => {
+                state.params.get = window.__params_get
+                step4.key = null
+            })
+        }
         await page.click('#wizbar button:nth-child(5)')
         await wait_overlay(page)
         await page.click('#step4_tab_pitch')

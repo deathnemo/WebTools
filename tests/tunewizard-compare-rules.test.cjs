@@ -153,6 +153,28 @@ test('upstream_plan: без действующих дефектов всё со�
     assert.ok(result.checked.every((c) => (c.item.rule.kind == 'same') && c.same))
 })
 
+test('upstream_plan: ESCMSK из лога при версии фильтра ниже 4 (escmsk_log) — зависящее от фильтров только в отчёте с причиной, остальное как без дефектов', () => {
+    // Дефектов нет, но мастер считает notch по ESC с маской из лога, FilterReview — без неё: оценка «после» и амплитуда
+    // с фазой бодэ отличаются намеренно (filters_differ), спектры «до», оси и спектрограмма — совпадают
+    const ctx = { ...context({ type: 'batch', up_set: batches([1000, 1000, 1000, 1000], 1024), window_size: 1024 }), escmsk_log: true }
+    const result = run(ctx)
+    assert.deepEqual(result.plan.active, [])
+    assert_all_ok(result)
+    for (const fragment of ['· оценка · X · y', 'оценка «после» · Z · y', 'фаза развёрнута · бодэ · амплитуда', 'фаза ±180° · бодэ · фаза']) {
+        const c = result.by_name(fragment)
+        assert.equal(c.item.rule.kind, 'report', fragment)
+        assert.match(c.item.reason, /^намеренное отличие — INS_\*_ESCMSK .*\(escmsk_present\)/, fragment)
+        assert.match(c.line, /отличается/, fragment)
+    }
+    for (const fragment of ['· до · X · y', '· оценка · X · x', 'спектрограмма · x', 'спектрограмма · z[0]', 'фаза развёрнута · бодэ · x']) {
+        assert.equal(result.by_name(fragment).item.rule.kind, 'same', fragment)
+    }
+    // Без флага те же снимки сравнивались бы точно — и расходились бы
+    const plain = run({ ...ctx, escmsk_log: false })
+    assert.equal(plain.by_name('оценка «после» · Z · y').item.rule.kind, 'same')
+    assert.equal(plain.by_name('оценка «после» · Z · y').ok, false)
+})
+
 test('check_upstream: «+Δ» по оси времени — абсолютный допуск 1e-9 с, относительный скрыл бы сдвиг в 86 мкс', () => {
     const up = [100, 200, 560]
     const wz = up.map((t) => t - 86e-6)
