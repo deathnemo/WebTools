@@ -928,11 +928,19 @@ function pidtune_beyond(value, limit, digits) {
     return text
 }
 
+// Изменение коэффициента словами с фактическим процентом: «+5.3 %», «−20.0 %» (ограниченное пределом правило говорит
+// «P +10 %», а даёт меньше — число в причине [аудит области D, M-9])
+function pidtune_percent_text(from, to) {
+    const pct = (to - from) / from * 100
+    return ((pct < 0) ? "−" : "+") + Math.abs(pct).toFixed(1) + " %"
+}
+
 // Изменение P на sign·gain_step с пределами AutoTune; I по правилу: крен и тангаж — I = P [wiki, Manual tuning:
 // «Each time the P term is changed set the I term equal to the P term»], рыскание — I = yaw_i_ratio·P [код].
 // P округляется (pidtune_round) до пределов, I считается от округлённого P и тоже округляется.
 // Предел, не давший сдвинуть P в нужную сторону (P уже на пределе) или развернувший изменение (P 2.5 и «P +10 %» →
-// 2.0, P 0.005 и «P −10 %» → 0.01), — без изменений, limited true
+// 2.0, P 0.005 и «P −10 %» → 0.01), — без изменений, limited true; предел, урезавший шаг (P 1.9 и «P +10 %» → 2.0), —
+// в причине фактический процент («ограничено: … — фактически +5.3 %»)
 function pidtune_change_p(gains, axis, sign, reason, rules) {
     const target = pidtune_round(gains.P * (1 + sign * rules.gain_step), rules)
     const P = Math.min(rules.p_max, Math.max(rules.p_min, target))
@@ -944,7 +952,7 @@ function pidtune_change_p(gains, axis, sign, reason, rules) {
         return { change: null, reason: reason + "; " + why + " (" + limit_text + ") — без изменений", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true }
     }
     const I = (axis == "yaw") ? pidtune_round(rules.yaw_i_ratio * P, rules) : P
-    return { change: (sign > 0) ? "P+" : "P-", reason: reason + (limited ? " (ограничено: " + limit_text + ")" : ""),
+    return { change: (sign > 0) ? "P+" : "P-", reason: reason + (limited ? " (ограничено: " + limit_text + " — фактически P " + pidtune_percent_text(gains.P, P) + ")" : ""),
              values: { P: P, I: I, D: gains.D }, limited: limited }
 }
 
@@ -998,7 +1006,7 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
                 const D = Math.min(rules.d_max, target)
                 const limited = (D != target)
                 return { change: "D-", reason: "высокие " + osc_text + " — выше " + band_text + " → D −" + Math.round(rules.gain_step * 100) + " %" +
-                         (limited ? " (ограничено: предел AutoTune D ≤ " + rules.d_max + ")" : ""),
+                         (limited ? " (ограничено: предел AutoTune D ≤ " + rules.d_max + " — фактически D " + pidtune_percent_text(gains.D, D) + ")" : ""),
                          values: { P: gains.P, I: gains.I, D: D }, limited: limited }
             }
             d_skipped = "высокие " + osc_text + " — выше " + band_text + ", но D " + (Number.isFinite(gains.D) ? "выключен (D = 0)" : "нет в логе") +

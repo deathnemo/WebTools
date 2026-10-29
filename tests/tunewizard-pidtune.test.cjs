@@ -933,6 +933,9 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.equal(up.values.P, 2.0)
     assert.equal(up.values.I, 2.0)
     assert.equal(up.limited, true)
+    // Ограниченное правило называет фактический процент (аудит области D, M-9); без ограничения — нет
+    assert.ok(up.reason.endsWith('(ограничено: предел AutoTune P 0.01…2 — фактически P +5.3 %)'), up.reason)
+    assert.ok(!pidtune_rule({ P: 0.1, I: 0.1, D: 0.01 }, 'roll', metrics_of(2), 10, QUALITY_OK).reason.includes('фактически'))
     const at_max = pidtune_rule({ P: 2.0, I: 2.0, D: 0.01 }, 'roll', metrics_of(2), 10, QUALITY_OK)
     assert.equal(at_max.change, null, 'P уже на пределе')
     assert.equal(at_max.limited, true)
@@ -944,6 +947,7 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.equal(d.change, 'D-')
     assert.equal(d.values.D, 0.2)
     assert.equal(d.limited, true)
+    assert.ok(d.reason.endsWith('(ограничено: предел AutoTune D ≤ 0.2 — фактически D −33.3 %)'), d.reason)
     // P вне пределов, и предел развернул бы изменение: P 2.5 и «P +10 %» → 2.0, P 0.005 и «P −10 %» → 0.01 — без изменений
     for (const [P, os, word] of [[2.5, 2, 'уменьшило'], [0.005, 30, 'увеличило']]) {
         const r = pidtune_rule({ P, I: P, D: 0.001 }, 'roll', metrics_of(os), 10, QUALITY_OK)
@@ -957,6 +961,7 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.equal(back.change, 'P-')
     assert.equal(back.values.P, 2.0)
     assert.equal(back.limited, true)
+    assert.ok(back.reason.endsWith('(ограничено: предел AutoTune P 0.01…2 — фактически P −20.0 %)'), back.reason)
 })
 
 test('pidtune_rule: предлагаемые значения — 4 значащие цифры, I — от округлённого P (0.1163·1.1 → 0.1279, а не 0.12793000000000002)', () => {

@@ -125,8 +125,10 @@ const PID_STEP_RATE_MARGIN = 0.99
 // FFT по всем пакетам всех наборов оси. data_set — axis.sets (массив наборов параметров, у набора — массив пакетов).
 // Пишет FFT каждого набора (set.FFT = { time, Tar, Act, …: комплексные спектры окон }) и общее
 // data_set.FFT = { bins, average_sample_rate, window_size, correction }; если нет ни одного пакета длиной не меньше
-// окна, data_set.FFT остаётся null. Перекрытие окон — 50 %.
-function pid_run_batch_fft(data_set, window_size) {
+// окна, data_set.FFT остаётся null. Перекрытие окон — 50 %. keys — какие компоненты считать (по умолчанию все
+// PID_FFT_KEYS, как в PIDReview; шаг 4 мастера передаёт только нужные ему — Tar, Act, D, Out): в set.FFT — только они
+// (компонента без данных в пакете — пустой массив), остальных ключей нет
+function pid_run_batch_fft(data_set, window_size, keys = PID_FFT_KEYS) {
 
     // Сброс прежнего расчёта (в upstream — clear_calculation при смене окна)
     for (const set of data_set) {
@@ -191,14 +193,14 @@ function pid_run_batch_fft(data_set, window_size) {
                 // Участок лога слишком короткий, пропускаем
                 continue
             }
-            const valid_keys = PID_FFT_KEYS.filter(key => data_set[j][i][key] != null)
+            const valid_keys = keys.filter(key => data_set[j][i][key] != null)
             var ret = run_fft(data_set[j][i], valid_keys, window_size, window_spacing, windowing_function, fft)
 
             // Заводим массивы
             if (!have_data) {
                 have_data = true
                 data_set[j].FFT = { time: [] }
-                for (const key of PID_FFT_KEYS) {
+                for (const key of keys) {
                     data_set[j].FFT[key] = []
                 }
             }
