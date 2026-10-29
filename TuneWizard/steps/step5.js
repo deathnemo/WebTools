@@ -144,6 +144,9 @@ function step5_init() {
     document.getElementById("step5_download").addEventListener("click", step5_download)
     document.getElementById("step5_remember").addEventListener("click", step5_remember)
     document.getElementById("step5_print").addEventListener("click", step5_print)
+    // Память прохода (localStorage) привязана к источнику страницы: http://127.0.0.1:8000 и http://localhost:8000 —
+    // разные памяти. Адрес — в поясняющей заметке, чтобы открывать мастер всегда по одному; у file:// источника нет
+    document.getElementById("step5_origin").textContent = (location.origin !== "null") ? location.origin : location.protocol + "//" + location.pathname
     // «К шагу N» в таблице шагов: кнопки строятся при каждой перерисовке — один обработчик на таблицу
     document.getElementById("steps5").addEventListener("click", (e) => {
         const button = e.target.closest("button[data-goto]")
@@ -217,7 +220,9 @@ function step5_download() {
     }, "verdict5", "шага 5")
 }
 
-// «Запомнить проход»: память без файла — значения вводятся на аппарате вручную [решение пользователя 25.10.2026]
+// «Запомнить проход»: память без файла — значения вводятся на аппарате вручную [решение пользователя 25.10.2026].
+// Доступна и без изменений (принят хотя бы один шаг): проход без изменений закрывает прошлый проход аппарата
+// (memory_save), иначе на сошедшемся логе старый проход жил бы вечно [наше]
 function step5_remember() {
     step5_note(memory_save())
 }
@@ -262,9 +267,11 @@ function step5_print() {
 // ---------- Отрисовка ----------
 
 // Сводка целиком: итог прохода (summary_rows), устаревшее принятое (step_accepted_stale), оси шага 4 без надёжного
-// измерения; кнопки файла и памяти — только при изменённых строках
+// измерения; «Скачать .param» — только при изменённых строках (файла без них нет), «Запомнить проход» — если принят
+// хотя бы один шаг (без изменений закрывает прошлый проход аппарата)
 function step5_render() {
-    const summary = summary_rows(step_summary_context())
+    const ctx = step_summary_context()
+    const summary = summary_rows(ctx)
     const rows = summary.rows
     const changed = rows.filter((row) => row.changed)
     const accepted = step5_steps.filter((n) => summary.accepted[n])
@@ -272,13 +279,32 @@ function step5_render() {
     const unreliable = step5_unreliable_axes()
 
     step5_render_tiles(changed, accepted, stale)
-    step5_render_verdict(changed, accepted, stale, unreliable)
+    step5_render_verdict(summary, ctx.bits, changed, accepted, stale, unreliable)
     step5_render_steps(stale)
     step5_render_changes(rows, summary.conflicts)
     step5_render_refly(rows, unreliable)
-    for (const id of ["step5_download", "step5_remember"]) {
-        document.getElementById(id).disabled = changed.length == 0
-    }
+    document.getElementById("step5_download").disabled = changed.length == 0
+    document.getElementById("step5_remember").disabled = accepted.length == 0
+}
+
+// Куда идёт значение при расхождении шагов (conflict — из summary_rows(…).conflicts, row — строка итога того же
+// имени): в файл — значение шага used, если строка изменена, иначе остаётся лог
+function step5_conflict_used(conflict, row) {
+    return row?.changed ? "в файл идёт шаг " + conflict.used : "действует шаг " + conflict.used + ", значение как в логе — в файл не идёт"
+}
+
+// Расхождение шагов для вердикта: «INS_GYRO_FILTER: на шаге 2 принято 50, на шаге 3 — 40 (как в логе), действует
+// шаг 3, значение как в логе — в файл не идёт» — значение, равное логу (summary_same по размеру маски bits),
+// помечено. Пользователь на шаге 2 ждал одного, а в файл идёт другое (или ничего) — это надо видеть в вердикте, а не
+// только в заметке под таблицей [наше]
+function step5_conflict_issue(conflict, rows, bits) {
+    const row = rows.find((r) => r.name === conflict.name) ?? null
+    const values = Object.keys(conflict.values).map((n, i) => {
+        const value = conflict.values[n]
+        const as_log = (row?.log != null) && summary_same(conflict.name, value, row.log, bits)
+        return ((i == 0) ? "на шаге " + n + " принято " : "на шаге " + n + " — ") + step_value_text(value) + (as_log ? " (как в логе)" : "")
+    })
+    return conflict.name + ": " + values.join(", ") + ", " + step5_conflict_used(conflict, row)
 }
 
 // Плитки: аппарат (плата — первое слово строки контроллера; рама и остаток строки — подписью), лог (прошивка подписью),
@@ -299,9 +325,10 @@ function step5_render_tiles(changed, accepted, stale) {
 }
 
 // Вердикт: ничего не принято (или лог не Copter) — «менять нечего» (и тестовый полёт, если оси шага 4 без надёжного
-// измерения уже известны); есть устаревшее, отметки шагов или оси шага 4 без надёжного измерения — предупреждение
-// с перечнем; иначе — готово или «совпадает с логом»
-function step5_render_verdict(changed, accepted, stale, unreliable) {
+// измерения уже известны); есть устаревшее, расхождение шагов (step5_conflict_issue), изменённые PID, менявшиеся
+// после интервала анализа (summary.moved), отметки шагов или оси шага 4 без надёжного измерения — предупреждение с
+// перечнем; иначе — готово или «совпадает с логом». summary — summary_rows(…), bits — размер маски HMNCS контекста
+function step5_render_verdict(summary, bits, changed, accepted, stale, unreliable) {
     if ((accepted.length == 0) || (state.info.vehicle !== "Copter")) {
         const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable)) + " (ниже)." : ""
         step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов 2–4 не принят." + tail)
@@ -312,6 +339,12 @@ function step5_render_verdict(changed, accepted, stale, unreliable) {
         issues.push("принятое шага " + stale[0] + " устарело — примите шаг " + stale[0] + " заново")
     } else if (stale.length > 1) {
         issues.push("принятое шагов " + stale.join(", ") + " устарело — примите их заново")
+    }
+    for (const conflict of summary.conflicts) {
+        issues.push(step5_conflict_issue(conflict, summary.rows, bits))
+    }
+    if (changed.some((row) => summary.moved.includes(row.name))) {
+        issues.push("PID менялись после интервала анализа: принятое перепишет значения конца лога (см. пометки)")
     }
     const flagged = []
     if ((state.steps[2] != null) && step2_flagged(state.steps[2].flags)) {
@@ -377,13 +410,11 @@ function step5_render_changes(rows, conflicts) {
         '<tr><td colspan="5">Изменённых параметров нет.</td></tr>'
     box.hidden = false
 
-    // Расхождение: значения шагов по порядку; в файл идёт значение шага used, если строка изменена, иначе остаётся лог
+    // Расхождение: значения шагов по порядку; куда идёт значение — step5_conflict_used
     const note = document.getElementById("conflicts5")
     note.textContent = conflicts.map((conflict) => {
         const values = Object.keys(conflict.values).map((n) => "шаг " + n + " — " + step_value_text(conflict.values[n])).join(", ")
-        const row = rows.find((r) => r.name === conflict.name)
-        const used = row?.changed ? "в файл идёт шаг " + conflict.used : "действует шаг " + conflict.used + ", значение как в логе — в файл не идёт"
-        return conflict.name + ": " + values + ", " + used + "."
+        return conflict.name + ": " + values + ", " + step5_conflict_used(conflict, rows.find((r) => r.name === conflict.name) ?? null) + "."
     }).join(" ")
     note.hidden = conflicts.length == 0
 

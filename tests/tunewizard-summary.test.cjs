@@ -1,6 +1,7 @@
 // Тесты итога прохода мастера настройки (TuneWizard/core/summary.js): сравнение значений как float32 и масок,
-// строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER, ESCMSK по версии фильтра,
-// включаемый notch, параметры без лога, ненадёжные оси шага 4), значения и текст .param из изменённых, имя
+// строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER — только между значениями,
+// отличными от лога; ESCMSK по версии фильтра, включаемый notch, параметры без лога, принятое не число, ненадёжные
+// оси шага 4, PID, менявшиеся после интервала анализа), значения и текст .param из изменённых, имя
 // файла, отпечаток входов принятого шага (по действующим отличиям от лога, у шага 4 — только по его фильтрам) и
 // «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы, включаемый notch, перезагрузка, тестовый
 // полёт, повтор) и имена с перезагрузкой по метаданным.
@@ -138,6 +139,7 @@ test('summary_rows: непринятые шаги — строк нет, accepte
         const result = summary_rows(rows_ctx({ steps: steps }))
         assert.deepEqual(result.rows, [])
         assert.deepEqual(result.conflicts, [])
+        assert.deepEqual(result.moved, [])
         assert.deepEqual(result.accepted, { 2: false, 3: false, 4: false })
     }
 })
@@ -154,6 +156,7 @@ test('summary_rows: строка — имя, было, станет, шаг, и�
     assert.deepEqual(row_of(result, 'ATC_RAT_RLL_P'),
         { name: 'ATC_RAT_RLL_P', log: Math.fround(0.135), value: Math.fround(0.135), step: 4, changed: false, note: null })
     assert.deepEqual(result.rows.filter((r) => r.changed).map((r) => r.name), ['INS_ACCEL_FILTER'])
+    assert.deepEqual(result.moved, [], 'без steps[4].set_values PID после интервала не проверяются')
 })
 
 test('summary_rows: сравнение как float32 — 0.7 при логе 0.699999988 не изменён, 0.71 — изменён', () => {
@@ -280,16 +283,41 @@ test('summary_rows: включение первого notch — все поля 
     assert.deepEqual(result.rows.filter((r) => r.changed).map((r) => r.name), notch1.map((r) => r.name))
 })
 
-test('summary_rows: INS_GYRO_FILTER шагов 2 и 3 — одна строка от шага 3, расхождение в conflicts', () => {
+test('summary_rows: INS_GYRO_FILTER шагов 2 и 3 — одна строка от шага 3; оба отличны от лога и разные — расхождение в conflicts', () => {
     const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 40 }) }
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 50 }) }
     steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 45 }) }
     const result = summary_rows(rows_ctx({ steps: steps }))
     const gyro = result.rows.filter((r) => r.name === 'INS_GYRO_FILTER')
     assert.deepEqual(gyro, [{ name: 'INS_GYRO_FILTER', log: 40, value: 45, step: 3, changed: true, note: null }])
-    assert.deepEqual(result.conflicts, [{ name: 'INS_GYRO_FILTER', values: { 2: 40, 3: 45 }, used: 3 }])
+    assert.deepEqual(result.conflicts, [{ name: 'INS_GYRO_FILTER', values: { 2: 50, 3: 45 }, used: 3 }])
     // Строка стоит среди строк шага 3: шаг 2 без INS_GYRO_FILTER, затем шаг 3 по порядку его имён
     assert.deepEqual(result.rows.map((r) => r.name), [...STEP2_NAMES.slice(1).filter((n) => !n.endsWith('_ESCMSK')), ...STEP3_NAMES])
+})
+
+test('summary_rows: типовой поток — шаг 2 оставил INS_GYRO_FILTER лога, шаг 3 поставил своё — расхождения нет', () => {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 40 }) }
+    steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { INS_GYRO_FILTER: 42 }) }
+    const result = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(result.conflicts, [], 'шаг 2 ничего не выбирал — расхождения нет')
+    assert.deepEqual(row_of(result, 'INS_GYRO_FILTER'), { name: 'INS_GYRO_FILTER', log: 40, value: 42, step: 3, changed: true, note: null })
+    // Значение лога у шага 2 — float32 той же величины (из формы 40.0 при логе 40)
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 40.0 }) }
+    assert.deepEqual(summary_rows(rows_ctx({ steps: steps })).conflicts, [])
+    // Оба шага оставили лог — тоже нет
+    steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG) }
+    assert.deepEqual(summary_rows(rows_ctx({ steps: steps })).conflicts, [])
+})
+
+test('summary_rows: шаг 2 поставил свой INS_GYRO_FILTER, шаг 3 вернул лог — расхождение, строка не изменена, в .param не идёт', () => {
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_GYRO_FILTER: 50 }) }
+    steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG) }
+    const result = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(result.conflicts, [{ name: 'INS_GYRO_FILTER', values: { 2: 50, 3: 40 }, used: 3 }])
+    assert.deepEqual(row_of(result, 'INS_GYRO_FILTER'), { name: 'INS_GYRO_FILTER', log: 40, value: 40, step: 3, changed: false, note: null })
+    assert.equal(summary_param_text(result.rows, 8), null)
 })
 
 test('summary_rows: одинаковый INS_GYRO_FILTER шагов 2 и 3 (как float32) — расхождения нет', () => {
@@ -339,6 +367,72 @@ test('summary_rows: шаг 4 без axes или с metrics null — правка
         assert.equal(row.changed, true)
         assert.equal(row.note, null)
     }
+})
+
+test('summary_rows: PID менялись после интервала анализа (steps[4].set_values ≠ конец лога) — пометка у строки и имя в moved', () => {
+    const moved_note = 'в конце лога другое значение: параметры менялись после интервала анализа'
+    // Набор анализа: P крена и D тангажа другие, чем в конце лога (0.135 и 0.0036 из BASE_LOG); остальное — как в конце
+    const set_values = accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.12, ATC_RAT_PIT_D: 0.003 })
+    const steps = []
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.125, ATC_RAT_PIT_P: 0.14 }),
+                 axes: step4_axes({ roll: false }), set_values: set_values }
+    const result = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(result.moved, ['ATC_RAT_RLL_P', 'ATC_RAT_PIT_D'], 'по порядку имён шага 4')
+    // Изменённая строка ненадёжной оси: обе пометки через «; »
+    assert.deepEqual(row_of(result, 'ATC_RAT_RLL_P'), { name: 'ATC_RAT_RLL_P', log: Math.fround(0.135), value: 0.125, step: 4, changed: true,
+        note: 'ось ненадёжна — значение введено вручную; ' + moved_note })
+    // Неизменённая строка (принято как в конце лога) — пометка всё равно есть, в .param не идёт
+    assert.deepEqual(row_of(result, 'ATC_RAT_PIT_D'), { name: 'ATC_RAT_PIT_D', log: Math.fround(0.0036), value: Math.fround(0.0036), step: 4, changed: false,
+        note: moved_note })
+    // Набор анализа равен концу лога — без пометки
+    assert.deepEqual(row_of(result, 'ATC_RAT_PIT_P'), { name: 'ATC_RAT_PIT_P', log: Math.fround(0.135), value: 0.14, step: 4, changed: true, note: null })
+    assert.equal(row_of(result, 'ATC_RAT_RLL_I').note, null)
+    assert.deepEqual(Object.keys(summary_param_values(result.rows, 8)).sort(), ['ATC_RAT_PIT_P', 'ATC_RAT_RLL_P'])
+
+    // Набор анализа равен концу лога как float32 (0.135 против Math.fround(0.135)) — не менялись; нет числа (NaN,
+    // нет поля) — не проверяется
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG), axes: step4_axes(),
+                 set_values: { ...accepted_values(STEP4_NAMES, BASE_LOG), ATC_RAT_RLL_P: 0.135, ATC_RAT_PIT_P: NaN, ATC_RAT_YAW_P: undefined } }
+    const same = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(same.moved, [])
+    assert.equal(same.rows.every((row) => row.note == null), true)
+    // Параметра нет в логе — только пометка «нет в логе», в moved не попадает
+    const log = { ...BASE_LOG }
+    delete log.ATC_RAT_YAW_D
+    steps[4] = { accepted: accepted_values(STEP4_NAMES, log), axes: step4_axes(), set_values: { ...accepted_values(STEP4_NAMES, log), ATC_RAT_YAW_D: 0.001 } }
+    const absent = summary_rows(rows_ctx({ log: log, steps: steps }))
+    assert.deepEqual(absent.moved, [])
+    assert.equal(row_of(absent, 'ATC_RAT_YAW_D').note, 'нет в логе — не пишется')
+    // set_values null или нет — как раньше
+    for (const set of [null, undefined]) {
+        steps[4] = { accepted: accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.125 }), axes: step4_axes(), set_values: set }
+        assert.deepEqual(summary_rows(rows_ctx({ steps: steps })).moved, [])
+    }
+})
+
+test('summary_rows: принятое не число (поля нет, NaN) — не изменено, с пометкой; .param не бросает, расхождений по нему нет', () => {
+    const steps = []
+    const accepted2 = accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_FREQ: 75, INS_GYRO_FILTER: 50 })
+    delete accepted2.INS_HNTCH_BW
+    steps[2] = { accepted: accepted2 }
+    steps[3] = { accepted: accepted_values(STEP3_NAMES, BASE_LOG, { ATC_RAT_RLL_FLTD: NaN, INS_GYRO_FILTER: NaN }) }
+    const result = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(row_of(result, 'INS_HNTCH_BW'), { name: 'INS_HNTCH_BW', log: 40, value: undefined, step: 2, changed: false, note: 'значение не число — пропущено' })
+    assert.deepEqual(row_of(result, 'ATC_RAT_RLL_FLTD'), { name: 'ATC_RAT_RLL_FLTD', log: 20, value: NaN, step: 3, changed: false, note: 'значение не число — пропущено' })
+    assert.deepEqual(result.rows.filter((r) => r.changed).map((r) => r.name), ['INS_HNTCH_FREQ'])
+    assert.equal(summary_param_text(result.rows, 8), 'INS_HNTCH_FREQ,75\n')
+    // INS_GYRO_FILTER: шаг 2 — 50, шаг 3 — NaN: итог не число — не расхождение, строка не изменена
+    assert.deepEqual(result.conflicts, [])
+    assert.equal(row_of(result, 'INS_GYRO_FILTER').changed, false)
+    assert.doesNotThrow(() => summary_inputs_key(4, { ...rows_ctx({ steps: steps }), start: 1, end: 2 }))
+
+    // Поле включаемого notch не число — пропущено, остальные поля включаемого notch изменены
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTC2_ENABLE: 1, INS_HNTC2_FREQ: NaN }) }
+    steps[3] = null
+    const enabling = summary_rows(rows_ctx({ steps: steps }))
+    assert.deepEqual(row_of(enabling, 'INS_HNTC2_FREQ'), { name: 'INS_HNTC2_FREQ', log: null, value: NaN, step: 2, changed: false, note: 'значение не число — пропущено' })
+    assert.equal(row_of(enabling, 'INS_HNTC2_BW').changed, true)
+    assert.doesNotMatch(summary_param_text(enabling.rows, 8), /INS_HNTC2_FREQ/)
 })
 
 // ---------------------------------------------------------------- .param
