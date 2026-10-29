@@ -285,11 +285,14 @@ function median_in_range(time, freq, range) {
     return median_of(selected)
 }
 
-// Моторная частота: медиана среднего ESC (compute_avg(0).avg_freq) в диапазоне, иначе медиана цели газа
-// (tracking[1].get_target_freq(config) с config из values), иначе null.
-// tracking — источники из create_tracking (ищутся по имени: "ESC", "Throttle"); values — объект имя → число
+// Моторная частота: медиана среднего ESC (compute_avg(0).avg_freq) в диапазоне; без ESC — по тому, чем notch
+// в логе следит за моторами: при INS_HNTCH_MODE = 1 медиана цели газа (tracking[1].get_target_freq(config) с config
+// из values), при INS_HNTCH_MODE = 4 медиана центрального пика бортового FFT (FTN1.PkAvg, источник "FFT"); иначе null.
+// tracking — источники из create_tracking (ищутся по имени: "ESC", "Throttle", "FFT"); values — объект имя → число
 // с параметрами INS_HNTCH_*. Цель газа осмысленна только при INS_HNTCH_FREQ > 0 и INS_HNTCH_REF > 0: при REF = 0
-// она постоянна и равна FREQ, то есть о моторах ничего не говорит [наше]. range = [t0, t1], секунды
+// она постоянна и равна FREQ, то есть о моторах ничего не говорит [наше]. В других режимах (статический, RPM, ESC без
+// данных) FREQ и REF к газу не относятся: без проверки режима FREQ 40 / REF 1 режима ESC давали «моторную» частоту
+// ~13 Гц из газа, и пик моторов подписывался рамой (аудит, I1). range = [t0, t1], секунды
 function motor_fundamental(tracking, values, range) {
     const esc = tracking.find((t) => t.name === "ESC")
     if ((esc != null) && esc.have_data()) {
@@ -300,19 +303,30 @@ function motor_fundamental(tracking, values, range) {
         }
     }
 
-    const throttle = tracking.find((t) => t.name === "Throttle")
-    const config = {
-        freq: values["INS_HNTCH_FREQ"] ?? 0,
-        ref: values["INS_HNTCH_REF"] ?? 0,
-        min_ratio: values["INS_HNTCH_FM_RAT"] ?? 0,
-        // Средний газ, а не по отдельным моторам
-        options: 0,
-        esc_mask: 0,
+    const mode = values["INS_HNTCH_MODE"] ?? 0
+    if (mode == 1) {
+        const throttle = tracking.find((t) => t.name === "Throttle")
+        const config = {
+            freq: values["INS_HNTCH_FREQ"] ?? 0,
+            ref: values["INS_HNTCH_REF"] ?? 0,
+            min_ratio: values["INS_HNTCH_FM_RAT"] ?? 0,
+            // Средний газ, а не по отдельным моторам
+            options: 0,
+            esc_mask: 0,
+        }
+        if ((throttle != null) && (config.freq > 0) && (config.ref > 0) && throttle.have_data(config)) {
+            const target = throttle.get_target_freq(config)
+            if ((target != null) && (target.time != null)) {
+                return median_in_range(target.time, target.freq, range)
+            }
+        }
     }
-    if ((throttle != null) && (config.freq > 0) && (config.ref > 0) && throttle.have_data(config)) {
-        const target = throttle.get_target_freq(config)
-        if ((target != null) && (target.time != null)) {
-            return median_in_range(target.time, target.freq, range)
+
+    if (mode == 4) {
+        // Бортовой FFT отслеживает главный пик шума; в режиме 4 прошивка считает его моторным — берём его медиану
+        const fft = tracking.find((t) => t.name === "FFT")
+        if ((fft != null) && fft.have_data({ options: 0 }) && (fft.data.time != null)) {
+            return median_in_range(fft.data.time, fft.data.value, range)
         }
     }
 
