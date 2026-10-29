@@ -929,9 +929,13 @@ function pidtune_beyond(value, limit, digits) {
 }
 
 // Изменение коэффициента словами с фактическим процентом: «+5.3 %», «−20.0 %» (ограниченное пределом правило говорит
-// «P +10 %», а даёт меньше — число в причине [аудит области D, M-9])
+// «P +10 %», а даёт меньше — число в причине [аудит области D, M-9]). От нуля (или нечислового) процент не определён —
+// «—», а не «+Infinity %»
 function pidtune_percent_text(from, to) {
     const pct = (to - from) / from * 100
+    if (!Number.isFinite(pct)) {
+        return "—"
+    }
     return ((pct < 0) ? "−" : "+") + Math.abs(pct).toFixed(1) + " %"
 }
 

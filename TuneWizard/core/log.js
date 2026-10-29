@@ -243,9 +243,12 @@ function esc_summary(log) {
 
 // Крайние метки времени лога, мкс: { start, end } или null. Сначала ATT, RATE, CTUN по порядку (первое с двумя и больше
 // отсчётами — как границы графиков FilterReview/PIDReview); без них (аудит, I3) — данные гироскопа: ISBH.SampleUS,
-// затем GYR.SampleUS по экземплярам; иначе — первая и последняя TimeUS по всем сообщениям без экземпляров (у каждого
-// сообщения с двумя и больше отсчётами; такие читаются через get). Сообщение может быть объявлено без единой строки:
-// поля нет, get возвращает undefined
+// затем GYR.SampleUS по экземплярам; иначе — первая и последняя TimeUS первого подходящего из короткого списка обычных
+// сообщений (LOG_FALLBACK_TIME_MESSAGES: пишутся весь полёт, читаются через get; с двумя и больше отсчётами), а не всех
+// типов лога — get по каждому типу разбирал бы весь лог (ревью исправлений аудита). Сообщение списка с экземплярами
+// (IMU, BARO, BAT, MAG в новых прошивках) пропускается: get на таких падает. Сообщение может быть объявлено без
+// единой строки: поля нет, get возвращает undefined
+const LOG_FALLBACK_TIME_MESSAGES = ["RCOU", "RCIN", "PM", "XKF1", "IMU", "BARO", "BAT", "MAG", "MODE"]
 function log_time_bounds(log) {
     const span = (t) => ((t != null) && (t.length > 1)) ? { start: t[0], end: t[t.length - 1] } : null
     for (const name of ["ATT", "RATE", "CTUN"]) {
@@ -282,13 +285,16 @@ function log_time_bounds(log) {
             return bounds
         }
     }
-    for (const name of Object.keys(log.messageTypes)) {
-        if (log.messageTypes[name].instances != null) {
+    for (const name of LOG_FALLBACK_TIME_MESSAGES) {
+        if (!(name in log.messageTypes) || (log.messageTypes[name].instances != null)) {
             continue
         }
-        extend(span(log.get(name, "TimeUS")))
+        const found = span(log.get(name, "TimeUS"))
+        if (found != null) {
+            return found
+        }
     }
-    return bounds
+    return null
 }
 
 // Рама из сообщений MSG: текст после «Frame: » первого сообщения, которое так начинается («Frame: QUAD/X_REV» —

@@ -279,7 +279,7 @@ test('log_info: ATT объявлен, но без строк (нет полей)
     assert.equal(info.time_end, 3)
 })
 
-test('log_info: без ATT, RATE и CTUN границы — из ISBH.SampleUS, GYR.SampleUS или любого сообщения с TimeUS (аудит, I3)', () => {
+test('log_info: без ATT, RATE и CTUN границы — из ISBH.SampleUS, GYR.SampleUS или первого из короткого списка обычных сообщений (аудит, I3)', () => {
     const bounds = (messages) => {
         const info = core_log.log_info(fake_log({ messages }), copter_version)
         return [info.time_start, info.time_end, info.duration_s]
@@ -288,11 +288,19 @@ test('log_info: без ATT, RATE и CTUN границы — из ISBH.SampleUS, 
     assert.deepEqual(bounds({ ISBH: { N: [0, 1, 2], SampleUS: [10e6, 11e6, 12e6] }, PARM: { TimeUS: [1e6, 1e6] } }), [10, 12, 2])
     // Raw-лог: GYR по экземплярам (читается через get_instance), объединение по всем экземплярам
     assert.deepEqual(bounds({ GYR: { instances: { 0: { SampleUS: [20e6, 25e6] }, 1: { SampleUS: [21e6, 26e6] } } } }), [20, 26, 6])
-    // Ни того ни другого: крайние TimeUS сообщений без экземпляров (сообщения с экземплярами, как VIBE, пропускаются)
-    assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6, 9e6] }, MSG: { TimeUS: [4e6, 6e6], Message: ['a', 'b'] }, VIBE: { instances: { 0: { TimeUS: [0, 50e6] } } } }), [4, 9, 5])
-    // ATT в приоритете, как раньше; сообщение с одним отсчётом границ не задаёт
+    // Ни того ни другого: крайние TimeUS первого подходящего из короткого списка (RCOU, RCIN, PM, XKF1, …) — не всех
+    // сообщений лога (ревью: get по каждому типу — лишний разбор); MSG в списке нет, сообщения с экземплярами (VIBE)
+    // и из списка (IMU с экземплярами) пропускаются без чтения — get на них падает
+    assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6, 9e6] }, MSG: { TimeUS: [4e6, 6e6], Message: ['a', 'b'] }, VIBE: { instances: { 0: { TimeUS: [0, 50e6] } } },
+                             IMU: { instances: { 0: { TimeUS: [0, 50e6] } } } }), [5, 9, 4])
+    // Первое подходящее по порядку списка: RCOU раньше XKF1; сообщение списка с одним отсчётом (MODE) пропускается,
+    // объявленное без строк (PM) — тоже
+    assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6, 9e6] }, RCOU: { TimeUS: [3e6, 8e6] } }), [3, 8, 5])
+    assert.deepEqual(bounds({ MODE: { TimeUS: [7e6] }, PM: {}, XKF1: { TimeUS: [5e6, 9e6] } }), [5, 9, 4])
+    // ATT в приоритете, как раньше; сообщение с одним отсчётом границ не задаёт; сообщение не из списка не считается
     assert.deepEqual(bounds({ ATT: { TimeUS: [1e6, 3e6] }, ISBH: { SampleUS: [10e6, 12e6] } }), [1, 3, 2])
     assert.deepEqual(bounds({ XKF1: { TimeUS: [5e6] } }), [null, null, null])
+    assert.deepEqual(bounds({ MSG: { TimeUS: [4e6, 6e6], Message: ['a', 'b'] } }), [null, null, null])
     assert.deepEqual(bounds({}), [null, null, null])
     assert.deepEqual(core_log.log_time_bounds(fake_log({ messages: { ISBH: { SampleUS: [10e6, 12e6] } } })), { start: 10e6, end: 12e6 })
 })

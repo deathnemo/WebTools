@@ -426,11 +426,13 @@ function step2_fill_form(values) {
     step2_param_read()
 }
 
-// Аналог filter_param_read и update_hidden_params FilterReview: поля notch с ENABLE = 0 выключены, ESCMSK
-// виден только когда он есть у аппарата (step2_escmsk_present; иначе 0), размер маски HMNCS — 32 бита, если в логе
-// есть INS_RAW_LOG_OPT или версия фильтра не ниже 3, иначе 8. Затем пометки изменённых полей и подсветка
-// «Пересчитать фильтры»
+// Аналог filter_param_read и update_hidden_params FilterReview: сначала поля приводятся к допустимым значениям
+// (step2_coerce_form), поля notch с ENABLE = 0 выключены, ESCMSK виден только когда он есть у аппарата
+// (step2_escmsk_present; иначе 0), размер маски HMNCS — 32 бита, если в логе есть INS_RAW_LOG_OPT или версия фильтра не
+// ниже 3, иначе 8. Затем пометки изменённых полей и подсветка «Пересчитать фильтры». Зовётся там, где форма менялась:
+// правка поля (step2_form_changed), «Применить вариант», загрузка .param, показ шага и готовность разметки
 function step2_param_read() {
+    step2_coerce_form()
     const escmsk_present = step2_escmsk_present()
     for (const names of notch_param_names()) {
         const enabled = parameter_get_value(names.enable) > 0
@@ -480,19 +482,39 @@ function step2_field_value(name, text, log_value, bits) {
     return { value: value, text: step2_value_text(name, value) }
 }
 
-// Значения формы: объект имя → число float32, маски — целые. Каждое поле приводится к допустимому значению
-// (step2_field_value), и приведённое записывается обратно в поле, чтобы расчёт и файл .param не расходились с тем,
-// что видно в форме. ESCMSK без step2_escmsk_present — 0, как в values_from_log
+// Размер маски поля формы в битах для step2_field_value: HMNCS — по логу и версии фильтра (step2_harmonics_bits),
+// прочие маски — 32, не маска — null
+function step2_field_bits(name) {
+    return is_bitmask_param(name) ? (name.endsWith("_HMNCS") ? step2_harmonics_bits() : 32) : null
+}
+
+// Приведение полей формы к допустимым значениям (step2_field_value): приведённый текст записывается в поле, чтобы
+// расчёт и файл .param не расходились с тем, что видно в форме. Только из step2_param_read — после правки поля,
+// «Применить вариант», загрузки .param и показа шага; геттер values_from_form поля не трогает (его зовёт и отрисовка —
+// побочный эффект там не место) [ревью исправлений аудита]
+function step2_coerce_form() {
+    const log_values = values_from_log()
+    for (const name of step2_param_names()) {
+        const field = document.getElementById(name)
+        if (field == null) {
+            continue
+        }
+        const result = step2_field_value(name, field.value, log_values[name], step2_field_bits(name))
+        if ((result.text != null) && (result.text !== field.value)) {
+            parameter_set_value(name, result.text)
+        }
+    }
+}
+
+// Значения формы: объект имя → число float32, маски — целые. Каждое поле читается приведённым к допустимому
+// значению (step2_field_value) — тем же, что step2_coerce_form записывает в поле; сама функция чистая, поля не
+// меняет. ESCMSK без step2_escmsk_present — 0, как в values_from_log
 function values_from_form() {
     const log_values = values_from_log()
     const values = {}
     for (const name of step2_param_names()) {
         const field = document.getElementById(name)
-        const bits = is_bitmask_param(name) ? (name.endsWith("_HMNCS") ? step2_harmonics_bits() : 32) : null
-        const result = step2_field_value(name, (field != null) ? field.value : "", log_values[name], bits)
-        if ((field != null) && (result.text != null) && (result.text !== field.value)) {
-            parameter_set_value(name, result.text)
-        }
+        const result = step2_field_value(name, (field != null) ? field.value : "", log_values[name], step2_field_bits(name))
         values[name] = step2_fround_value(name, result.value)
     }
     if (!step2_escmsk_present()) {

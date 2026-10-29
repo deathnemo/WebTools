@@ -214,7 +214,8 @@ function gyro_params({ bat_opt = 0, raw_opt = null, extra = [] } = {}) {
 }
 
 // ESC-телеметрия четырёх моторов: отсчёты каждые 0.05 с с 9 по 15 с, обороты rpm; nan = { instance, time } —
-// один отсчёт этого экземпляра в этот момент заменён NaN (как quiet_nanf() прошивки без оборотов)
+// один отсчёт этого экземпляра в этот момент заменён NaN (как quiet_nanf() прошивки без оборотов); time null — все
+// отсчёты экземпляра NaN (мотор без оборотов весь лог)
 function esc_messages(rpm, nan = null) {
     const ESC = { instances: {} }
     for (let i = 0; i < 4; i++) {
@@ -223,7 +224,7 @@ function esc_messages(rpm, nan = null) {
         for (let n = 0; n <= 120; n++) {
             const t = 9 + n * 0.05
             TimeUS.push(Math.round(t * 1e6))
-            RPM.push((nan != null && nan.instance == i && Math.abs(t - nan.time) < 1e-6) ? NaN : rpm)
+            RPM.push((nan != null && nan.instance == i && ((nan.time == null) || (Math.abs(t - nan.time) < 1e-6))) ? NaN : rpm)
         }
         ESC.instances[i] = { TimeUS, RPM }
     }
@@ -332,6 +333,54 @@ test('C1 сквозной: NaN в ESC.RPM у центра окна FFT — H и 
         const stats = notch_line_stats(dirty.filters, range)
         assert.ok(Number.isFinite(stats[0].harmonics[0].mean))
     }
+})
+
+test('C1 экземпляр из одних NaN: мотор ESC без единого числового отсчёта — без данных, цель и H по остальным конечны; RPM из одних NaN — have_data false', () => {
+    // Раньше такой экземпляр регистрировался с пустыми рядами, linear_interp([], [], t) давал цель NaN, и H была NaN во всех
+    // окнах — даже при исправных остальных моторах (ревью исправлений аудита)
+    const log = fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6], RPM: [NaN, NaN, NaN] },
+        1: { TimeUS: [0, 1e6, 2e6], RPM: [6000, 6000, 6000] }
+    } } } })
+    const esc = new ESCTarget(log, env0)
+    assert.equal(esc.data[0], undefined, 'экземпляр без отсчётов не зарегистрирован')
+    assert.equal(esc.get_num_motors(), 1)
+    assert.equal(esc.data.all.length, 3)
+    esc.interpolate(0, [0.5, 1.5])
+    for (const opts of [0, 2]) {
+        assert.deepEqual(esc.get_interpolated_target_freq(0, 0, { options: opts, ref: 1, freq: 40, esc_mask: 0 }), [100], 'OPTS ' + opts)
+    }
+    assert.ok(Number.isFinite(esc.get_mean([0, 2])))
+    // Все моторы без оборотов — источник без данных: load_filters выключит notch с предупреждением
+    const none = new ESCTarget(fake_log({ messages: { ESC: { instances: { 0: { TimeUS: [0, 1e6], RPM: [NaN, NaN] } } } } }), env0)
+    assert.equal(none.have_data(), false)
+    assert.equal(none.get_num_motors(), undefined)
+    assert.equal(none.get_target_freq({ options: 0, ref: 1, freq: 40, esc_mask: 0 }), undefined)
+
+    // Сквозная: третий мотор без оборотов весь лог — H и цель окна конечны по трём остальным, предупреждений нет
+    for (const opts of [0, 2]) {
+        const dirty = setup(fake_log({ messages: { ...batch_messages({ noise: 0.3 }), ...esc_messages(3600, { instance: 2, time: null }) }, params: gyro_params() }), esc_values(opts))
+        assert.deepEqual(dirty.filters.warnings, [])
+        assert.equal(dirty.tracking[3].get_num_motors(), 3)
+        const FFT = dirty.gyro[0].FFT
+        for (let j = 0; j < FFT.H.length; j++) {
+            assert.ok(finite(FFT.H[j][0]) && finite(FFT.H[j][1]), 'OPTS ' + opts + ': H окна ' + j + ' конечна')
+        }
+        const target = dirty.tracking[3].get_interpolated_target_freq(0, 0, { options: opts, ref: 1, freq: 40, esc_mask: 0 })
+        assert.ok(finite(target), 'OPTS ' + opts + ': цель первого окна: ' + target)
+        assert.equal(target.length, (opts == 2) ? 3 : 1, 'OPTS ' + opts + ': целей по числу моторов с данными')
+    }
+
+    // RPM из одних NaN: данных нет (have_data false), notch по нему выключен с предупреждением, а не с целью NaN
+    const rpm_log = fake_log({ messages: { RPM: { instances: { 0: { TimeUS: [0, 1e6, 2e6], RPM: [NaN, NaN, NaN], H: [1, 1, 1] } } } } })
+    const rpm = new RPMTarget(rpm_log, env0, 1, 2)
+    assert.equal(rpm.have_data(), false)
+    assert.equal(rpm.get_target_freq({ ref: 1, freq: 50 }), undefined)
+    const filters = load_filters({ ...esc_values(0), INS_HNTCH_MODE: 2 }, env0, [rpm])
+    assert.equal(filters.notch[0].enabled(), false)
+    assert.deepEqual(filters.warnings, ['Нет данных трекинга для notch RPM1'])
+    // Старый формат — то же
+    assert.equal(new RPMTarget(fake_log({ messages: { RPM: { TimeUS: [0, 1e6], rpm1: [NaN, NaN] } } }), env0, 1, 2).have_data(), false)
 })
 
 test('C1 страховка: окно с нечисловой H не входит в estimate_post, bode_mean и спектрограмму оценки', () => {

@@ -1070,16 +1070,18 @@ function step4_apply() {
 
 // «Интервал — участок ACRO»: интервал анализа — участок ACRO лога тестового полёта (step4_acro_interval) через поля
 // шага 0 и interval_input_changed (wizard.js: зажим в границы лога, график полёта), затем пересчёт шага (интервал —
-// часть ключа расчёта)
+// часть ключа расчёта). Под step_try, как остальные кнопки шага: неожиданная ошибка — в вердикт, а не в консоль молча
 function step4_acro_apply() {
-    const interval = step4_acro_interval()
-    if (interval == null) {
-        return
-    }
-    document.getElementById("TimeStart").value = interval.start
-    document.getElementById("TimeEnd").value = interval.end
-    interval_input_changed()
-    step4_show()
+    step_try(() => {
+        const interval = step4_acro_interval()
+        if (interval == null) {
+            return
+        }
+        document.getElementById("TimeStart").value = interval.start
+        document.getElementById("TimeEnd").value = interval.end
+        interval_input_changed()
+        step4_show()
+    }, "verdict4", "шага 4")
 }
 
 // Поля, которые принять нельзя: пустые или нечисловые (step4_values_from_form даёт NaN — значение неизвестно)

@@ -2,7 +2,8 @@
 // Перенос из FilterReview/tracking/RPM.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s.
 // Отличие от upstream (аудит, C1): отсчёты с нечисловыми оборотами отбрасываются при чтении (см. конструктор);
-// массив оборотов копируется, и отметка нездорового датчика (−1) больше не пишется в данные парсера.
+// массив оборотов копируется, и отметка нездорового датчика (−1) больше не пишется в данные парсера; без единого
+// числового отсчёта источник остаётся без данных.
 class RPMTarget extends NotchTarget {
     constructor(log, env, instance, mode_value) {
         super(null, env, null, null, "RPM" + instance, mode_value)
@@ -47,17 +48,23 @@ class RPMTarget extends NotchTarget {
         }
 
         // Нечисловые обороты (датчик без данных пишет NaN, как и ESC) — не отсчёт: время и значение отбрасываются вместе,
-        // иначе NaN уходил в цель notch и в передаточную функцию окна (аудит, C1)
-        this.data.time = []
-        this.data.value = []
+        // иначе NaN уходил в цель notch и в передаточную функцию окна (аудит, C1). Ни одного числового отсчёта — данные
+        // не присваиваются: have_data() false, и load_filters выключит notch с предупреждением, а не с целью NaN
+        const time = []
+        const value = []
         const len = Math.min(time_us.length, rpm.length)
         for (let i = 0; i < len; i++) {
             if (!Number.isFinite(rpm[i])) {
                 continue
             }
-            this.data.time.push(time_us[i] * US2S)
-            this.data.value.push(rpm[i])
+            time.push(time_us[i] * US2S)
+            value.push(rpm[i])
         }
+        if (time.length == 0) {
+            return
+        }
+        this.data.time = time
+        this.data.value = value
     }
 
     get_target(config, rpm) {

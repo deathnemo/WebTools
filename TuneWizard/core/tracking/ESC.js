@@ -1,7 +1,8 @@
 // Трекинг по ESC.
 // Перенос из FilterReview/tracking/ESC.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s; get_mean(range) принимает диапазон.
-// Отличие от upstream (аудит, C1): отсчёты с нечисловыми оборотами отбрасываются при чтении (см. конструктор).
+// Отличие от upstream (аудит, C1): отсчёты с нечисловыми оборотами отбрасываются при чтении (см. конструктор); экземпляр
+// без единого числового отсчёта не регистрируется, а без таких экземпляров источник остаётся без данных.
 class ESCTarget extends NotchTarget {
     constructor(log, env) {
         super(null, env, null, null, "ESC", 3)
@@ -36,7 +37,17 @@ class ESCTarget extends NotchTarget {
                 time.push(time_us[j] * US2S)
                 freq.push(rpm[j] * scale)
             }
+            if (time.length == 0) {
+                // Ни одного числового отсчёта (мотор без оборотов весь лог) — как экземпляр без строк: остальной код
+                // обходит this.data[i] == null, а пустой ряд давал бы в linear_interp цель NaN во всех окнах
+                continue
+            }
             this.data[inst] = { time, freq }
+        }
+        if (this.data.length == 0) {
+            // Оборотов нет ни у одного мотора — источник без данных (have_data false): load_filters выключит notch
+            // с предупреждением вместо пустой цели
+            return
         }
 
         // Общий массив отсчётов всех моторов, отсортированный по времени — для расчёта среднего на лету

@@ -964,6 +964,15 @@ test('pidtune_rule: пределы AutoTune — P 0.01…2.0, D ≤ 0.2', () => 
     assert.ok(back.reason.endsWith('(ограничено: предел AutoTune P 0.01…2 — фактически P −20.0 %)'), back.reason)
 })
 
+test('pidtune_percent_text: знак и одна цифра после запятой; от нуля процент не определён — «—», а не «+Infinity %»', () => {
+    assert.equal(pidtune_percent_text(1.9, 2), '+5.3 %')
+    assert.equal(pidtune_percent_text(0.25, 0.2), '−20.0 %')
+    assert.equal(pidtune_percent_text(0.1, 0.1), '+0.0 %')
+    assert.equal(pidtune_percent_text(0, 0.01), '—')
+    assert.equal(pidtune_percent_text(0, 0), '—')
+    assert.equal(pidtune_percent_text(NaN, 0.1), '—')
+})
+
 test('pidtune_rule: предлагаемые значения — 4 значащие цифры, I — от округлённого P (0.1163·1.1 → 0.1279, а не 0.12793000000000002)', () => {
     assert.equal(pidtune_round(0.12793000000000002), 0.1279)
     assert.equal(pidtune_round(0.002637), 0.002637)

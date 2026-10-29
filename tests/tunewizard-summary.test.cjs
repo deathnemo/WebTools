@@ -1,6 +1,6 @@
 // Тесты итога прохода мастера настройки (TuneWizard/core/summary.js): сравнение значений как float32 и масок,
 // строки итога по принятым шагам 2–4 (порядок источников и расхождение INS_GYRO_FILTER — только между значениями,
-// отличными от лога; ESCMSK по версии фильтра, включаемый notch, параметры без лога, принятое не число, ненадёжные
+// отличными от лога; ESCMSK по правилу escmsk_present, включаемый notch, параметры без лога, принятое не число, ненадёжные
 // оси шага 4, PID, менявшиеся после интервала анализа), значения и текст .param из изменённых, имя
 // файла, отпечаток входов принятого шага (по действующим отличиям от лога, у шага 4 — только по его фильтрам) и
 // «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы, включаемый notch, перезагрузка, тестовый
@@ -190,22 +190,42 @@ test('summary_rows: маска HMNCS 8 бит — лог −128 и принят�
     assert.deepEqual(summary_param_values(wide.rows, 32), { INS_HNTCH_HMNCS: 128 })
 })
 
-test('summary_rows: ESCMSK при версии фильтра ниже 4 — строки нет, с версии 4 — есть', () => {
-    const log = { ...BASE_LOG, INS_HNTCH_ESCMSK: 15 }
+test('summary_rows: ESCMSK не записан в лог — при версии фильтра ниже 4 строки нет, с версии 4 — есть (escmsk_present)', () => {
+    // Маски в логе нет (BASE_LOG), шаг 2 поставил свою: у прошивки с версией фильтра 2 параметра нет — строки нет
     const steps = []
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTCH_ESCMSK: 0 }) }
-    const old = summary_rows(rows_ctx({ log: log, steps: steps, filter_version: 2 }))
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG, { INS_HNTCH_ESCMSK: 3 }) }
+    const old = summary_rows(rows_ctx({ steps: steps, filter_version: 2 }))
     assert.deepEqual(old.rows.filter((r) => r.name.endsWith('_ESCMSK')), [])
     assert.equal(old.rows.length, STEP2_NAMES.length - 2)
 
-    steps[2] = { accepted: accepted_values(STEP2_NAMES, log) }
-    const v4 = summary_rows(rows_ctx({ log: log, steps: steps, filter_version: 4 }))
+    // С версии 4 параметр есть у всех прошивок: строки есть, без записи в логе — не изменены и не пишутся
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, BASE_LOG) }
+    const v4 = summary_rows(rows_ctx({ steps: steps, filter_version: 4 }))
     assert.deepEqual(v4.rows.filter((r) => r.name.endsWith('_ESCMSK')).map((r) => r.name), ['INS_HNTCH_ESCMSK', 'INS_HNTC2_ESCMSK'])
     assert.equal(row_of(v4, 'INS_HNTCH_ESCMSK').changed, false)
+    assert.equal(row_of(v4, 'INS_HNTCH_ESCMSK').note, 'нет в логе — не пишется')
 
     // Версия фильтра неизвестна — как ниже 4 (защитное правило, как step2_save_param)
-    const unknown = summary_rows({ ...rows_ctx({ log: log, steps: steps }), filter_version: undefined })
+    const unknown = summary_rows({ ...rows_ctx({ steps: steps }), filter_version: undefined })
     assert.deepEqual(unknown.rows.filter((r) => r.name.endsWith('_ESCMSK')), [])
+})
+
+test('summary_rows: ESCMSK записан в лог при версии фильтра ниже 4 — строка есть, изменённый шагом 2 пишется (как .param шага 2)', () => {
+    // Прошивка знает параметр (он в логе), хотя версия фильтра 2: обнуление скрыло бы настоящую маску моторов (ревью)
+    const log = { ...BASE_LOG, INS_HNTCH_ESCMSK: 15 }
+    const steps = []
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log, { INS_HNTCH_ESCMSK: 3 }) }
+    const result = summary_rows(rows_ctx({ log: log, steps: steps, filter_version: 2 }))
+    assert.deepEqual(result.rows.filter((r) => r.name.endsWith('_ESCMSK')).map((r) => r.name), ['INS_HNTCH_ESCMSK', 'INS_HNTC2_ESCMSK'])
+    const row = row_of(result, 'INS_HNTCH_ESCMSK')
+    assert.deepEqual([row.log, row.value, row.step, row.changed, row.note], [15, 3, 2, true, null])
+    assert.deepEqual(summary_param_values(result.rows, 8), { INS_HNTCH_ESCMSK: 3 })
+    // Маска второго (выключенного) notch в лог не записана — строка есть, но не изменена и не пишется
+    assert.deepEqual([row_of(result, 'INS_HNTC2_ESCMSK').changed, row_of(result, 'INS_HNTC2_ESCMSK').note], [false, 'нет в логе — не пишется'])
+    // Та же маска, что в логе, — не изменена; версия неизвестна — правило то же: маска в логе есть
+    steps[2] = { accepted: accepted_values(STEP2_NAMES, log) }
+    assert.equal(row_of(summary_rows(rows_ctx({ log: log, steps: steps, filter_version: 2 })), 'INS_HNTCH_ESCMSK').changed, false)
+    assert.equal(row_of(summary_rows({ ...rows_ctx({ log: log, steps: steps }), filter_version: undefined }), 'INS_HNTCH_ESCMSK').log, 15)
 })
 
 test('summary_rows: включаемый второй notch — все поля INS_HNTC2_* изменены, у отсутствующих в логе log = null', () => {
