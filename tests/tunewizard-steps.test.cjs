@@ -854,6 +854,34 @@ test('evaluate_lowpass: нечисловой INS_GYRO_FILTER (пустое по�
     assert.equal(lowpass_flags(log, broken).incomplete, true, 'и лог с таким значением тоже не сравнивается')
 })
 
+test('evaluate_lowpass и lowpass_bode: INS_GYRO_FILTER выше 0.4 частоты гироскопа — срез ограничен, как в прошивке, числа конечные и как на 0.4·fs, предупреждение', () => {
+    // Прошивка: cutoff = MIN(cutoff, 0.4·sample_freq) (LowPassFilter2p.cpp); DigitalBiquadFilter страницы без ограничения
+    // на 0.5·fs и выше давал NaN в шуме гироскопа, шуме D и задержках — вариант «отмечался» вместо честной оценки
+    const { ctx } = lowpass_setup()
+    const rate = ctx.gyro[0].FFT.average_sample_rate
+    assert.ok(Math.abs(rate - 1000) < 1e-6, 'частота выборки синтетики: ' + rate)
+    const at_limit = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 400 }, ctx)
+    const bode_limit = lowpass_bode({ ...lowpass_values_8, INS_GYRO_FILTER: 400 }, ctx, 0.5)
+    assert.ok(Number.isFinite(at_limit.gyro.band_dB) && Number.isFinite(at_limit.dterm.roll.dB) && Number.isFinite(at_limit.lag_ms.roll.D[30]), 'ровно 0.4·fs считается')
+    assert.deepEqual(at_limit.warnings, load_filters(log_values_7a, ctx.env, ctx.tracking).warnings, 'на 0.4·fs предупреждения об ограничении нет')
+    for (const hz of [500, 1000, 1e6]) {
+        const values = { ...lowpass_values_8, INS_GYRO_FILTER: hz }
+        const e = evaluate_lowpass(values, ctx)
+        assert.deepEqual(lowpass_metrics(e), lowpass_metrics(at_limit), hz + ' Гц — та же оценка, что на 400 Гц')
+        assert.deepEqual(e.gyro.spectrum, at_limit.gyro.spectrum, hz + ' Гц — тот же спектр после фильтров')
+        assert.equal(e.values, values, 'значения варианта не подменяются')
+        assert.deepEqual(e.warnings, [...at_limit.warnings, 'INS_GYRO_FILTER ' + hz + ' выше 0.4 частоты гироскопа (1000 Гц): прошивка ограничит до 400 Гц — так и посчитано'])
+        assert.deepEqual(lowpass_flags(e, at_limit), { noisier: [], slower: [], incomplete: false, incomplete_axes: [], d_off_axes: [] }, hz + ' Гц против 400 Гц — без отметок')
+        const bode = lowpass_bode(values, ctx, 0.5)
+        assert.deepEqual([bode.gyro.amp_dB, bode.gyro.phase_deg, bode.roll.D.amp_dB], [bode_limit.gyro.amp_dB, bode_limit.gyro.phase_deg, bode_limit.roll.D.amp_dB], hz + ' Гц — бодэ как на 400 Гц')
+        assert.ok(bode.gyro.amp_dB.every(Number.isFinite), hz + ' Гц — бодэ конечный')
+    }
+    // Ниже порога ограничение не действует: 399 Гц даёт другие числа
+    const below = evaluate_lowpass({ ...lowpass_values_8, INS_GYRO_FILTER: 399 }, ctx)
+    assert.notEqual(below.gyro.band_dB, at_limit.gyro.band_dB)
+    assert.deepEqual(below.warnings, at_limit.warnings)
+})
+
 test('evaluate_lowpass: контур 1000 Гц на гироскопе 1000 Гц — полоса D 20…400 Гц, а не до 500 (min(band_hz[1], Найквист))', () => {
     const { base } = lowpass_setup()
     const ctx = lowpass_ctx(base, { ...log_values_7a, SCHED_LOOP_RATE: 1000 }, lowpass_kd_8)
