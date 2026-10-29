@@ -690,6 +690,9 @@ details.more > .tablewrap{margin-top:8px}
   </div>
 
   <div class="verdict" id="verdict4" hidden></div>
+  <div class="row" id="step4_acro_row" hidden>
+    <button type="button" id="step4_acro_interval">Интервал — участок ACRO</button>
+  </div>
 
   <div class="tabs" id="step4_tabs" role="tablist" aria-label="Оси" hidden>
     <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span><span class="f"></span></button>
@@ -755,7 +758,7 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Коэффициенты регулятора скорости</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="pidf_form"></div>
-    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
+    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа; если PID менялись после интервала — например, AutoTune сохранил их при дизарме, — подпись показывает и значения конца лога, строка таблицы называется «Набор интервала», а принятое перепишет значения конца лога). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
   <div class="row">
     <button type="button" id="pidf_accept" disabled>Принять</button>

@@ -460,6 +460,27 @@ test('pid_run_batch_fft: синусоида в Tar — пик в своём би
     assert.equal(axis.sets[0].FFT, null)
 })
 
+test('pid_run_batch_fft: keys — только нужные компоненты (шаг 4: Tar, Act, D, Out), остальных ключей в FFT набора нет; по умолчанию — все', () => {
+    const TimeUS = time_us([[2, 22]])
+    const fields = { Tar: (k) => 100 / R2D * Math.sin(2 * Math.PI * 12.5 * k / RATE_HZ), Act: () => 0, Err: () => 0,
+                     P: () => 0, I: () => 0, D: () => 0, FF: () => 0 }
+    const axis = load_pid(fake_log({ messages: { PIDR: pid_msg(TimeUS, fields) }, params: base_params() }), env).axes[0]
+    pid_run_batch_fft(axis.sets, 512, ['Tar', 'Act', 'D', 'Out'])
+    const set_fft = axis.sets[0].FFT
+    const num_windows = Math.floor((axis.sets[0][0].Tar.length - 512) / 256) + 1
+    assert.deepEqual(Object.keys(set_fft).sort(), ['Act', 'D', 'Out', 'Tar', 'time'])
+    assert.equal(set_fft.Tar.length, num_windows)
+    assert.equal(set_fft.D.length, num_windows)
+    assert.equal(set_fft.Out.length, num_windows, 'выход считается из компонент пакета')
+    assert.equal(axis.sets.FFT.bins.length, 257, 'общие сведения набора — те же')
+    // Спектр Tar тот же, что при всех ключах
+    const peak = (fft) => complex_abs(fft.Tar[0]).indexOf(Math.max(...complex_abs(fft.Tar[0])))
+    assert.equal(peak(set_fft), 16)
+    pid_run_batch_fft(axis.sets, 512)
+    assert.deepEqual(Object.keys(axis.sets[0].FFT).sort(), ['Act', 'D', 'DFF', 'Err', 'FF', 'I', 'Out', 'P', 'Tar', 'time'].sort())
+    assert.equal(peak(axis.sets[0].FFT), 16)
+})
+
 // Синтетический контур, общий для тестов отклика: 60 с, цель ±[50, 200] °/с, факт — первый порядок τ = 50 мс
 // с задержкой 20 мс (8 отсчётов)
 const TAU = 0.05
