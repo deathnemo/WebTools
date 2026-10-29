@@ -1148,17 +1148,26 @@ test('second_notch_candidate: BW — удвоенная ширина пика п
     assert.equal(width.width_hz, 26)
 })
 
-test('notch_line_stats: NaN в ESC — среднее по числам (дефект upstream 8), без чисел — null', () => {
-    const esc_log = (rpm0) => fake_log({ messages: { ESC: { instances: {
-        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: rpm0 },
+test('notch_line_stats: NaN в целях трекинга — среднее по числам (дефект upstream 8), без чисел — null', () => {
+    // ESCTarget теперь отбрасывает NaN-отсчёты при чтении (аудит, C1; tests/tunewizard-audit-a.test.cjs), поэтому NaN
+    // подставляется в уже прочитанные данные источника (и в его общий ряд all) — проверяется сама статистика линий
+    const esc_log = () => fake_log({ messages: { ESC: { instances: {
+        0: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [6000, 6000, 6000, 6000] },
         1: { TimeUS: [0, 1e6, 2e6, 3e6], RPM: [3000, 3000, 3000, 3000] }
     } } } })
     const values = { INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTCH_REF: 1, INS_HNTCH_FREQ: 40, INS_HNTCH_BW: 20, INS_HNTCH_ATT: 40, INS_HNTCH_FM_RAT: 1, INS_HNTCH_HMNCS: 1, INS_HNTCH_ESCMSK: 0 }
-    const stats = (log, options) => {
-        const tracking = create_tracking(log, env, { start_time: 0, end_time: 3 })
+    const stats = (freq0, options) => {
+        const tracking = create_tracking(esc_log(), env, { start_time: 0, end_time: 3 })
+        const esc = tracking.find((t) => t.name === 'ESC')
+        esc.data[0].freq = freq0
+        for (const sample of esc.data.all) {
+            if (sample.inst == 0) {
+                sample.freq = freq0[esc.data[0].time.indexOf(sample.time)]
+            }
+        }
         return notch_line_stats(load_filters({ ...values, INS_HNTCH_OPTS: options }, env, tracking), [0, 3])[0].harmonics[0]
     }
-    const with_nan = esc_log([6000, NaN, 6000, 6000])
+    const with_nan = [100, NaN, 100, 100]
 
     // OPTS 2 — по моторам (многопиковая ветка): мотор 0 — 100 Гц без NaN-отсчёта, мотор 1 — 50 Гц
     const multi = stats(with_nan, 2)
@@ -1170,7 +1179,7 @@ test('notch_line_stats: NaN в ESC — среднее по числам (деф�
     assert.deepEqual([single.min, single.max], [75, 100])
 
     // Мотор 0 целиком NaN: по моторам — только мотор 1; в среднем по моторам все средние NaN → null
-    const all_nan = esc_log([NaN, NaN, NaN, NaN])
+    const all_nan = [NaN, NaN, NaN, NaN]
     const multi_nan = stats(all_nan, 2)
     assert.deepEqual([multi_nan.mean, multi_nan.min, multi_nan.max], [50, 50, 50])
     const single_nan = stats(all_nan, 0)

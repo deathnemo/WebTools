@@ -2,6 +2,8 @@
 // Перенос из FilterReview/tracking/FFT.js. Замены: get_filter_version() → this.env.filter_version;
 // TimeUS_to_seconds → us_to_s.
 // Исправлен дефект upstream 6 (задача 8): отсутствующие экземпляры FTN2 пропускаются, как в ESCTarget.
+// Отличие от upstream (аудит, I2): FTN2 без FTN1 (нет центрального пика) — одиночный трекинг без данных, интерполяция
+// и цели не падают; трекинг по пикам FTN2 работает.
 class FFTTarget extends NotchTarget {
     constructor(log, env) {
         super(log, env, "FTN1", "PkAvg", "FFT", 4)
@@ -41,7 +43,8 @@ class FFTTarget extends NotchTarget {
     }
 
     interpolate(instance, time) {
-        if (!this.have_data()) {
+        // Есть хоть что-то: центральный пик FTN1 или пики FTN2 (базовая проверка, без учёта режима)
+        if (!super.have_data()) {
             return
         }
         if (this.data.interpolated == null) {
@@ -56,7 +59,10 @@ class FFTTarget extends NotchTarget {
             }
             this.data.interpolated[instance][j] = linear_interp(this.data[j].freq, this.data[j].time, time)
         }
-        this.data.interpolated[instance].value = linear_interp(this.data.value, this.data.time, time)
+        // FTN2 без FTN1 (аудит, I2): центрального пика нет, и linear_interp на undefined падал
+        if ("value" in this.data) {
+            this.data.interpolated[instance].value = linear_interp(this.data.value, this.data.time, time)
+        }
     }
 
     get_interpolated_target_freq(instance, index, config) {
@@ -78,7 +84,20 @@ class FFTTarget extends NotchTarget {
             return ret
         }
 
+        if (this.data.interpolated[instance].value == null) {
+            // Центрального пика нет (FTN2 без FTN1, аудит I2)
+            return null
+        }
         return [this.get_target(config, this.data.interpolated[instance].value[index])]
+    }
+
+    have_data(config) {
+        const dynamic = (config?.options & (1<<1)) != 0
+        if (!dynamic && !("value" in this.data)) {
+            // Одиночный трекинг идёт по центральному пику FTN1; без него (FTN2 без FTN1) данных нет (аудит, I2)
+            return false
+        }
+        return super.have_data(config)
     }
 
     get_target(config, freq) {
