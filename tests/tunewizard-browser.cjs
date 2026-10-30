@@ -324,7 +324,7 @@ async function main() {
         const shots = path.join(logs_dir, 'screenshots')
         fs.mkdirSync(shots, { recursive: true })
 
-        // Главная WebTools: строка «Мастер настройки» сразу после PID Review, иконка загрузилась, ссылка ведёт на мастер.
+        // Главная WebTools: строка «Мастер настройки» первая в таблице инструментов, иконка загрузилась, ссылка ведёт на мастер.
         // Проверка — до лога; затем страница мастера открывается заново, как без неё
         await wait_for_server(page, base + '/index.html', server)
         const landing = await page.evaluate(() => {
@@ -337,11 +337,11 @@ async function main() {
                 loaded: (img != null) && img.complete && (img.naturalWidth > 0),
                 heading: row?.querySelector('h2')?.textContent ?? null,
                 lang: row?.cells[1]?.lang ?? null,
-                after: row?.previousElementSibling?.querySelector('a')?.getAttribute('href') ?? null,
+                row_index: row?.rowIndex ?? null,
             }
         })
-        assert.deepEqual(landing, { links: 1, src: 'images/TuneWizard_Icon.png', loaded: true, heading: 'Мастер настройки', lang: 'ru', after: './PIDReview' },
-                         'главная: одна ссылка на мастер с загруженной иконкой, строка «Мастер настройки» на русском сразу после PID Review')
+        assert.deepEqual(landing, { links: 1, src: 'images/TuneWizard_Icon.png', loaded: true, heading: 'Мастер настройки', lang: 'ru', row_index: 0 },
+                         'главная: одна ссылка на мастер с загруженной иконкой, строка «Мастер настройки» на русском первая в таблице')
         assert.deepEqual(problems, [], 'главная: ошибки консоли')
         await page.screenshot({ path: path.join(shots, 'landing.png'), fullPage: true })
         await page.click('a[href="./TuneWizard"]')
