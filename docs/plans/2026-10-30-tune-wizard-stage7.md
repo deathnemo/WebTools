@@ -101,7 +101,7 @@
 - **Печать плана:** класс `print-prep` на `body` до `window.print()`, снятие — на `afterprint`; в `@media print` при `body.print-prep` на шаге 0 видны только шапка печати, `#prep0` без полей ввода и кнопок (цель — текстом в шапке). Ctrl+P без кнопки печатает шаг 0 как раньше.
 - **Хуки `wizard.js`:** `init_wizard` — `prep0_init()`; конец `load()` и `load_failed()` / `reset()` — `prep0_render()` (через `typeof … === "function"`, как у остальных шагов); `hover_check` — `state.checks?.find((c) => c.id === "hover_throttle") ?? null`.
 - Ошибка внутри блока не роняет шаг 0: отрисовка через `step_try` с выводом в `#prep0_verdict`.
-- `prep0_items()` → пункты для текущего источника, цели и положения (нужно задаче 3).
+- `prep0_items()` → пункты для текущего источника, цели и положения (нужно задаче 3). С правок задачи 3 по ревью — `prep0_summary()` → `{ items, file_name, reboot_names }` или `null`.
 
 **Проверки:** lint, `npm test`; вручную — страница с `TuneWizard/logs/1.param` без лога (блок, смена цели, положение 6, скачивание), со вторым логом, лог + файл, печать плана (предпросмотр).
 
@@ -115,6 +115,7 @@
 
 - `summary_refly`: `ctx.prep` — пункты подготовки (`prep0_items()`; `null` или `[]` — нет); пункты warn и fail с непустым `fix` — источник `"prep"`, текст «title — fix» (`summary_lower_first`), сразу после пунктов `"check"`. Контракт в комментарии дополнить.
 - `step5_render_refly`: `prep: (typeof prep0_items === "function") ? prep0_items() : null`.
+- **Сделано с правками по ревью** (`ecd7b03`): `ctx.prep` — объект `prep0_summary()`; повторы проверок шага 0 и пунктов подготовки убираются; общий пункт `"prep_file"` — файл `_prep.param` шага 0 и перезагрузка; batch с битом 2 и битом 1 или 0 — warn, исправление `INS_LOG_BAT_OPT = 4` (дизайн, раздел 6).
 - `checks.js`, проверка `gyro_log` (нет данных): совет raw — «`INS_RAW_LOG_OPT = 9` (основной гироскоп до и после фильтров; бит IMU_RAW не нужен)» вместо «бит IMU_RAW (19) в LOG_BITMASK, INS_RAW_LOG_OPT = 8» — [код] `AP_InertialSensor_Backend.cpp:480–487`.
 - `checks.js`, проверка `pre_post` для batch: биты 1 и 2 `INS_LOG_BAT_OPT` вместе — warn «обе половины пишутся после фильтров: спектр «до» на шаге 1 на самом деле после фильтров», fix — снять бит 1 (−2). [код] `AP_InertialSensor.h:351–353` (`doing_post_filter_logging`), `BatchSampler.cpp:97–102`, `AP_InertialSensor_Backend.cpp:507`. Найдено ревью задачи 1; то же правило — `gyro_prepost` в `core/prep.js`.
 - Тесты: источник `prep` (порядок, текст, ok-пункты не попадают, `null`), новый текст совета, batch с битами 1 и 2.
