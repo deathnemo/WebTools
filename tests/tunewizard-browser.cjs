@@ -394,6 +394,29 @@ async function main() {
         // Браузер теста — новый контекст с пустым хранилищем: прошлого прохода нет, блок скрыт
         assert.deepEqual(await page.evaluate(() => ({ visible: document.getElementById('memory0').checkVisibility(), key: memory_state.key, pass: memory_state.pass })),
                          { visible: false, key: fc_key, pass: null }, 'памяти нет — блок «Прошлый проход» скрыт')
+        // Блок «Подготовка к следующему полёту» — по параметрам тестового лога (файла .param нет), цель по умолчанию: вердикт
+        // и список — пункты ядра (prep0_context) по порядку, план есть. Значения пунктов здесь не проверяются — правила
+        // проверяют tests/tunewizard-prep.test.cjs и tests/tunewizard-prep-browser.cjs
+        const prep0 = await page.evaluate(() => {
+            const seen = (id) => document.getElementById(id).checkVisibility()
+            const ctx = prep0_context()
+            return {
+                visible: seen('prep0'),
+                source: document.getElementById('prep0_source').textContent,
+                unfile: seen('prep0_unfile'),
+                verdict: seen('prep0_verdict') ? document.getElementById('prep0_verdict').className : null,
+                refusal: ctx?.refusal ?? null,
+                checks: [...document.querySelectorAll('#prep0_checks .check')].map((c) => [c.className.replace('check check--', ''), c.querySelector('h3').textContent]),
+                items: (ctx?.items ?? []).map((item) => [item.status, item.title]),
+                plan: seen('prep0_plan') ? document.querySelectorAll('#prep0_plan li').length : 0,
+            }
+        })
+        assert.deepEqual([prep0.visible, prep0.source, prep0.unfile, prep0.refusal], [true, 'По параметрам лога «' + path.basename(log_path) + '».', false, null],
+                         'блок подготовки к полёту — по параметрам лога')
+        assert.match(prep0.verdict, /^verdict verdict--(ok|warn|fail)$/, 'вердикт подготовки: ' + prep0.verdict)
+        assert.ok(prep0.items.length > 0, 'пункты подготовки есть')
+        assert.deepEqual(prep0.checks, prep0.items, 'список подготовки — пункты ядра по порядку')
+        assert.ok(prep0.plan > 0, 'план полёта есть')
 
         // Интервал анализа и график
         const start = Number(await page.inputValue('#TimeStart'))
@@ -1677,6 +1700,33 @@ async function main() {
         assert.ok(v5.refly.some((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт: Acro')), 'пункт тестового полёта: ' + v5.refly.join(' | '))
         assert.equal(v5.refly.some((text) => text.startsWith('После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' + v5.reboot.join(', '))),
                      v5.reboot.length > 0, 'пункт о перезагрузке — по метаданным: ' + JSON.stringify(v5.reboot))
+        // Пункты подготовки к полёту (prep0_summary — по параметрам лога, цель по умолчанию): warn и fail с «что сделать» —
+        // подряд и по порядку списка шага 0, «title — fix», до тестового полёта; за ними — общий пункт о файле
+        // <лог>_prep.param. Без чисел: какие пункты — зависит от параметров тестового лога
+        const prep5 = await page.evaluate(() => {
+            const prep = prep0_summary()
+            const lines = (prep?.items ?? []).filter((item) => ((item.status === 'warn') || (item.status === 'fail')) && ((item.fix ?? '') !== ''))
+                .map((item) => summary_period(item.title + ' — ' + summary_lower_first(item.fix)))
+            return { lines: lines, file_name: prep?.file_name ?? null }
+        })
+        const prep5_at = (prep5.lines.length > 0) ? v5.refly.indexOf(prep5.lines[0]) : -1
+        if (prep5.lines.length > 0) {
+            assert.ok(prep5_at >= 0, 'пункты подготовки в «что перелететь»: ' + prep5.lines.join(' | ') + ' — в сводке: ' + v5.refly.join(' | '))
+            assert.deepEqual(v5.refly.slice(prep5_at, prep5_at + prep5.lines.length), prep5.lines, 'пункты подготовки подряд, по порядку списка шага 0')
+            const test_flight5 = v5.refly.findIndex((text) => text.startsWith('Крен, тангаж, рыскание — нужен тестовый полёт'))
+            assert.ok(prep5_at < test_flight5, 'пункты подготовки — до тестового полёта')
+        }
+        const prep5_file = v5.refly.findIndex((text) => text.startsWith('Исправления подготовки — в файле '))
+        if (prep5.file_name != null) {
+            assert.equal(prep5.file_name, path.basename(log_path).replace(/\.[^.]*$/, '') + '_prep.param', 'файл исправлений подготовки — имя лога + _prep.param')
+            assert.ok(v5.refly[prep5_file]?.startsWith('Исправления подготовки — в файле ' + prep5.file_name + ' (шаг 0, «Подготовка к следующему полёту»)'),
+                      'общий пункт о файле подготовки: ' + v5.refly.join(' | '))
+            if (prep5.lines.length > 0) {
+                assert.equal(prep5_file, prep5_at + prep5.lines.length, 'общий пункт о файле — сразу за пунктами подготовки')
+            }
+        } else {
+            assert.equal(prep5_file, -1, 'в файл подготовки записать нечего — общего пункта нет')
+        }
         assert.deepEqual(v5.disabled, [false, false], 'изменения есть — «Скачать .param» и «Запомнить проход» доступны')
         assert.equal(await page.textContent('#step5_origin'), base, 'в заметке — адрес страницы, к которому привязана память (аудит E)')
 
@@ -1752,10 +1802,13 @@ async function main() {
                          'хранилище недоступно — текст в заметке, вердикт сводки прежний')
         assert.equal(await page.evaluate(() => localStorage.getItem('tunewizard_v1') != null), true, 'хранилище вернули, память на месте')
         // Метаданные параметров не загрузились — общий пункт о перезагрузке; ещё грузятся — пункта нет (появится после
-        // загрузки); состояние загрузки — вернуть
+        // загрузки); состояние загрузки — вернуть. Пункты о перезагрузке изменений шагов (источник "reboot" summary_refly) —
+        // по началу текста: общий пункт подготовки «Исправления подготовки — в файле …» тоже может называть перезагрузку
+        // (параметры _prep.param), но от метаданных не зависит
         const meta5 = await page.evaluate(() => {
             const saved = { ...step_metadata_state }
-            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent).filter((text) => text.includes('перезагрузите полётный контроллер'))
+            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent)
+                .filter((text) => text.startsWith('После записи перезагрузите полётный контроллер') || text.startsWith('Описания параметров не загрузились'))
             try {
                 Object.assign(step_metadata_state, { data: null, failed: true })
                 step5_render()
