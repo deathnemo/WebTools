@@ -46,6 +46,7 @@
 <script type="text/javascript" src="plots.js"></script>
 <script type="text/javascript" src="wizard.js"></script>
 <script type="text/javascript" src="steps/common.js"></script>
+<script type="text/javascript" src="steps/prep.js"></script>
 <script type="text/javascript" src="steps/step1.js"></script>
 <script type="text/javascript" src="steps/step2.js"></script>
 <script type="text/javascript" src="steps/step3.js"></script>
@@ -82,7 +83,7 @@ p{margin:0}
 .lede{color:var(--ink-2); font-size:15px; max-width:70ch}
 header.hero{display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--line); padding-bottom:14px}
 section{display:flex; flex-direction:column; gap:14px}
-section > .head,.memory0 > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
+section > .head,.memory0 > .head,.prep0 > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
 
 /* Кнопки */
 button,label.pickbtn{font-family:"IBM Plex Sans",sans-serif; font-size:12px; padding:5px 11px; cursor:pointer;
@@ -250,9 +251,14 @@ tr:last-child td{border-bottom:0}
 .memory0-status--applied{color:var(--ok)}
 .memory0-status--other,.memory0-status--absent{color:var(--accent)}
 #memory0_pick_field{flex:0 1 auto; max-width:100%}
-#memory0_pick{max-width:100%; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:6px 8px;
+#memory0_pick,#prep0_goal,#prep0_slot{max-width:100%; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:6px 8px;
   border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
-#memory0_pick:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+#memory0_pick:focus-visible,#prep0_goal:focus-visible,#prep0_slot:focus-visible{outline:2px solid var(--low); outline-offset:2px}
+/* Шаг 0: блок «Подготовка к следующему полёту» (steps/prep.js) — раскладка и заголовок как у «Прошлого прохода», поля
+   цели и положения ACRO — как список проходов; строка источника — по центру кнопки «Убрать файл» */
+.prep0{display:flex; flex-direction:column; gap:14px}
+.prep0-source{align-items:center}
+#prep0_modes td:nth-child(2){white-space:nowrap}
 
 /* Шаг 5 «Сводка»: состояние шага в таблице шагов (как статусы проверок шага 0), отметки принятого, свёрнутый список
    без изменений, «что перелететь»; шапка печати видна только при печати, .screen-only — только на экране */
@@ -289,6 +295,11 @@ details.more > .tablewrap{margin-top:8px}
   .hero .lede,#step5_note,.screen-only{display:none!important}
   #steps5 th:nth-child(4),#steps5 td:nth-child(4){display:none}
   .print-head{display:block}
+  /* «Печать плана» (класс print-prep на body, steps/prep.js): на шаге 0 — только блок подготовки с его шапкой печати,
+     без полей ввода и кнопок (цель — в шапке). Ctrl+P без кнопки печатает шаг 0 как раньше, без шапки подготовки */
+  body:not(.print-prep) #prep0_print_head{display:none!important}
+  body.print-prep section[data-step="0"] > :not(#prep0),body.print-prep #prep0 .fld,body.print-prep #prep0_slot_field,
+  body.print-prep #prep0_actions{display:none!important}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
   tr{break-inside:avoid}
@@ -316,6 +327,11 @@ details.more > .tablewrap{margin-top:8px}
         <label class="pickbtn" for="fileItem" id="fileLabel">Выбрать лог…</label>
       </div>
       <div class="fld">
+        <label for="prep0_file">Файл .param</label>
+        <input id="prep0_file" type="file" accept=".param,.parm,.txt">
+        <label class="pickbtn" for="prep0_file">Проверить .param…</label>
+      </div>
+      <div class="fld">
         <label for="TimeStart">Начало анализа, <span class="unit">с</span></label>
         <input id="TimeStart" type="number" min="0" step="1" value="0" disabled onchange="interval_input_changed()">
       </div>
@@ -328,12 +344,52 @@ details.more > .tablewrap{margin-top:8px}
         <input id="FFTWindow_size" type="number" min="64" step="1" value="1024" disabled onchange="window_size_changed(this)">
       </div>
     </div>
-    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1.</p>
+    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1. «Проверить .param» — подготовка к следующему полёту по файлу параметров, можно и без лога.</p>
   </div>
 
   <div class="verdict" id="log_verdict" hidden></div>
   <div class="stats" id="log_info" hidden></div>
   <div class="checks" id="log_checks" hidden></div>
+
+  <div class="prep0" id="prep0" hidden>
+    <div class="print-head" id="prep0_print_head"></div>
+    <div class="head"><span class="eyebrow">Подготовка</span><h2>Подготовка к следующему полёту</h2></div>
+    <div class="lab" id="prep0_controls">
+      <div class="row">
+        <div class="fld">
+          <label for="prep0_goal">Цель полёта</label>
+          <select id="prep0_goal"></select>
+        </div>
+        <p class="note" id="prep0_goal_text"></p>
+      </div>
+      <div class="row prep0-source">
+        <p class="note" id="prep0_source"></p>
+        <button type="button" id="prep0_unfile" hidden>Убрать файл</button>
+      </div>
+    </div>
+    <div class="verdict" id="prep0_verdict" hidden></div>
+    <div class="checks" id="prep0_checks" hidden></div>
+    <h3 id="prep0_modes_head" hidden>Положения переключателя режимов</h3>
+    <div class="row" id="prep0_slot_field" hidden>
+      <div class="fld">
+        <label for="prep0_slot">Положение для ACRO</label>
+        <select id="prep0_slot"></select>
+      </div>
+    </div>
+    <div class="tablewrap cands" id="prep0_modes" hidden>
+      <table>
+        <thead><tr><th>Положение</th><th>PWM</th><th>Режим сейчас</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row" id="prep0_actions" hidden>
+      <button type="button" id="prep0_download" disabled>Скачать .param исправлений</button>
+      <button type="button" id="prep0_print">Печать плана</button>
+    </div>
+    <p class="note" id="prep0_note" hidden></p>
+    <h3 id="prep0_plan_head" hidden>План полёта</h3>
+    <ol class="refly" id="prep0_plan" hidden></ol>
+  </div>
 
   <div class="memory0" id="memory0" hidden>
     <div class="head"><span class="eyebrow">Память</span><h2>Прошлый проход</h2></div>

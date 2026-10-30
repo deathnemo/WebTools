@@ -268,6 +268,9 @@ function init_wizard() {
     if (typeof memory_init === "function") {
         memory_init()
     }
+    if (typeof prep0_init === "function") {
+        prep0_init()
+    }
     set_step(0)
 }
 
@@ -356,6 +359,11 @@ function reset() {
     if (typeof memory_reset === "function") {
         memory_reset()
     }
+    // Блок «Подготовка к следующему полёту»: лога больше нет — по файлу .param, если он загружен (файл переживает
+    // новый лог и ошибку загрузки), иначе блок скрыт
+    if (typeof prep0_render === "function") {
+        prep0_render()
+    }
     document.getElementById("fileLabel").textContent = "Выбрать лог…"
     for (const id of ["TimeStart", "TimeEnd", "FFTWindow_size"]) {
         document.getElementById(id).disabled = true
@@ -425,6 +433,10 @@ async function load(buffer, file = null) {
     // Блок «Прошлый проход»: сбой памяти не роняет загрузку лога — ошибка в вердикте блока
     if (typeof memory_render_step0 === "function") {
         step_try(memory_render_step0, "memory0_verdict", "памяти прохода")
+    }
+    // Блок «Подготовка к следующему полёту»: по файлу .param или параметрам лога; сбой — в вердикте блока (prep0_render)
+    if (typeof prep0_render === "function") {
+        prep0_render()
     }
     plot_flight()
 
