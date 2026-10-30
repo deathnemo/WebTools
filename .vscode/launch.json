@@ -5,6 +5,21 @@
     "version": "0.2.0",
     "configurations": [
         {
+            // Мастер настройки: сервер python на 127.0.0.1:8000 (задача Host) и Chrome с отладчиком сразу на странице
+            // мастера. Адрес нарочно 127.0.0.1, а не localhost: память прохода в localStorage привязана к адресу страницы
+            "name": "Мастер настройки (python + Chrome)",
+            "type": "chrome",
+            "request": "launch",
+            "url": "http://127.0.0.1:8000/TuneWizard/",
+            "webRoot": "${workspaceFolder}",
+            "preLaunchTask": "Host",
+            "postDebugTask": "Terminate All Tasks",
+            "presentation": {
+                "group": "TuneWizard",
+                "order": 1
+            }
+        },
+        {
             "name": "Host with python and debug (Chrome)",
             "type": "chrome",
             "request": "launch",
