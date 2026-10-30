@@ -1,9 +1,10 @@
 // Тесты подготовки к следующему полёту (TuneWizard/core/prep.js): константы против core/checks.js и core/pidtune.js,
-// цели, правила prep_check — ok / warn / fail на своей цели и отсутствие на чужой, нет параметра — warn; источник записи
-// гироскопа после исправления (batch из файла, raw важнее batch, до и после фильтров, буфер), обороты для notch,
-// положения переключателя (предложение ACRO, выбор положения и пересчёт выхода), обучение газа висения, значения файла
-// исправлений (сложение масок, равные текущему не пишутся, текст .param), перезагрузка, план полёта, имя файла;
-// параметры — и из parse_param_file (обёртка get), и из log_params (core/log.js).
+// цели, правила prep_check — ok / warn / fail на своей цели и отсутствие на чужой, нет параметра — warn, параметр NaN;
+// запись лога (File или Block); источник записи гироскопа после исправления (batch из файла, raw важнее batch, до и
+// после фильтров, биты 1 и 2 batch вместе, буфер, старая прошивка без INS_RAW_LOG_OPT), обороты для notch, положения
+// переключателя (предложение ACRO, выбор положения — prep_acro_applied, пересчёт выхода), обучение газа висения,
+// значения файла исправлений (сложение масок, равные текущему не пишутся, текст .param), перезагрузка, план полёта
+// (и без положения выхода), имя файла; параметры — и из parse_param_file (обёртка get), и из log_params (core/log.js).
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-summary.test.cjs).
 const test = require('node:test')
@@ -72,7 +73,8 @@ function with_values(changes, base = GOOD) {
 }
 
 // Как синтетическая фикстура задачи 4: ACRO нет (1–3 STABILIZE, 4–6 ALT_HOLD), тренер заводской, записи гироскопа нет,
-// LOG_BITMASK без PID и ATTITUDE_FAST (176126 — заводская маска Copter без бита 0), буфер 8 КиБ
+// LOG_BITMASK без PID и ATTITUDE_FAST (176126 — заводская маска Copter 180222 [код] ArduCopter/config.h:546–562, в которой
+// ATTITUDE_FAST и так нет, без бита 12 (PID)), буфер 8 КиБ
 const NO_ACRO = {
     FLTMODE1: 0, FLTMODE2: 0, FLTMODE3: 0, FLTMODE4: 2, FLTMODE5: 2, FLTMODE6: 2,
     ACRO_OPTIONS: 0, ACRO_TRAINER: 2, INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 0, INS_LOG_BAT_OPT: 0,
@@ -95,14 +97,12 @@ function item_of(items, id) {
 
 // ---------------------------------------------------------------- константы и цели
 
-test('константы: биты LOG_BITMASK — как check_rules шага 0, ACRO и Rate Loop Only — из pidtune_rules', () => {
-    assert.equal(prep_rules.log_bitmask_pid, check_rules.log_bitmask_pid)
-    assert.equal(prep_rules.log_bitmask_imu_raw, check_rules.log_bitmask_imu_raw)
-    assert.equal(prep_rules.log_bitmask_attitude_fast, check_rules.log_bitmask_attitude_fast)
+test('константы: ACRO и Rate Loop Only — из pidtune_rules, режимы выхода, время висения и Acro', () => {
     assert.equal(prep_rules.acro_mode, pidtune_rules.acro_mode)
-    assert.equal(prep_rules.acro_rate_only_bit, pidtune_rules.acro_rate_only_bit)
+    assert.equal(prep_rules.acro_rate_only_mask, pidtune_rules.acro_rate_only_bit)
     assert.equal(pidtune_mode_names[prep_rules.acro_mode], 'ACRO')
-    assert.equal(prep_rules.acro_rate_only_bit, 2)
+    // Маска бита 1 ACRO_OPTIONS, а не номер бита
+    assert.equal(prep_rules.acro_rate_only_mask, 2)
     assert.deepEqual(prep_rules.level_modes.map((m) => pidtune_mode_names[m]), ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD'])
     assert.equal(prep_rules.hover_min_s, check_rules.hover_min_s)
     assert.equal(prep_rules.hover_learn_s, check_rules.hover_learn_s)
@@ -140,7 +140,7 @@ test('prep_check: всё ok, порядок таблицы; по цели — т
 
 // Для каждого правила: изменения GOOD, статус на своей цели (и в «both»); на чужой цели пункта нет
 const RULE_CASES = [
-    { id: 'log_backend', values: { LOG_BACKEND_TYPE: 4 }, status: 'fail', goals: ['filters', 'pid'] },
+    { id: 'log_backend', values: { LOG_BACKEND_TYPE: 2 }, status: 'fail', goals: ['filters', 'pid'] },
     { id: 'log_pid', values: { LOG_BITMASK: 145401 & ~(1 << 12) }, status: 'fail', goals: ['pid'] },
     { id: 'log_fast', values: { LOG_BITMASK: 145400 }, status: 'fail', goals: ['pid'] },
     { id: 'gyro_data', values: { INS_RAW_LOG_OPT: 0 }, status: 'fail', goals: ['filters'] },
@@ -168,7 +168,12 @@ test('prep_check: каждое правило — свой статус на с�
                 continue
             }
             assert.equal(item.status, c.status, c.id + ' на цели ' + goal + ': ' + item.text)
-            assert.ok(item.fix != null && item.fix !== '', c.id + ': у ' + c.status + ' есть «что сделать»')
+            // У fstrate warn — оговорка к прогнозу шага 4, а не действие перед полётом: fix нет
+            if (c.id === 'fstrate') {
+                assert.equal(item.fix, null)
+            } else {
+                assert.ok(item.fix != null && item.fix !== '', c.id + ': у ' + c.status + ' есть «что сделать»')
+            }
             // Остальные правила цели не тронуты
             for (const other of items.filter((i) => i.id !== c.id)) {
                 assert.equal(other.status, 'ok', c.id + ' задел ' + other.id + ': ' + other.text)
@@ -182,14 +187,42 @@ test('prep_check: тексты называют параметр и значен
     assert.match(fast.text, /^LOG_BITMASK = 145400: бит 0 \(ATTITUDE_FAST\) выключен/)
     assert.match(fast.fix, /Включите бит ATTITUDE_FAST \(0\) в LOG_BITMASK/)
     assert.equal(item_of(check(GOOD), 'log_pid').text, 'LOG_BITMASK = 145401: бит 12 (PID) включён — PIDR/PIDP/PIDY будут в логе')
-    assert.deepEqual(item_of(check(with_values({ LOG_BACKEND_TYPE: 4 })), 'log_backend').changes,
-        [{ name: 'LOG_BACKEND_TYPE', set: 1, clear: 0 }])
-    assert.deepEqual(item_of(check(with_values({ ACRO_OPTIONS: 1 })), 'acro_rate_only').changes,
-        [{ name: 'ACRO_OPTIONS', set: 2, clear: 0 }])
+    const rate_only = item_of(check(with_values({ ACRO_OPTIONS: 1 })), 'acro_rate_only')
+    assert.deepEqual(rate_only.changes, [{ name: 'ACRO_OPTIONS', set: 2, clear: 0 }])
+    assert.match(rate_only.text, /^ACRO_OPTIONS = 1: бит 1 \(Rate Loop Only\) выключен/)
+    assert.match(rate_only.fix, /^Включите бит 1 \(Rate Loop Only\) в ACRO_OPTIONS \(\+2\)/)
     assert.deepEqual(item_of(check(with_values({ ACRO_TRAINER: 2 })), 'acro_trainer').changes, [{ name: 'ACRO_TRAINER', value: 0 }])
-    // fstrate и notch_source — без записи в файл
-    assert.deepEqual(item_of(check(with_values({ FSTRATE_ENABLE: 1 })), 'fstrate').changes, [])
+    // fstrate и notch_source — без записи в файл; у fstrate и fix нет
+    const fstrate = item_of(check(with_values({ FSTRATE_ENABLE: 1 })), 'fstrate')
+    assert.deepEqual(fstrate.changes, [])
+    assert.equal(fstrate.fix, null)
     assert.deepEqual(item_of(check(with_values({ SERVO_BLH_BDMASK: 0 })), 'notch_source').changes, [])
+})
+
+test('log_backend: fail, только если нет ни File (бит 0), ни Block (бит 2); в файл — бит File', () => {
+    const item = (value) => item_of(check(with_values({ LOG_BACKEND_TYPE: value })), 'log_backend')
+    for (const value of [1, 3, 4, 5, 6]) {
+        assert.equal(item(value).status, 'ok', 'LOG_BACKEND_TYPE = ' + value)
+        assert.deepEqual(item(value).changes, [])
+    }
+    assert.match(item(4).text, /^LOG_BACKEND_TYPE = 4: бит 2 \(Block\) включён — лог пишется во встроенную память платы$/)
+    for (const value of [0, 2]) {
+        const fail = item(value)
+        assert.equal(fail.status, 'fail', 'LOG_BACKEND_TYPE = ' + value)
+        assert.deepEqual(fail.changes, [{ name: 'LOG_BACKEND_TYPE', set: 1, clear: 0 }])
+        assert.equal(fail.fix, 'Включите запись на карту (бит 0, +1); у платы без карты — во встроенную память (бит 2, +4)')
+    }
+    assert.deepEqual(prep_changes(fake_params(with_values({ LOG_BACKEND_TYPE: 2 })), [item(2)]), { LOG_BACKEND_TYPE: 3 })
+})
+
+test('prep_check: параметр не число (NaN) — не падает, значение текстом; маска от NaN в файл не пишется', () => {
+    const values = with_values({ LOG_BITMASK: NaN })
+    const items = check(values)
+    assert.match(item_of(items, 'log_pid').text, /^LOG_BITMASK = NaN: /)
+    assert.match(item_of(items, 'log_fast').text, /^LOG_BITMASK = NaN: /)
+    assert.equal(prep_eq('X', NaN), 'X = NaN')
+    assert.equal(prep_eq('X', 0.7), 'X = 0.7')
+    assert.equal('LOG_BITMASK' in prep_changes(fake_params(values), items), false)
 })
 
 // Нет параметра, нужного правилу, — warn «параметра X нет — проверьте версию прошивки», changes []
@@ -237,6 +270,7 @@ test('gyro_data: нет записи — fail и batch в файл; gyro_prepost
     assert.deepEqual(data.changes, [{ name: 'INS_LOG_BAT_MASK', value: 1 }, { name: 'INS_LOG_BAT_OPT', value: 4 }])
     assert.match(data.fix, /INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4/)
     assert.match(data.fix, /H7.*INS_RAW_LOG_OPT = 9/)
+    assert.doesNotMatch(data.fix, /IMU_RAW/)
     const prepost = item_of(items, 'gyro_prepost')
     assert.equal(prepost.status, 'ok')
     assert.deepEqual(prepost.changes, [])
@@ -251,6 +285,15 @@ test('gyro_data: нет записи — fail и batch в файл; gyro_prepost
     assert.deepEqual(prep_changes(fake_params(with_values({ INS_RAW_LOG_OPT: 0 })), items), { INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 })
 })
 
+test('gyro_data: старая прошивка без INS_RAW_LOG_OPT — подсказка raw — бит IMU_RAW в LOG_BITMASK', () => {
+    const data = item_of(check(with_values({ INS_RAW_LOG_OPT: undefined, INS_LOG_BAT_MASK: 0 }), 'filters'), 'gyro_data')
+    assert.equal(data.status, 'fail')
+    assert.deepEqual(data.changes, [{ name: 'INS_LOG_BAT_MASK', value: 1 }, { name: 'INS_LOG_BAT_OPT', value: 4 }])
+    assert.match(data.fix, /H7.*бит IMU_RAW \(19\) в LOG_BITMASK \(\+524288/)
+    assert.doesNotMatch(data.fix, /INS_RAW_LOG_OPT = 9/)
+    assert.doesNotMatch(data.text, /INS_RAW_LOG_OPT/)
+})
+
 test('gyro_data: raw — по битам 0 и 1 INS_RAW_LOG_OPT или биту IMU_RAW; raw и batch вместе — оценивается raw', () => {
     for (const values of [{ INS_RAW_LOG_OPT: 9 }, { INS_RAW_LOG_OPT: 10 }, { INS_RAW_LOG_OPT: 8, LOG_BITMASK: 145401 | (1 << 19) }]) {
         const items = check(with_values(values), 'filters')
@@ -262,7 +305,7 @@ test('gyro_data: raw — по битам 0 и 1 INS_RAW_LOG_OPT или биту 
     assert.equal(item_of(check(with_values({ INS_RAW_LOG_OPT: 8 })), 'gyro_data').status, 'fail')
     // Raw и batch: batch только после фильтров, raw до и после — пункт до/после по raw, ok; буфер — по raw
     const both = check(with_values({ INS_RAW_LOG_OPT: 9, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 2, LOG_FILE_BUFSIZE: 8 }), 'filters')
-    assert.match(item_of(both, 'gyro_data').text, /batch гироскопа не пишется/)
+    assert.match(item_of(both, 'gyro_data').text, /batch не пишется для гироскопов, которые пишет raw/)
     assert.equal(item_of(both, 'gyro_prepost').status, 'ok')
     assert.match(item_of(both, 'gyro_prepost').text, /INS_RAW_LOG_OPT = 9/)
     assert.equal(item_of(both, 'log_buffer').status, 'warn')
@@ -281,6 +324,9 @@ test('gyro_prepost: raw и batch — только после или только
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 3 }, name: 'INS_LOG_BAT_OPT', expect: 5, text: /только после фильтров/ },
         // batch только до фильтров
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 0 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /только до фильтров/ },
+        // batch с битами 1 и 2 вместе — обе половины после фильтров (doing_post_filter_logging): снять бит 1
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 6 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /обе половины batch пишутся после фильтров/ },
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 7 }, name: 'INS_LOG_BAT_OPT', expect: 5, text: /обе половины batch пишутся после фильтров/ },
     ]
     for (const c of cases) {
         const values = with_values(c.values)
@@ -348,6 +394,18 @@ test('prep_acro_suggestion: нет ACRO — 6; единственный выхо
     assert.equal(prep_acro_suggestion(fake_params(GOOD)), null)
     assert.equal(prep_acro_suggestion(fake_params({ ...NO_ACRO, FLTMODE3: 1 })), null)
     assert.equal(prep_acro_suggestion(fake_params(with_values({ FLTMODE6: undefined }, NO_ACRO))), null)
+    // Нет любого FLTMODE — файл положение не запишет, предложения нет
+    assert.equal(prep_acro_suggestion(fake_params(with_values({ FLTMODE3: undefined }, NO_ACRO))), null)
+})
+
+test('prep_acro_applied: выбранное положение, только если ACRO нет, все FLTMODE1–6 есть и положение верное', () => {
+    assert.equal(prep_acro_applied(fake_params(NO_ACRO), 6), 6)
+    assert.equal(prep_acro_applied(fake_params(NO_ACRO), '2'), 2)
+    for (const slot of [null, undefined, '', 0, 7, 2.5, 'шесть']) {
+        assert.equal(prep_acro_applied(fake_params(NO_ACRO), slot), null, String(slot))
+    }
+    assert.equal(prep_acro_applied(fake_params(GOOD), 2), null)
+    assert.equal(prep_acro_applied(fake_params(with_values({ FLTMODE3: undefined }, NO_ACRO)), 6), null)
 })
 
 test('acro_slot и acro_exit: без выбора — fail без changes; выбор положения — FLTMODE<n> = 1 и пересчёт выхода', () => {
@@ -386,14 +444,32 @@ test('acro_slot и acro_exit: без выбора — fail без changes; вы�
     assert.match(item_of(has, 'acro_slot').text, /положение 6 \(PWM от 1750\)/)
     assert.deepEqual(item_of(has, 'acro_slot').changes, [])
     assert.match(item_of(has, 'acro_exit').text, /положения 1 \(STABILIZE/)
+
+    // Нет FLTMODE3, выбрано 6: файл ACRO не запишет — ни changes, ни ACRO в 6 у выхода и плана
+    const partial = fake_params(with_values({ FLTMODE3: undefined }, NO_ACRO))
+    const items = prep_check(partial, 'pid', { acro_slot: 6 })
+    assert.equal(item_of(items, 'acro_slot').status, 'warn')
+    assert.equal(item_of(items, 'acro_slot').text, prep_missing_text(['FLTMODE3']))
+    assert.deepEqual(item_of(items, 'acro_slot').changes, [])
+    const partial_exit = item_of(items, 'acro_exit')
+    assert.equal(partial_exit.status, 'ok')
+    assert.match(partial_exit.text, /6 \(ALT_HOLD, PWM от 1750\)/)
+    assert.deepEqual(prep_changes(partial, items), { ACRO_OPTIONS: 2, ACRO_TRAINER: 0, LOG_BITMASK: 180223 })
+    assert.deepEqual(prep_plan_slots(partial, 6), { acro: null, exit: 1 })
 })
 
-test('prep_plan_slots: найденное или выбранное ACRO и первое положение выхода', () => {
+test('prep_plan_slots: найденное или выбранное ACRO и первое положение выхода — как у prep_check', () => {
     assert.deepEqual(prep_plan_slots(fake_params(NO_ACRO), 6), { acro: 6, exit: 1 })
     assert.deepEqual(prep_plan_slots(fake_params(NO_ACRO), null), { acro: null, exit: 1 })
     assert.deepEqual(prep_plan_slots(fake_params(GOOD), 2), { acro: 6, exit: 1 })
     const only_exit6 = fake_params({ ...NO_ACRO, FLTMODE1: 3, FLTMODE2: 3, FLTMODE3: 4, FLTMODE4: 6, FLTMODE5: 9, FLTMODE6: 0 })
     assert.deepEqual(prep_plan_slots(only_exit6, 6), { acro: 6, exit: null })
+    assert.deepEqual(prep_plan_slots(only_exit6, 1), { acro: 1, exit: 6 })
+    // Положение выхода — первое из названных пунктом acro_exit
+    for (const [params, slot] of [[fake_params(NO_ACRO), 6], [only_exit6, 1], [fake_params(GOOD), null]]) {
+        const exit = item_of(prep_check(params, 'pid', { acro_slot: slot }), 'acro_exit')
+        assert.match(exit.text, new RegExp('^Выход из ACRO — положени[ея] ' + prep_plan_slots(params, slot).exit + ' \\('))
+    }
 })
 
 // ---------------------------------------------------------------- обучение газа висения
@@ -491,11 +567,26 @@ test('prep_flight_plan: фильтры — висение, без Acro; PID — 
     }
 })
 
-test('prep_flight_plan: положения не выбраны — подсказка и предупреждение; без ctx — тоже работает', () => {
-    const plan = prep_flight_plan('pid', { acro_slot: null, exit_slot: null, checks: [] })
-    assert.match(plan[0], /положение для ACRO не выбрано/)
-    assert.match(plan[2], /Положения с самовыравниванием на переключателе нет/)
-    assert.deepEqual(prep_flight_plan('pid'), plan)
+test('prep_flight_plan: положение ACRO не выбрано — подсказка на месте включения ACRO', () => {
+    const plan = prep_flight_plan('pid', { acro_slot: null, exit_slot: 1, checks: [] })
+    assert.equal(plan.length, 4)
+    assert.match(plan[0], /^Наберите безопасную высоту и включите ACRO — положение для ACRO не выбрано/)
+    assert.match(plan[2], /^Выход из ACRO — положением 1/)
+})
+
+test('prep_flight_plan: выхода нет — запрет на месте пунктов Acro, без «Интервал — участок ACRO»; без ctx — так же', () => {
+    const forbid = /^Положения с самовыравниванием на переключателе нет: .*не включайте ACRO, пока его не будет/
+    const pid = prep_flight_plan('pid', { acro_slot: 6, exit_slot: null, checks: [] })
+    assert.equal(pid.length, 2)
+    assert.match(pid[0], forbid)
+    assert.equal(pid[1], 'Посадка; загрузите лог в мастер.')
+    assert.ok(!pid.some((t) => /включите ACRO|2–3 минуты|Интервал/.test(t)))
+    const both = prep_flight_plan('both', { acro_slot: 6, exit_slot: null, checks: [] })
+    assert.equal(both.length, 3)
+    assert.match(both[0], /висение не меньше/)
+    assert.match(both[1], forbid)
+    assert.equal(both[2], 'Посадка; загрузите лог в мастер.')
+    assert.deepEqual(prep_flight_plan('pid'), pid)
 })
 
 test('prep_flight_plan: «До полёта» — вибрации, clipping, обороты шага 0 со статусом warn или fail и fix', () => {

@@ -17,28 +17,36 @@
 // core/summary.js (summary_period, summary_lower_first).
 
 const prep_rules = {
-    // Номера битов LOG_BITMASK: ATTITUDE_FAST, PID, IMU_RAW [код] ArduCopter/defines.h:87, 99, 105 (MASK_LOG_*). Те же,
-    // что check_rules в core/checks.js, — равенство закреплено в tests/tunewizard-prep.test.cjs
-    log_bitmask_attitude_fast: 0,
-    log_bitmask_pid: 12,
-    log_bitmask_imu_raw: 19,
-    // LOG_BACKEND_TYPE: бит 0 — File (карта памяти) [код] AP_Logger/AP_Logger.cpp:97–100 (@Bitmask 0:File,1:MAVLink,2:Block)
+    // Номера битов LOG_BITMASK: ATTITUDE_FAST, PID, IMU_RAW [код] ArduCopter/defines.h:87, 99, 105 (MASK_LOG_*) — из
+    // check_rules (core/checks.js), не повторяются
+    log_bitmask_attitude_fast: check_rules.log_bitmask_attitude_fast,
+    log_bitmask_pid: check_rules.log_bitmask_pid,
+    log_bitmask_imu_raw: check_rules.log_bitmask_imu_raw,
+    // LOG_BACKEND_TYPE: бит 0 — File (карта памяти), бит 2 — Block (встроенная флеш-память платы); лог пишется, если
+    // включён любой из них [код] AP_Logger/AP_Logger.cpp:100 (@Bitmask 0:File,1:MAVLink,2:Block), 245–262 (выбор
+    // хранилищ при запуске), AP_Logger.h:456–458 (Backend_Type). Бит 1 (MAVLink) — поток на наземную станцию, не запись
     log_backend_file_bit: 0,
+    log_backend_block_bit: 2,
     // INS_RAW_LOG_OPT: бит 0 — основной гироскоп, 1 — все гироскопы, 2 — после фильтров, 3 — до и после
     // [код] AP_InertialSensor/AP_InertialSensor.cpp:693–698. Raw пишется при бите 0 или 1 или бите IMU_RAW в LOG_BITMASK,
-    // бит 3 проверяется раньше бита 2, а при raw-записи batch гироскопа не пишется [код] AP_InertialSensor_Backend.cpp:480–508
+    // бит 3 проверяется раньше бита 2 [код] AP_InertialSensor_Backend.cpp:480–502. Batch не пишется для тех гироскопов,
+    // которые пишет raw; при бите 0 batch остальных IMU из INS_LOG_BAT_MASK пишется [код] AP_InertialSensor_Backend.cpp:485–510.
+    // Мастер при raw берёт raw (log_messages, core/log.js) — его и оценивает подготовка
     raw_opt_primary_bit: 0,
     raw_opt_all_bit: 1,
     raw_opt_post_bit: 2,
     raw_opt_prepost_bit: 3,
-    // INS_LOG_BAT_OPT: бит 1 — после фильтров, бит 2 — до и после [код] AP_InertialSensor/BatchSampler.cpp:28
+    // INS_LOG_BAT_OPT: бит 1 — после фильтров, бит 2 — до и после [код] AP_InertialSensor/BatchSampler.cpp:28. Оба бита
+    // вместе — обе половины после фильтров: флаг «после фильтров» включён (BatchSampler.cpp:97–102), и без Sensor-Rate
+    // doing_post_filter_logging() всегда true [код] AP_InertialSensor.h:351–353, AP_InertialSensor_Backend.cpp:507
     bat_opt_post_bit: 1,
     bat_opt_prepost_bit: 2,
     // Нет записи гироскопа — в файл batch: работает на любой плате [решение пользователя 30.10.2026, раздел 10, в]; тот же
     // совет у шага 0 (core/checks.js, gyro_log)
     batch_fix: { INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 },
     // Подсказка raw для плат H7 и быстрее (в файл не пишется): основной гироскоп (бит 0) до и после фильтров (бит 3)
-    // [код] AP_InertialSensor_Backend.cpp:480–492
+    // [код] AP_InertialSensor_Backend.cpp:480–492. Нет INS_RAW_LOG_OPT (старая прошивка) — подсказка — бит IMU_RAW в
+    // LOG_BITMASK: тогда raw включается только им [код] AP_InertialSensor_Backend.cpp:485–487
     raw_hint: 9,
     // LOG_FILE_BUFSIZE, КиБ: при raw-записи ниже buffer_min_kib — warn, в файл — buffer_fix_kib. Умолчания прошивки
     // 16 / 50 / 80 / ≈200 по памяти платы [код] AP_Logger/AP_Logger.cpp:27–35; не хватит памяти — прошивка сама уменьшит
@@ -48,14 +56,15 @@ const prep_rules = {
     buffer_fix_kib: 64,
     // INS_HNTCH_MODE = 3 — трекинг notch по ESC [код] Filter/HarmonicNotchFilter.cpp:127; обороты от регуляторов —
     // двунаправленный DShot (SERVO_BLH_BDMASK) [код] AP_BLHeli/AP_BLHeli.cpp:144–150 или SERIALn_PROTOCOL = 16 (телеметрия
-    // ESC) [код] AP_SerialManager/AP_SerialManager.h:55; портов SERIAL0–9 [код] AP_SerialManager.cpp:174–380,
-    // AP_SerialManager_config.h:52–56
+    // ESC) [код] AP_SerialManager/AP_SerialManager.h:55; параметры SERIAL0_PROTOCOL–SERIAL9_PROTOCOL
+    // [код] AP_SerialManager.cpp:174–384
     notch_mode_esc: 3,
     serial_protocol_esc: 16,
     serial_ports: 10,
-    // Номер режима ACRO и значение бита «Rate Loop Only» (бит 1) в ACRO_OPTIONS — из core/pidtune.js, не повторяются
+    // Номер режима ACRO и значение маски «Rate Loop Only» в ACRO_OPTIONS (2 — бит 1; в pidtune_rules —
+    // acro_rate_only_bit) — из core/pidtune.js, не повторяются
     acro_mode: pidtune_rules.acro_mode,
-    acro_rate_only_bit: pidtune_rules.acro_rate_only_bit,
+    acro_rate_only_mask: pidtune_rules.acro_rate_only_bit,
     // Режимы с самовыравниванием для выхода из Acro: STABILIZE, ALT_HOLD, LOITER, POSHOLD [наше, решение пользователя
     // 30.10.2026]
     level_modes: [0, 2, 5, 16],
@@ -155,31 +164,43 @@ function prep_is_level(mode) {
     return (mode != null) && prep_rules.level_modes.includes(Number(mode))
 }
 
-// Предложение положения для ACRO: acro_suggest_slot (6), если ACRO нет ни в одном положении, FLTMODE6 есть и не ACRO, а
-// среди остальных положений есть режим с самовыравниванием (выход останется); иначе null — только выбор пользователя
-// [решение пользователя 30.10.2026, раздел 10, б]. ACRO уже есть — null
-function prep_acro_suggestion(params) {
-    const slots = prep_mode_slots(params)
-    if (slots.some((s) => s.mode == prep_rules.acro_mode)) {
+// Положение, которое станет ACRO после записи файла исправлений: acro_slot (1–6, число или строка), если ACRO сейчас
+// нет ни в одном положении и есть все FLTMODE1–6; иначе null — ACRO уже есть, acro_slot неверный или какого-то FLTMODE
+// нет (пункт acro_slot тогда — warn о параметрах, без changes). Одно правило для prep_check (acro_slot, acro_exit),
+// prep_plan_slots и prep_acro_suggestion
+function prep_acro_applied(params, acro_slot) {
+    const slot = prep_slot_number(acro_slot)
+    const now = prep_mode_slots(params)
+    if ((slot == null) || now.some((s) => (s.mode == null) || (s.mode == prep_rules.acro_mode))) {
         return null
     }
-    const suggest = prep_rules.acro_suggest_slot
-    if (slots[suggest - 1].mode == null) {
-        return null
-    }
-    return slots.some((s) => (s.slot !== suggest) && prep_is_level(s.mode)) ? suggest : null
+    return slot
 }
 
-// Положения для плана полёта → { acro, exit }: acro — первое положение с ACRO, exit — первое положение не ACRO с
-// самовыравниванием, оба по режимам после записи выбранного acro_slot (он учитывается, только если ACRO сейчас нет — как
-// в prep_check); нет — null
+// Положения выхода из Acro среди slots (prep_mode_slots): не ACRO и с самовыравниванием, по порядку положений
+function prep_exit_slots(slots) {
+    return slots.filter((s) => (s.mode != prep_rules.acro_mode) && prep_is_level(s.mode))
+}
+
+// Предложение положения для ACRO: acro_suggest_slot (6), если файл его запишет (prep_acro_applied: ACRO нет, все
+// FLTMODE1–6 есть) и после записи остаётся положение выхода (prep_exit_slots); иначе null — только выбор пользователя
+// [решение пользователя 30.10.2026, раздел 10, б]. ACRO уже есть — null
+function prep_acro_suggestion(params) {
+    const suggest = prep_rules.acro_suggest_slot
+    if (prep_acro_applied(params, suggest) == null) {
+        return null
+    }
+    return (prep_exit_slots(prep_mode_slots(params, suggest)).length > 0) ? suggest : null
+}
+
+// Положения для плана полёта → { acro, exit } (номера или null): режимы — после записи файла (prep_mode_slots с
+// prep_acro_applied(params, acro_slot)); acro — первое положение с ACRO (уже стоящее или выбранное, если файл его
+// запишет), exit — первое положение выхода (prep_exit_slots). То же, что видят пункты acro_slot и acro_exit prep_check
 function prep_plan_slots(params, acro_slot = null) {
-    const now = prep_mode_slots(params)
-    const applied = now.some((s) => s.mode == prep_rules.acro_mode) ? null : acro_slot
-    const slots = prep_mode_slots(params, applied)
+    const slots = prep_mode_slots(params, prep_acro_applied(params, acro_slot))
     const acro = slots.find((s) => s.mode == prep_rules.acro_mode)
-    const exit = slots.find((s) => (s.mode != prep_rules.acro_mode) && prep_is_level(s.mode))
-    return { acro: acro?.slot ?? null, exit: exit?.slot ?? null }
+    const exit = prep_exit_slots(slots)
+    return { acro: acro?.slot ?? null, exit: (exit.length > 0) ? exit[0].slot : null }
 }
 
 // Бит bit (номер) в целом value
@@ -187,9 +208,9 @@ function prep_bit(value, bit) {
     return (value & (1 << bit)) !== 0
 }
 
-// «ИМЯ = значение» (значение — как в файле .param, param_to_string)
+// «ИМЯ = значение» (значение — как в файле .param, param_to_string; не число — как есть: param_to_string на NaN бросает)
 function prep_eq(name, value) {
-    return name + " = " + param_to_string(value)
+    return name + " = " + (Number.isFinite(value) ? param_to_string(value) : String(value))
 }
 
 // Текст пункта, которому не хватает параметров names: «Параметра X нет — проверьте версию прошивки»
@@ -207,23 +228,27 @@ function prep_slots_text(slots, with_mode) {
 // Проверка параметров для цели goal ("filters" | "pid" | "both") → [{ id, status: "ok" | "warn" | "fail", title, text,
 // fix, changes }] — правила цели по порядку таблицы раздела 3 дизайна (prep_rules.check_goals).
 // params.get(name) → число или null. ctx = { acro_slot, hover_check } (ctx и поля необязательны): acro_slot — положение
-// для ACRO, выбранное пользователем (1–6 или null; учитывается, только если ACRO на переключателе сейчас нет),
-// hover_check — проверка шага 0 hover_throttle ({ status, … }) или null (лога нет или нет газа висения).
+// для ACRO, выбранное пользователем (1–6 или null; учитывается по prep_acro_applied: ACRO сейчас нет и все FLTMODE1–6
+// есть), hover_check — проверка шага 0 hover_throttle ({ status, … }) или null (лога нет или нет газа висения).
 // fix — что сделать (null — нечего); changes — что пишет файл исправлений: [{ name, value }] или для масок
 // [{ name, set, clear }] (set / clear — значения битов, prep_changes), [] — нечего. Параметра, нужного правилу для вывода,
 // нет — warn «параметра X нет — проверьте версию прошивки» (prep_missing_text), changes []. Уточнения:
+// - log_backend — fail, только если нет ни бита File (0), ни бита Block (2); в файл — бит File;
 // - gyro_data — raw (INS_RAW_LOG_OPT бит 0 или 1, или бит IMU_RAW в LOG_BITMASK) или batch (INS_LOG_BAT_MASK ≠ 0); нет
 //   INS_RAW_LOG_OPT — raw только по биту IMU_RAW (старые прошивки). Ни того ни другого — fail, в файл batch (batch_fix),
-//   в fix ещё подсказка raw для плат H7 (raw_hint);
-// - gyro_prepost и log_buffer — от источника после исправления gyro_data: raw и batch вместе — raw (при raw batch
-//   гироскопа не пишется); нет записи — batch из файла: gyro_prepost ok, log_buffer не применяется (пункта нет). Источник
-//   не определить (gyro_data — warn о параметрах) — обоих пунктов нет. log_buffer — только при raw;
+//   в fix ещё подсказка raw для плат H7: raw_hint, а без INS_RAW_LOG_OPT — бит IMU_RAW;
+// - gyro_prepost и log_buffer — от источника после исправления gyro_data: raw и batch вместе — raw (его берёт мастер;
+//   batch не пишется для гироскопов, которые пишет raw); нет записи — batch из файла: gyro_prepost ok, log_buffer не
+//   применяется (пункта нет). Источник не определить (gyro_data — warn о параметрах) — обоих пунктов нет. log_buffer —
+//   только при raw. Batch с битами 1 и 2 INS_LOG_BAT_OPT вместе — warn: обе половины после фильтров;
 // - notch_source — по обоим notch (notch_param_names): warn, если включённый notch с MODE = 3 (ESC), а SERVO_BLH_BDMASK
 //   0 или нет и ни один SERIAL0–9_PROTOCOL не 16; нет INS_HNTC2_ENABLE — второй notch выключен;
-// - acro_slot — ACRO есть — ok; нет — fail, changes FLTMODE<acro_slot> = 1, только если acro_slot задан;
-// - acro_exit — по режимам после записи acro_slot: среди положений не ACRO есть режим с самовыравниванием — ok (названы
-//   положения), нет — fail без changes;
-// - fstrate — FSTRATE_ENABLE нет — ok: в прошивке нет быстрого потока (параметр есть с Copter 4.7);
+// - acro_slot — ACRO есть — ok; нет — fail, changes FLTMODE<acro_slot> = 1, только если файл его запишет
+//   (prep_acro_applied);
+// - acro_exit — по режимам после записи файла: есть положение выхода (prep_exit_slots) — ok (названы положения), нет —
+//   fail без changes;
+// - fstrate — FSTRATE_ENABLE нет — ok: быстрого потока нет в прошивке или на плате; > 0 — warn без fix и changes: перед
+//   полётом делать нечего, это оговорка к прогнозу шага 4;
 // - hover_learn — MOT_HOVER_LEARN = 2 — ok; иначе при hover_check?.status === "warn" — warn, changes 2; иначе ok с
 //   советом в тексте, без changes
 function prep_check(params, goal, ctx) {
@@ -237,18 +262,22 @@ function prep_check(params, goal, ctx) {
         items.push({ id: id, status: status, title: title, text: text, fix: fix ?? null, changes: changes ?? [] })
     const missing = (id, title, names) => add(id, "warn", title, prep_missing_text(names), null, [])
 
-    // Запись лога на карту памяти
+    // Запись лога: на карту памяти (File) или во встроенную память платы (Block)
     {
-        const title = "Запись лога на карту"
+        const title = "Запись лога"
         const value = get("LOG_BACKEND_TYPE")
+        const file = r.log_backend_file_bit
+        const block = r.log_backend_block_bit
         if (value == null) {
             missing("log_backend", title, ["LOG_BACKEND_TYPE"])
-        } else if (prep_bit(value, r.log_backend_file_bit)) {
-            add("log_backend", "ok", title, prep_eq("LOG_BACKEND_TYPE", value) + ": бит 0 (File) включён — лог пишется на карту памяти")
+        } else if (prep_bit(value, file)) {
+            add("log_backend", "ok", title, prep_eq("LOG_BACKEND_TYPE", value) + ": бит " + file + " (File) включён — лог пишется на карту памяти")
+        } else if (prep_bit(value, block)) {
+            add("log_backend", "ok", title, prep_eq("LOG_BACKEND_TYPE", value) + ": бит " + block + " (Block) включён — лог пишется во встроенную память платы")
         } else {
-            add("log_backend", "fail", title, prep_eq("LOG_BACKEND_TYPE", value) + ": бит 0 (File) выключен — на карту памяти лог не пишется",
-                "Включите бит 0 (File) в LOG_BACKEND_TYPE (+1)",
-                [{ name: "LOG_BACKEND_TYPE", set: 1 << r.log_backend_file_bit, clear: 0 }])
+            add("log_backend", "fail", title, prep_eq("LOG_BACKEND_TYPE", value) + ": биты " + file + " (File) и " + block + " (Block) выключены — лог не пишется ни на карту, ни во встроенную память",
+                "Включите запись на карту (бит " + file + ", +" + (1 << file) + "); у платы без карты — во встроенную память (бит " + block + ", +" + (1 << block) + ")",
+                [{ name: "LOG_BACKEND_TYPE", set: 1 << file, clear: 0 }])
         }
     }
 
@@ -301,7 +330,7 @@ function prep_check(params, goal, ctx) {
         if (raw) {
             source = "raw"
             add(id, "ok", title, "Raw (GYR): " + raw_reasons.join(", ") +
-                (batch ? "; " + prep_eq("INS_LOG_BAT_MASK", bat_mask) + " тоже включён, но при raw-записи batch гироскопа не пишется" : ""))
+                (batch ? "; " + prep_eq("INS_LOG_BAT_MASK", bat_mask) + " тоже включён, но batch не пишется для гироскопов, которые пишет raw, — мастер возьмёт raw" : ""))
         } else if (batch) {
             source = "batch"
             add(id, "ok", title, "Batch (ISBH/ISBD): " + prep_eq("INS_LOG_BAT_MASK", bat_mask))
@@ -314,9 +343,13 @@ function prep_check(params, goal, ctx) {
                 const found = [((raw_opt != null) ? prep_eq("INS_RAW_LOG_OPT", raw_opt) : null),
                     "бит " + r.log_bitmask_imu_raw + " (IMU_RAW) в LOG_BITMASK выключен", prep_eq("INS_LOG_BAT_MASK", bat_mask)].filter((t) => t != null)
                 const fix_values = Object.entries(r.batch_fix)
+                // Без INS_RAW_LOG_OPT (старая прошивка) raw включается только битом IMU_RAW
+                const raw_hint = (raw_opt != null)
+                    ? prep_eq("INS_RAW_LOG_OPT", r.raw_hint) + " (основной гироскоп до и после фильтров)"
+                    : "бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK (+" + (1 << r.log_bitmask_imu_raw) + "; INS_RAW_LOG_OPT в этой прошивке нет)"
                 add(id, "fail", title, "Записи гироскопа нет: " + found.join(", ") + " — шагам 1–3 нечего считать",
                     "Batch: " + fix_values.map(([name, value]) => prep_eq(name, value)).join(", ") + " (до и после фильтров) — работает на любой плате. " +
-                    "На платах H7 и быстрее можно вместо него raw: " + prep_eq("INS_RAW_LOG_OPT", r.raw_hint) + " (основной гироскоп до и после фильтров)",
+                    "На платах H7 и быстрее можно вместо него raw: " + raw_hint,
                     fix_values.map(([name, value]) => ({ name: name, value: value })))
             }
         }
@@ -329,33 +362,43 @@ function prep_check(params, goal, ctx) {
         if (source === "fix") {
             add(id, "ok", title, "После исправления записи гироскопа — batch до и после фильтров (" + prep_eq("INS_LOG_BAT_OPT", r.batch_fix.INS_LOG_BAT_OPT) + ")")
         } else if (source === "raw") {
-            const prepost = 1 << r.raw_opt_prepost_bit
-            const post = 1 << r.raw_opt_post_bit
-            const changes = [{ name: "INS_RAW_LOG_OPT", set: prepost, clear: post }]
+            const prepost = r.raw_opt_prepost_bit
+            const post = r.raw_opt_post_bit
+            const changes = [{ name: "INS_RAW_LOG_OPT", set: 1 << prepost, clear: 1 << post }]
+            const add_text = "Добавьте бит " + prepost + " (+" + (1 << prepost) + ") к INS_RAW_LOG_OPT"
             if (raw_opt == null) {
                 missing(id, title, ["INS_RAW_LOG_OPT"])
-            } else if (prep_bit(raw_opt, r.raw_opt_prepost_bit)) {
-                add(id, "ok", title, prep_eq("INS_RAW_LOG_OPT", raw_opt) + ": raw до и после фильтров (бит 3) — оценку «станет» можно сверить с реальными данными")
-            } else if (prep_bit(raw_opt, r.raw_opt_post_bit)) {
+            } else if (prep_bit(raw_opt, prepost)) {
+                add(id, "ok", title, prep_eq("INS_RAW_LOG_OPT", raw_opt) + ": raw до и после фильтров (бит " + prepost + ") — оценку «станет» можно сверить с реальными данными")
+            } else if (prep_bit(raw_opt, post)) {
                 add(id, "warn", title, prep_eq("INS_RAW_LOG_OPT", raw_opt) + ": raw только после фильтров — спектра до фильтров и оценки «станет» не будет",
-                    "Добавьте бит 3 (+8) к INS_RAW_LOG_OPT и снимите бит 2 (−4): запись до и после фильтров", changes)
+                    add_text + " и снимите бит " + post + " (−" + (1 << post) + "): запись до и после фильтров", changes)
             } else {
                 add(id, "warn", title, prep_eq("INS_RAW_LOG_OPT", raw_opt) + ": raw только до фильтров — реального «после» для сверки оценки «станет» не будет",
-                    "Добавьте бит 3 (+8) к INS_RAW_LOG_OPT: запись до и после фильтров", changes)
+                    add_text + ": запись до и после фильтров", changes)
             }
         } else if (source === "batch") {
             const bat_opt = get("INS_LOG_BAT_OPT")
-            const changes = [{ name: "INS_LOG_BAT_OPT", set: 1 << r.bat_opt_prepost_bit, clear: 1 << r.bat_opt_post_bit }]
+            const prepost = r.bat_opt_prepost_bit
+            const post = r.bat_opt_post_bit
+            const changes = [{ name: "INS_LOG_BAT_OPT", set: 1 << prepost, clear: 1 << post }]
+            const add_text = "Добавьте бит " + prepost + " (+" + (1 << prepost) + ") к INS_LOG_BAT_OPT"
+            const clear_text = "снимите бит " + post + " (−" + (1 << post) + ")"
             if (bat_opt == null) {
                 missing(id, title, ["INS_LOG_BAT_OPT"])
-            } else if (prep_bit(bat_opt, r.bat_opt_prepost_bit)) {
-                add(id, "ok", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch до и после фильтров (бит 2) — оценку «станет» можно сверить с реальными данными")
-            } else if (prep_bit(bat_opt, r.bat_opt_post_bit)) {
+            } else if (prep_bit(bat_opt, prepost) && prep_bit(bat_opt, post)) {
+                // Флаг «после фильтров» включён — без Sensor-Rate обе половины пишутся после фильтров (prep_rules)
+                add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": биты " + post + " (после фильтров) и " + prepost +
+                    " (до и после) вместе — обе половины batch пишутся после фильтров, спектра до фильтров не будет",
+                    "В INS_LOG_BAT_OPT " + clear_text + ", бит " + prepost + " оставьте: запись до и после фильтров", changes)
+            } else if (prep_bit(bat_opt, prepost)) {
+                add(id, "ok", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch до и после фильтров (бит " + prepost + ") — оценку «станет» можно сверить с реальными данными")
+            } else if (prep_bit(bat_opt, post)) {
                 add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только после фильтров — спектра до фильтров и оценки «станет» не будет",
-                    "Добавьте бит 2 (+4) к INS_LOG_BAT_OPT и снимите бит 1 (−2): запись до и после фильтров", changes)
+                    add_text + " и " + clear_text + ": запись до и после фильтров", changes)
             } else {
                 add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только до фильтров — реального «после» для сверки оценки «станет» не будет",
-                    "Добавьте бит 2 (+4) к INS_LOG_BAT_OPT: запись до и после фильтров", changes)
+                    add_text + ": запись до и после фильтров", changes)
             }
         }
     }
@@ -424,7 +467,8 @@ function prep_check(params, goal, ctx) {
     // ACRO на переключателе и выход из него
     const now = prep_mode_slots(params)
     const acro_now = now.filter((s) => s.mode == r.acro_mode)
-    const applied = (acro_now.length > 0) ? null : acro_slot
+    // Положение, которое станет ACRO после записи файла (null — ACRO уже есть, не выбрано или нет какого-то FLTMODE)
+    const applied = prep_acro_applied(params, acro_slot)
     {
         const id = "acro_slot"
         const title = "ACRO на переключателе"
@@ -446,7 +490,7 @@ function prep_check(params, goal, ctx) {
         const id = "acro_exit"
         const title = "Выход из ACRO"
         const after = prep_mode_slots(params, applied)
-        const level = after.filter((s) => (s.mode != r.acro_mode) && prep_is_level(s.mode))
+        const level = prep_exit_slots(after)
         const absent = after.filter((s) => s.mode == null).map((s) => s.name)
         if (level.length > 0) {
             add(id, "ok", title, "Выход из ACRO — " + prep_slots_text(level, true) + ": проверьте, что тумблер достаёт до " +
@@ -464,15 +508,16 @@ function prep_check(params, goal, ctx) {
         const id = "acro_rate_only"
         const title = "Acro «Rate Loop Only»"
         const value = get("ACRO_OPTIONS")
-        const bit = r.acro_rate_only_bit
+        const mask = r.acro_rate_only_mask
+        const bit = Math.log2(mask)
         if (value == null) {
             missing(id, title, ["ACRO_OPTIONS"])
-        } else if ((value & bit) !== 0) {
-            add(id, "ok", title, prep_eq("ACRO_OPTIONS", value) + ": бит 1 (Rate Loop Only) включён — в Acro угловой контур выключен, цель скорости — прямая команда пилота")
+        } else if ((value & mask) !== 0) {
+            add(id, "ok", title, prep_eq("ACRO_OPTIONS", value) + ": бит " + bit + " (Rate Loop Only) включён — в Acro угловой контур выключен, цель скорости — прямая команда пилота")
         } else {
-            add(id, "fail", title, prep_eq("ACRO_OPTIONS", value) + ": бит 1 (Rate Loop Only) выключен — в Acro работает угловой контур, контур скорости по такому полёту точно не измерить",
-                "Включите бит 1 (Rate Loop Only) в ACRO_OPTIONS (+" + bit + "); бит 0 (Air-mode) не меняется",
-                [{ name: "ACRO_OPTIONS", set: bit, clear: 0 }])
+            add(id, "fail", title, prep_eq("ACRO_OPTIONS", value) + ": бит " + bit + " (Rate Loop Only) выключен — в Acro работает угловой контур, контур скорости по такому полёту точно не измерить",
+                "Включите бит " + bit + " (Rate Loop Only) в ACRO_OPTIONS (+" + mask + "); бит 0 (Air-mode) не меняется",
+                [{ name: "ACRO_OPTIONS", set: mask, clear: 0 }])
         }
     }
     {
@@ -490,16 +535,17 @@ function prep_check(params, goal, ctx) {
         }
     }
 
-    // Быстрый поток контура скорости
+    // Быстрый поток контура скорости. FSTRATE_ENABLE есть только при AP_INERTIALSENSOR_FAST_SAMPLE_WINDOW_ENABLED
+    // [код] ArduCopter/Parameters.cpp:1084–1090, AP_InertialSensor/AP_InertialSensor_rate_config.h:8 — нет параметра,
+    // нет и потока. warn — оговорка к прогнозу шага 4, а не действие перед полётом: fix нет
     {
         const id = "fstrate"
         const title = "Быстрый поток контура"
         const value = get("FSTRATE_ENABLE")
         if (value == null) {
-            add(id, "ok", title, "FSTRATE_ENABLE нет: быстрого потока контура скорости в этой прошивке нет (параметр есть с Copter 4.7)")
+            add(id, "ok", title, "FSTRATE_ENABLE нет: быстрого потока контура скорости нет в прошивке или на плате")
         } else if (value > 0) {
-            add(id, "warn", title, prep_eq("FSTRATE_ENABLE", value) + ": контур скорости в быстром потоке, а модель регулятора мастера считается на SCHED_LOOP_RATE — прогноз шага 4 может разойтись с полётом",
-                "Учтите это при выборе варианта на шаге 4; для точного прогноза на время настройки можно поставить FSTRATE_ENABLE = 0 (в файл не пишется)")
+            add(id, "warn", title, prep_eq("FSTRATE_ENABLE", value) + ": контур скорости в быстром потоке, а модель регулятора мастера считается на SCHED_LOOP_RATE — прогноз шага 4 может разойтись с полётом")
         } else {
             add(id, "ok", title, prep_eq("FSTRATE_ENABLE", value) + ": контур скорости в основном цикле — как в модели мастера")
         }
@@ -532,7 +578,8 @@ function prep_check(params, goal, ctx) {
 // Значения файла исправлений по пунктам items (prep_check) → объект имя → значение. Пункты и их changes — по очереди:
 // { name, value } ставит значение, { name, set, clear } — маска: от уже набранного значения этого имени, иначе от
 // params.get(name) (нет — от 0), (v | set) & ~clear — несколько правил на одну маску (LOG_BITMASK) складываются в одно
-// значение. Значение, равное текущему в params (как float32), в файл не идёт: файл — только изменения
+// значение; маска в params не число (NaN) — не пишется: от неё нечего отсчитывать, а 0 стёр бы остальные биты [наше].
+// Значение, равное текущему в params (как float32), в файл не идёт: файл — только изменения
 function prep_changes(params, items) {
     const values = {}
     for (const item of items) {
@@ -542,7 +589,9 @@ function prep_changes(params, items) {
                 values[name] = change.value
             } else {
                 const base = (name in values) ? values[name] : (params.get(name) ?? 0)
-                values[name] = (base | change.set) & ~change.clear
+                if (Number.isFinite(base)) {
+                    values[name] = (base | change.set) & ~change.clear
+                }
             }
         }
     }
@@ -567,9 +616,10 @@ function prep_reboot_names(names) {
 // 1. «До полёта: title — fix» — проверки шага 0 из prep_rules.plan_check_ids (вибрации, clipping, обороты) со статусом
 //    warn или fail и непустым fix, fix — продолжение фразы (summary_lower_first);
 // 2. фильтры — взлёт и висение без движений стиками;
-// 3. PID — безопасная высота и ACRO положением acro_slot, резкие отклонения стиков по осям, выход положением exit_slot
-//    (нет положения — предупреждение); с фильтрами — после висения;
-// 4. последним — посадка и загрузка лога, с PID — кнопка шага 4 «Интервал — участок ACRO»
+// 3. PID — безопасная высота и ACRO положением acro_slot, резкие отклонения стиков по осям, выход положением exit_slot;
+//    с фильтрами — после висения. Положения выхода нет (exit_slot null) — на месте этих пунктов один пункт-запрет: не
+//    включать ACRO, пока его не будет;
+// 4. последним — посадка и загрузка лога, с полётом в ACRO — кнопка шага 4 «Интервал — участок ACRO»
 function prep_flight_plan(goal, ctx) {
     const parts = prep_goal_parts(goal)
     const r = prep_rules
@@ -589,17 +639,19 @@ function prep_flight_plan(goal, ctx) {
         add("Взлёт в STABILIZE или ALT_HOLD, висение не меньше " + r.hover_min_s + " с (лучше " + r.hover_good_s + ") без движений стиками: " +
             "по нему шаги 1–3 считают спектр гироскопа")
     }
-    if (pid) {
+    const acro_flight = pid && (exit_slot != null)
+    if (acro_flight) {
         add((filters ? "После висения наберите" : "Наберите") + " безопасную высоту и включите ACRO " +
             ((acro_slot != null) ? "положением " + acro_slot + " (PWM " + prep_slot_pwm(acro_slot) + ")"
                 : "— положение для ACRO не выбрано: выберите его в таблице положений переключателя"))
         add("2–3 минуты резких отклонений стиков с возвратом, по одной оси за раз — крен, тангаж, рыскание — с разной амплитудой: " +
             "мастеру нужно не меньше " + r.acro_data_s + " с участков с целью скорости от " + r.acro_target_dps + " °/с")
-        add((exit_slot != null)
-            ? "Выход из ACRO — положением " + exit_slot + " (PWM " + prep_slot_pwm(exit_slot) + "): в Acro аппарат сам не выравнивается"
-            : "Положения с самовыравниванием на переключателе нет: в Acro аппарат сам не выравнивается — не включайте ACRO, пока его не будет")
+        add("Выход из ACRO — положением " + exit_slot + " (PWM " + prep_slot_pwm(exit_slot) + "): в Acro аппарат сам не выравнивается")
+    } else if (pid) {
+        add("Положения с самовыравниванием на переключателе нет: в Acro аппарат сам не выравнивается — не включайте ACRO, пока его " +
+            "не будет (STABILIZE или ALT_HOLD в одном из положений, кроме положения ACRO)")
     }
-    add("Посадка; загрузите лог в мастер" + (pid ? ", на шаге 4 — «Интервал — участок ACRO»" : ""))
+    add("Посадка; загрузите лог в мастер" + (acro_flight ? ", на шаге 4 — «Интервал — участок ACRO»" : ""))
     return items
 }
 
