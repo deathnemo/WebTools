@@ -360,7 +360,7 @@ function reset() {
         memory_reset()
     }
     // Блок «Подготовка к следующему полёту»: лога больше нет — по файлу .param, если он загружен (файл переживает
-    // новый лог и ошибку загрузки), иначе блок скрыт
+    // новый лог и ошибку загрузки); без файла блок скрыт или показывает ошибку чтения .param, сделанную без источника
     if (typeof prep0_render === "function") {
         prep0_render()
     }
@@ -490,14 +490,21 @@ function render_info() {
     box.hidden = false
 }
 
-function render_checks() {
+// Разметка списка проверок (.checks): items — [{ status: "ok" | "warn" | "fail", title, text, fix }] → строки с подписью
+// статуса OK / ВНИМ / СТОП, заголовком, текстом и «Что сделать» (fix пустой — без неё). Проверки лога (render_checks) и
+// блок подготовки к полёту (steps/prep.js)
+function checks_html(items) {
     const labels = { ok: "OK", warn: "ВНИМ", fail: "СТОП" }
-    const box = document.getElementById("log_checks")
-    box.innerHTML = state.checks.map((c) =>
+    return items.map((c) =>
         '<div class="check check--' + c.status + '"><span class="check__s">' + labels[c.status] + '</span>' +
         '<div class="check__b"><h3>' + html_escape(c.title) + '</h3><p>' + html_escape(c.text) + '</p>' +
         (c.fix ? '<p class="fix"><b>Что сделать:</b> ' + html_escape(c.fix) + '</p>' : "") + '</div></div>'
     ).join("")
+}
+
+function render_checks() {
+    const box = document.getElementById("log_checks")
+    box.innerHTML = checks_html(state.checks)
     box.hidden = false
 
     const summary = checks_summary(state.checks)

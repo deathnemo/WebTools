@@ -245,7 +245,7 @@ tr:last-child td{border-bottom:0}
 /* Шаг 0: блок «Прошлый проход» — раскладка и заголовок как у секции; итог строки «что применено»; список проходов для
    лога без строки контроллера — по ширине подписи, на узком окне — не шире ряда. Ряд без видимых кнопки и списка не
    занимает места */
-.memory0{display:flex; flex-direction:column; gap:14px}
+.memory0,.prep0{display:flex; flex-direction:column; gap:14px}
 .memory0 > .row:not(:has(> :not([hidden]))){display:none}
 .memory0-status{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; white-space:nowrap}
 .memory0-status--applied{color:var(--ok)}
@@ -254,9 +254,9 @@ tr:last-child td{border-bottom:0}
 #memory0_pick,#prep0_goal,#prep0_slot{max-width:100%; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; padding:6px 8px;
   border:1px solid var(--line); border-radius:0; background:var(--sunk); color:var(--ink)}
 #memory0_pick:focus-visible,#prep0_goal:focus-visible,#prep0_slot:focus-visible{outline:2px solid var(--low); outline-offset:2px}
-/* Шаг 0: блок «Подготовка к следующему полёту» (steps/prep.js) — раскладка и заголовок как у «Прошлого прохода», поля
-   цели и положения ACRO — как список проходов; строка источника — по центру кнопки «Убрать файл» */
-.prep0{display:flex; flex-direction:column; gap:14px}
+/* Шаг 0: блок «Подготовка к следующему полёту» (steps/prep.js) — раскладка и заголовок как у «Прошлого прохода» (общие
+   правила .memory0,.prep0 выше), поля цели и положения ACRO — как список проходов; строка источника — по центру кнопки
+   «Убрать файл»; диапазон PWM в таблице положений не переносится */
 .prep0-source{align-items:center}
 #prep0_modes td:nth-child(2){white-space:nowrap}
 
@@ -296,10 +296,13 @@ details.more > .tablewrap{margin-top:8px}
   #steps5 th:nth-child(4),#steps5 td:nth-child(4){display:none}
   .print-head{display:block}
   /* «Печать плана» (класс print-prep на body, steps/prep.js): на шаге 0 — только блок подготовки с его шапкой печати,
-     без полей ввода и кнопок (цель — в шапке). Ctrl+P без кнопки печатает шаг 0 как раньше, без шапки подготовки */
+     без полей ввода и кнопок (цель — в шапке); длинный список проверок рвётся между пунктами, а не переносится целиком
+     на вторую страницу. Ctrl+P без кнопки печатает весь шаг 0 вместе с блоком, без шапки печати подготовки */
   body:not(.print-prep) #prep0_print_head{display:none!important}
   body.print-prep section[data-step="0"] > :not(#prep0),body.print-prep #prep0 .fld,body.print-prep #prep0_slot_field,
   body.print-prep #prep0_actions{display:none!important}
+  body.print-prep #prep0_checks{break-inside:auto}
+  body.print-prep #prep0_checks .check{break-inside:avoid}
   body{background:#fff; color:#111}
   .lab,.stats,.checks,.plot,.tablewrap{break-inside:avoid}
   tr{break-inside:avoid}
