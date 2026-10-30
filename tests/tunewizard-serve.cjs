@@ -37,14 +37,15 @@ const base = 'http://127.0.0.1:' + port
 // Коды выхода serve.ps1 и .cmd: отказ с сообщением; сбой PowerShell или нет папки рядом с .cmd
 const refused_code = 2
 const failed_code = 1
-// Файлы корня для сверки ответа байт в байт и тип каждого
+// Файлы корня для сверки ответа байт в байт и тип каждого — только такие, что есть и в переносной папке
+// (tests/tunewizard-portable.cjs): картинка .png — значок вкладки страниц, а не иконка главной WebTools
 const files = [
     ['/TuneWizard/', 'TuneWizard/index.html', 'text/html; charset=utf-8'],
     ['/TuneWizard/wizard.js', 'TuneWizard/wizard.js', 'text/javascript; charset=utf-8'],
     ['/modules/JsDataflashParser/parser.js', 'modules/JsDataflashParser/parser.js', 'text/javascript; charset=utf-8'],
     ['/modules/plotly.js/dist/plotly.min.js', 'modules/plotly.js/dist/plotly.min.js', 'text/javascript; charset=utf-8'],
     ['/FilterReview/params.json', 'FilterReview/params.json', 'application/json'],
-    ['/images/TuneWizard_Icon.png', 'images/TuneWizard_Icon.png', 'image/png'],
+    ['/images/AP_favicon.png', 'images/AP_favicon.png', 'image/png'],
     ['/images/question-circle.svg', 'images/question-circle.svg', 'image/svg+xml'],
     // query отбрасывается, %-кодирование снимается (%69 — «i»)
     ['/TuneWizard/index.html?v=1', 'TuneWizard/index.html', 'text/html; charset=utf-8'],

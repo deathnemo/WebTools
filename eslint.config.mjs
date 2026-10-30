@@ -166,6 +166,7 @@ export default [
     ignores: [
       'modules/**', // submodules and vendored libraries
       'backup/**', // local deployment backups
+      'dist/**', // переносная папка мастера настройки — копии страниц и modules/ (tests/tunewizard-portable.cjs)
       'Libraries/FileSaver.js', // vendored
       // Emscripten-generated glue
       'KinematicTool/Ruckig/ruckig.js',

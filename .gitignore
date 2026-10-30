@@ -8,3 +8,6 @@ backup/
 
 # TuneWizard: local flight logs for manual checks
 TuneWizard/logs/
+
+# TuneWizard: переносная папка и zip для других пилотов (npm run tunewizard:portable)
+dist/

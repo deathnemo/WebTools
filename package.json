@@ -12,6 +12,7 @@
     "test:tunewizard-compare": "node tests/tunewizard-compare.cjs",
     "test:tunewizard-pid-compare": "node tests/tunewizard-pid-compare.cjs",
     "tunewizard:icon": "node tests/tunewizard-icon.cjs",
+    "tunewizard:portable": "node tests/tunewizard-portable.cjs",
     "lint": "eslint ."
   },
   "engines": {
