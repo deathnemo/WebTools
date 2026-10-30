@@ -537,6 +537,10 @@ function prep_check(params, goal, ctx) {
                 [{ name: "ACRO_OPTIONS", set: mask, clear: 0 }])
         }
     }
+    // Тренер Acro: ACRO_TRAINER 0 — выключен, 1 — выравнивание, 2 — выравнивание и ограничение угла, заводское 2
+    // [код] ArduCopter/Parameters.cpp:319–324; тренер подмешивает выравнивание в цель скорости и в Rate Loop Only
+    // [код] ArduCopter/mode_acro.cpp, get_pilot_desired_rates_rads — вызывается до ветвления по RATE_LOOP_ONLY
+    // (как pidtune_log_mode, core/pidtune.js)
     {
         const id = "acro_trainer"
         const title = "Тренер Acro"
