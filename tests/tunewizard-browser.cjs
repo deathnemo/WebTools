@@ -1802,10 +1802,13 @@ async function main() {
                          'хранилище недоступно — текст в заметке, вердикт сводки прежний')
         assert.equal(await page.evaluate(() => localStorage.getItem('tunewizard_v1') != null), true, 'хранилище вернули, память на месте')
         // Метаданные параметров не загрузились — общий пункт о перезагрузке; ещё грузятся — пункта нет (появится после
-        // загрузки); состояние загрузки — вернуть
+        // загрузки); состояние загрузки — вернуть. Пункты о перезагрузке изменений шагов (источник "reboot" summary_refly) —
+        // по началу текста: общий пункт подготовки «Исправления подготовки — в файле …» тоже может называть перезагрузку
+        // (параметры _prep.param), но от метаданных не зависит
         const meta5 = await page.evaluate(() => {
             const saved = { ...step_metadata_state }
-            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent).filter((text) => text.includes('перезагрузите полётный контроллер'))
+            const reboot = () => [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent)
+                .filter((text) => text.startsWith('После записи перезагрузите полётный контроллер') || text.startsWith('Описания параметров не загрузились'))
             try {
                 Object.assign(step_metadata_state, { data: null, failed: true })
                 step5_render()

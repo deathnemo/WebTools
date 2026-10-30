@@ -45,23 +45,32 @@ function step_buttons_disabled(page) {
     return page.evaluate(() => [...document.querySelectorAll('#wizbar button')].map((b) => b.disabled))
 }
 
+// Открыть мастер, когда http.server поднимется. Ответ не 2xx или страница не мастер — ошибка с причиной: на Windows при
+// занятом порте python поднимается, а отвечает другой сервер, и goto на 404 не бросает — иначе тест падал бы дальше
+// непонятным «prep0_context is not defined»
 async function wait_for_server(page, url, server) {
     for (let i = 0; i < 40; i++) {
         if (server.exitCode != null) {
             throw new Error('http.server завершился с кодом ' + server.exitCode + ' (занят порт ' + port + ' или нет python?)')
         }
+        let response = null
         try {
-            await page.goto(url, { waitUntil: 'networkidle' })
-            return
+            response = await page.goto(url, { waitUntil: 'networkidle' })
         } catch {
             await new Promise((resolve) => setTimeout(resolve, 250))
+            continue
         }
+        if (!(response?.ok() ?? false) || !(await page.evaluate(() => typeof prep0_init === 'function'))) {
+            throw new Error('на порту ' + port + ' отвечает не мастер (занят порт?): ' + url + ' — ' + ((response != null) ? 'HTTP ' + response.status() : 'нет ответа'))
+        }
+        return
     }
     throw new Error('http.server не поднялся на ' + url)
 }
 
 // Выбрать файл в «Проверить .param…» и дождаться, пока блок его прочитает (prep0_read_file асинхронный): новый источник
-// или новая ошибка чтения
+// или новая ошибка чтения. Ограничение: повторный выбор того же негодного файла при той же ошибке на экране не
+// распознаётся (ошибка та же строка) — ожидание до таймаута; такого шага в тесте нет
 async function pick_param(page, file) {
     await page.evaluate(() => { window.__prep_seen = [prep0_state.file, prep0_state.error] })
     await page.setInputFiles('#prep0_file', file)
@@ -319,14 +328,18 @@ async function main() {
         }
         throw e
     } finally {
-        if (browser) {
-            await browser.close()
-        }
-        if (server) {
-            server.kill()
-        }
-        if (tmp) {
-            fs.rmSync(tmp, { recursive: true, force: true })
+        // Сбой закрытия браузера не должен оставить сервер и временную папку
+        try {
+            if (browser) {
+                await browser.close()
+            }
+        } finally {
+            if (server) {
+                server.kill()
+            }
+            if (tmp) {
+                fs.rmSync(tmp, { recursive: true, force: true })
+            }
         }
     }
 }
