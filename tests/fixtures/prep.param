@@ -1,0 +1,30 @@
+# Синтетический файл параметров ArduCopter для браузерного теста подготовки к полёту
+# (tests/tunewizard-prep-browser.cjs, npm run test:tunewizard-prep). Не файл пользователя: значения подобраны, чтобы
+# при цели «Фильтры и PID» блок «Подготовка к следующему полёту» шага 0 нашёл:
+# - ACRO нет ни в одном положении (FLTMODE1–3 STABILIZE, 4–6 ALT_HOLD) — предлагается положение 6, выход — положение 1;
+# - ACRO_OPTIONS 0 (нет Rate Loop Only), ACRO_TRAINER 2 (заводской тренер);
+# - записи гироскопа нет (INS_RAW_LOG_OPT 0, INS_LOG_BAT_MASK 0, бита IMU_RAW в LOG_BITMASK нет) — исправление batch;
+# - LOG_BITMASK 176126 — заводская маска Copter 180222 без бита 12 (PID), бита 0 (ATTITUDE_FAST) в ней и так нет;
+# - буфер 8 КиБ (без raw-записи не проверяется), notch по ESC с двунаправленным DShot, обучение газа висения включено.
+# ATC_RAT_RLL_P — признак параметров Copter: без него блок отказывает («не похож на параметры Copter»).
+ACRO_OPTIONS,0
+ACRO_TRAINER,2
+ATC_RAT_RLL_P,0.135
+FLTMODE1,0
+FLTMODE2,0
+FLTMODE3,0
+FLTMODE4,2
+FLTMODE5,2
+FLTMODE6,2
+FSTRATE_ENABLE,0
+INS_HNTC2_ENABLE,0
+INS_HNTCH_ENABLE,1
+INS_HNTCH_MODE,3
+INS_LOG_BAT_MASK,0
+INS_LOG_BAT_OPT,0
+INS_RAW_LOG_OPT,0
+LOG_BACKEND_TYPE,1
+LOG_BITMASK,176126
+LOG_FILE_BUFSIZE,8
+MOT_HOVER_LEARN,2
+SERVO_BLH_BDMASK,15
