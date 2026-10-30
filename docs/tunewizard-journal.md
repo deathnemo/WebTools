@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 30.10.2026 — строка «Мастер настройки» на главной WebTools перенесена первой, над Log Finder (ветка `tune-wizard-landing-top`). До этого слиты аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`) и запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`). Мастер готов к тестированию на реальных логах.
+**Обновлено:** 30.10.2026 — строка «Мастер настройки» на главной WebTools перенесена первой, над Log Finder, и добавлен `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9)); задача `Host` на Windows через `python` — [PR #10](https://github.com/deathnemo/WebTools/pull/10). До этого слиты аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`) и запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`). Мастер готов к тестированию на реальных логах.
 
 ---
 
@@ -42,7 +42,7 @@ npm ci
 }
 ```
 
-**Запуск мастера:** из корня репозитория `python -m http.server --bind 127.0.0.1`, затем открыть `http://127.0.0.1:8000/TuneWizard/`. Из VS Code — F5 с конфигурацией «Мастер настройки (python + Chrome)» (`.vscode/launch.json`, добавлена 30.10.2026 первой в списке; задача `Host` из ArduPilot использует `python3`; если на Windows это заглушка Microsoft Store — печатает «Python was not found», как 30.10.2026 на втором компьютере (Python 3.12, Node 24.20), — сервер не стартует: правка задачи под Windows (`python`) — в ветке `windows-python-host`, в `main` ещё не слита). Адрес всегда один — `127.0.0.1`: память прохода привязана к нему.
+**Запуск мастера:** из корня репозитория `python -m http.server --bind 127.0.0.1`, затем открыть `http://127.0.0.1:8000/TuneWizard/`. Из VS Code — F5 с конфигурацией «Мастер настройки (python + Chrome)» (`.vscode/launch.json`, добавлена 30.10.2026 первой в списке; задача `Host` из ArduPilot использует `python3`; если на Windows это заглушка Microsoft Store — печатает «Python was not found», как 30.10.2026 на втором компьютере (Python 3.12, Node 24.20), — сервер не стартует: правка задачи под Windows (`python`) — ветка `windows-python-host`, PR #10, в `main` ещё не слита). Адрес всегда один — `127.0.0.1`: память прохода привязана к нему.
 
 **Проверки:**
 
@@ -122,7 +122,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-landing-top` (от `origin/main` = `aaa329e`) — строка «Мастер настройки» первой на главной WebTools; браузерный тест проверяет, что строка первая в таблице (`rowIndex` 0). Отдельно запушена `windows-python-host` (от `89bba82`): задача `Host` на Windows вызывает `python`; PR не открыт.
+- **Ветка:** `tune-wizard-landing-top` (от `origin/main` = `aaa329e`) — строка «Мастер настройки» первой на главной WebTools; браузерный тест проверяет, что строка первая в таблице (`rowIndex` 0). Отдельно `windows-python-host` (от `89bba82`): задача `Host` на Windows вызывает `python`, итог ветки — 3 строки в `.vscode/tasks.json`.
 - **Аудит закрыт.** Исправления пяти областей делались пятью исполнителями в отдельных рабочих копиях (git worktree) от `d7e7001` и слиты в ветку по одному коммиту на область:
 
 | Область | Что закрыто | Коммит слияния |
@@ -204,6 +204,8 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 - **PR этапа 6:** [PR #6](https://github.com/deathnemo/WebTools/pull/6) слит пользователем 28.10.2026 04:55 UTC (коммит слияния `95d177c`).
 - **PR аудита:** [PR #7](https://github.com/deathnemo/WebTools/pull/7) слит пользователем 29.10.2026 18:23 UTC (коммит слияния `89bba82`); локальный `main` обновлён, создана ветка `tune-wizard-next2`.
 - **PR запуска из VS Code:** [PR #8](https://github.com/deathnemo/WebTools/pull/8) (`tune-wizard-next2`) слит пользователем 30.10.2026 05:18 UTC (коммит слияния `aaa329e`).
+- **PR главной и `CLAUDE.md`:** [PR #9](https://github.com/deathnemo/WebTools/pull/9) (`tune-wizard-landing-top` → `main` в форке) открыт 30.10.2026, сливает пользователь кнопкой на GitHub.
+- **PR задачи `Host` на Windows:** [PR #10](https://github.com/deathnemo/WebTools/pull/10) (`windows-python-host` → `main` в форке) открыт 30.10.2026, сливает пользователь; с PR #9 пересечений по файлам нет, порядок слияния любой. После слияния обоих — `git checkout main`, `git pull origin main`.
 - **Дальше:** мастер закончен; дальше — долги из списка выше по мере надобности (прежде всего тестовый полёт «Rate Loop Only» и пара логов одного аппарата для проверки памяти).
 
 ---
@@ -291,9 +293,9 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 ### 30.10.2026 — запуск из VS Code, мастер первым на главной
 
 - **Запуск из VS Code** (PR #8): конфигурация «Мастер настройки (python + Chrome)» первой в `.vscode/launch.json` — сервер задачей `Host` и Chrome сразу на `http://127.0.0.1:8000/TuneWizard/`.
-- **`python3` на Windows:** на втором компьютере (Python 3.12, Node 24.20, тестовых логов нет) `python3` — заглушка Microsoft Store, задача `Host` падала с «Python was not found»; настоящий Python 3.12 — `python` и `py`. Правка задачи (`"windows": { "command": "python …" }`) и примечание в корневом `Readme.md` — в ветке `windows-python-host`.
+- **`python3` на Windows:** на втором компьютере (Python 3.12, Node 24.20, тестовых логов нет) `python3` — заглушка Microsoft Store, задача `Host` падала с «Python was not found»; настоящий Python 3.12 — `python` и `py`. Правка задачи (`"windows": { "command": "python …" }`) — ветка `windows-python-host`, PR #10; английское примечание в корневом `Readme.md` из первого коммита ветки убрано вторым (`5707ef2`).
 - **Главная:** строка «Мастер настройки» перенесена первой, над Log Finder (решение пользователя, раздел 3); браузерный тест проверяет `rowIndex` 0 вместо соседства с PID Review; `TuneWizard/Readme.md` и `tests/README.md` поправлены.
-- **Правила на другом компьютере:** на втором компьютере первые правки сделаны до чтения журнала — английская строка в корневом `Readme.md` ArduPilot (ветка `windows-python-host`) и ссылка `pull/new/...`, которая для форка может открыть PR в ArduPilot. По просьбе пользователя добавлен `CLAUDE.md`: перед правками — журнал целиком и общие правила.
+- **Правила на другом компьютере:** на втором компьютере первые правки сделаны до чтения журнала — английская строка в корневом `Readme.md` ArduPilot (ветка `windows-python-host`, потом убрана) и ссылка `pull/new/...`, которая для форка может открыть PR в ArduPilot. По просьбе пользователя добавлен `CLAUDE.md`: перед правками — журнал целиком и общие правила. На втором компьютере поставлен `gh` (2.103.3, вход `deathnemo`); PR #9 и #10 открыты через `gh pr create --repo deathnemo/WebTools --base main`.
 
 ---
 
@@ -315,7 +317,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
   - `tunewizard-compare.cjs` — сравнение с FilterReview; `tunewizard-pid-compare.cjs` — сравнение отклика с PIDReview;
   - `tunewizard-icon.cjs` — пересоздаёт иконку `images/TuneWizard_Icon.png` (`npm run tunewizard:icon`, вручную; в обычные проверки не входит).
 - `eslint.config.mjs` — глобалы страницы ESLint берёт из тегов `<script>` в `index.html`: каждый новый скрипт мастера надо подключить там.
-- Изменённые файлы ArduPilot: корневой `index.html` (главная WebTools) — строка «Мастер настройки» первой в таблице инструментов; `.vscode/launch.json` — конфигурация мастера первой в списке. Если ArduPilot поправит эти места, при подтягивании upstream будет небольшой конфликт — оставить обе правки.
+- Изменённые файлы ArduPilot: корневой `index.html` (главная WebTools) — строка «Мастер настройки» первой в таблице инструментов; `.vscode/launch.json` — конфигурация мастера первой в списке; после слияния PR #10 — ещё `.vscode/tasks.json` (команда задачи `Host` для Windows). Если ArduPilot поправит эти места, при подтягивании upstream будет небольшой конфликт — оставить обе правки.
 
 ---
 
