@@ -5,8 +5,8 @@
 //
 // Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
 // (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()) и имён, от которых
-// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short) и поиск записи в метаданных
-// параметров (step_find_metadata).
+// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short), пункты подготовки к полёту
+// (prep0_items) и поиск записи в метаданных параметров (step_find_metadata).
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, escmsk_present, mask_unsigned, mask_signed;
 // ему — Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
@@ -246,8 +246,10 @@ function summary_lower_first(text) {
 }
 
 // «Что перелететь»: пункты [{ source, text }] по порядку, каждый текст — фраза с точкой (summary_period)
-// [решение пользователя 25.10.2026]. ctx = { checks, rows, reboot_names, unreliable_axes, test_flight }:
+// [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight }:
 // - checks — проверки шага 0 (state.checks: { status, title, fix }; null — проверок нет);
+// - prep — пункты подготовки к следующему полёту (prep_check, страница берёт prep0_items(): { status, title, fix };
+//   null или [] — пунктов нет: нет источника параметров, не Copter, блок подготовки не загрузился);
 // - rows — строки итога, summary_rows(…).rows;
 // - reboot_names — имена, которым нужна перезагрузка (summary_reboot_names): [] — метаданные есть, перезагрузка не
 //   нужна; null — метаданные не загрузились;
@@ -258,23 +260,31 @@ function summary_lower_first(text) {
 // Пункты:
 // 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия), fix — продолжение
 //    фразы: первая буква обычного слова строчная (summary_lower_first);
-// 2. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
+// 2. "prep" — пункты подготовки warn или fail с непустым fix, по их порядку, текст — как у "check". Пункты без fix
+//    (fstrate — оговорка к прогнозу; «параметра X нет» — prep_missing_text) не попадают: перед полётом по ним делать
+//    нечего [дизайн этапа 7, раздел 6];
+// 3. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
 //    summary_notch_enable_hint;
-// 3. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
+// 4. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
 //    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
-// 4. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
+// 5. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
 //    в порядке pidtune_axes, первая с заглавной;
-// 5. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
+// 6. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
 //    изменений проверять нечего, и список может быть пустым [наше]
 function summary_refly(ctx) {
     const items = []
     const add = (source, text) => items.push({ source: source, text: summary_period(text) })
-
-    for (const check of ctx.checks ?? []) {
-        if (((check.status === "warn") || (check.status === "fail")) && ((check.fix ?? "") !== "")) {
-            add("check", check.title + " — " + summary_lower_first(check.fix))
+    // Проверки шага 0 и пункты подготовки: warn и fail с непустым fix — «title — fix»
+    const add_fixes = (source, list) => {
+        for (const item of list ?? []) {
+            if (((item.status === "warn") || (item.status === "fail")) && ((item.fix ?? "") !== "")) {
+                add(source, item.title + " — " + summary_lower_first(item.fix))
+            }
         }
     }
+
+    add_fixes("check", ctx.checks)
+    add_fixes("prep", ctx.prep)
 
     const changed = ctx.rows.filter((row) => row.changed)
     const enables = notch_param_names().map((notch) => notch.enable)

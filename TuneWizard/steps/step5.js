@@ -429,6 +429,8 @@ function step5_render_changes(rows, conflicts) {
 function step5_render_refly(rows, unreliable) {
     const items = summary_refly({
         checks: state.checks,
+        // Блок подготовки шага 0 (steps/prep.js); его нет — пунктов подготовки нет
+        prep: (typeof prep0_items === "function") ? prep0_items() : null,
         rows: rows,
         reboot_names: step5_reboot_names(rows),
         unreliable_axes: unreliable,

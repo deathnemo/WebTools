@@ -58,12 +58,19 @@ function run_checks(info, params, vibe) {
         add("pid_log", "fail", "Сообщения PID", "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
     }
 
-    // Данные гироскопа
+    // Данные гироскопа. Совет raw — INS_RAW_LOG_OPT = 9: бит 0 сам включает raw-запись основного гироскопа, бит 3 — до
+    // и после фильтров; бит IMU_RAW в LOG_BITMASK не нужен — он пишет raw всех гироскопов и акселерометров
+    // [код] AP_InertialSensor/AP_InertialSensor_Backend.cpp:480–487, 489–492, 750–751. Нет INS_RAW_LOG_OPT (старая прошивка) —
+    // raw включается только битом IMU_RAW [код] AP_InertialSensor_Backend.cpp:485–487; так же советует подготовка
+    // (core/prep.js, gyro_data)
     if (m.gyro_raw || m.gyro_batch) {
         add("gyro_log", "ok", "Данные гироскопа", "Есть " + (m.gyro_raw ? "raw (GYR)" : "batch (ISBH/ISBD)") + ": шаги 1–3 доступны")
     } else {
+        const raw_fix = (params.get("INS_RAW_LOG_OPT") != null)
+            ? "INS_RAW_LOG_OPT = 9 (основной гироскоп до и после фильтров; бит IMU_RAW не нужен)"
+            : "бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK (INS_RAW_LOG_OPT в этой прошивке нет)"
         add("gyro_log", "fail", "Данные гироскопа", "Нет ни raw (GYR), ни batch (ISBH/ISBD): шаги 1–3 недоступны",
-            "Batch: INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4. Raw (нужна быстрая плата, обычно H7): бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK, INS_RAW_LOG_OPT = 8")
+            "Batch: INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4. Raw (нужна быстрая плата, обычно H7): " + raw_fix)
     }
 
     // До/после фильтров
@@ -78,12 +85,23 @@ function run_checks(info, params, vibe) {
             add("pre_post", "ok", "До/после фильтров", "Raw-лог только до фильтров: оценка «станет» строится расчётом, реальных данных после фильтров нет")
         }
     } else if (m.gyro_batch) {
+        // INS_LOG_BAT_OPT: бит 1 — после фильтров, бит 2 — до и после [код] AP_InertialSensor/BatchSampler.cpp:28. Оба
+        // бита вместе — обе половины пишутся после фильтров: флаг «после фильтров» включён (BatchSampler.cpp:97–102), и
+        // без Sensor-Rate doing_post_filter_logging() всегда true [код] AP_InertialSensor.h:351–353,
+        // AP_InertialSensor_Backend.cpp:507 — «до фильтров» на шаге 1 на самом деле после. Флаги batch при смене
+        // параметра только выставляются, не сбрасываются (BatchSampler.cpp:97–102): снятый бит 1 действует после
+        // перезагрузки [наше, по коду]. То же правило — gyro_prepost в core/prep.js
         const opt = params.get("INS_LOG_BAT_OPT") ?? 0
-        if (opt & (1 << 2)) {
+        if ((opt & (1 << 2)) && (opt & (1 << 1))) {
+            add("pre_post", "warn", "До/после фильтров", "Batch-лог с битами 1 (после фильтров) и 2 (до и после) INS_LOG_BAT_OPT вместе — обе половины пишутся " +
+                "после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров",
+                "Снимите бит 1 (−2) в INS_LOG_BAT_OPT, бит 2 оставьте, и перезагрузите полётный контроллер: флаг «после фильтров» сбрасывается только перезагрузкой")
+        } else if (opt & (1 << 2)) {
             add("pre_post", "ok", "До/после фильтров", "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными")
         } else if (opt & (1 << 1)) {
             add("pre_post", "warn", "До/после фильтров", "Batch-лог только после фильтров: спектра до фильтров и оценки «станет» не будет",
-                "Добавьте бит 2 (+4) к INS_LOG_BAT_OPT и снимите бит 1 (−2): логирование до и после фильтров")
+                "Добавьте бит 2 (+4) к INS_LOG_BAT_OPT, снимите бит 1 (−2) и перезагрузите полётный контроллер: логирование до и после фильтров; " +
+                "без перезагрузки флаг «после фильтров» остаётся, и обе половины пойдут после фильтров")
         } else {
             add("pre_post", "ok", "До/после фильтров", "Batch-лог только до фильтров: оценка «станет» строится расчётом, реальных данных после фильтров нет")
         }
