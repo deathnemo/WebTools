@@ -2,11 +2,16 @@
 # в браузере. Мастеру нужен адрес http://: со страницы file:// Chrome не загружает ES-модуль парсера логов
 # (modules/JsDataflashParser/parser.js) и описания параметров (fetch FilterReview/params.json).
 # Сервер — System.Net.Sockets.TcpListener на петлевом адресе 127.0.0.1: без прав администратора (HttpListener нужен
-# netsh http add urlacl) и без окна брандмауэра. Отдаются только файлы внутри корня, методы GET и HEAD; запросы — по
-# одному, но соединения ждут запроса без блокировки (Socket.Select): пустое соединение (Chrome открывает их заранее)
-# или зависший клиент не задерживают остальные и закрываются через 15 с.
-# Порт занят мастером (этим же сервером или python -m http.server из VS Code) — открыть вкладку и выйти с кодом 0;
-# чужой программой — сообщение и код 1: другой порт не берётся, память прохода привязана к адресу страницы.
+# netsh http add urlacl) и без окна брандмауэра. Отдаются только файлы внутри корня, методы GET и HEAD, только по
+# адресу 127.0.0.1 или localhost (заголовок Host — защита от DNS rebinding: в корне репозитория лежат логи пилота и
+# .git). Запросы — по одному, но соединения ждут запроса без блокировки (Socket.Select): пустое соединение (Chrome
+# открывает их заранее) или недописанный запрос не задерживают остальные и закрываются через 15 с. Медленный читатель
+# ответа задерживает остальных до SendTimeout (15 с) — браузер на петлевом адресе читает сразу.
+# Порт занят мастером из этой же папки (или python -m http.server из VS Code — без заголовка X-TuneWizard-Root) —
+# открыть вкладку и выйти с кодом 0; мастером из другой папки или чужой программой — сообщение и код 2: другой порт не
+# берётся, память прохода привязана к адресу страницы. Коды выхода: 0 — мастер работает или вкладка открыта; 2 — отказ
+# с сообщением (в интерактивной консоли сервер уже дождался клавиши, «Мастер настройки.cmd» второй раз не ждёт); прочие
+# (1 — сбой PowerShell, например параметр или политика) — .cmd оставляет окно открытым.
 # Файл — UTF-8 с BOM: без BOM PowerShell 5.1 читает русский текст как ANSI.
 # Параметры: -Root — корень (по умолчанию два уровня выше скрипта: репозиторий или переносная папка), -Port (8000),
 # -NoBrowser — не открывать браузер (тест tests/tunewizard-serve.cjs).
@@ -33,15 +38,19 @@ $types = @{
 }
 $reasons = @{ 200 = 'OK'; 301 = 'Moved Permanently'; 400 = 'Bad Request'; 403 = 'Forbidden'; 404 = 'Not Found'; 405 = 'Method Not Allowed'
               431 = 'Request Header Fields Too Large'; 500 = 'Internal Server Error' }
-$error_texts = @{ 400 = 'Неверный запрос.'; 403 = 'Доступ запрещён: отдаются только файлы папки мастера.'; 404 = 'Файл не найден.'
+$error_texts = @{ 400 = 'Неверный запрос.'; 403 = 'Доступ запрещён: отдаются только файлы папки мастера по адресу 127.0.0.1 или localhost.'; 404 = 'Файл не найден.'
                   405 = 'Метод не поддерживается: только GET и HEAD.'; 431 = 'Слишком длинный запрос.'; 500 = 'Ошибка сервера — подробности в окне консоли.' }
 # Знаки, недопустимые в имени файла Windows (двоеточие абсолютного пути «C:», NUL, «*», «<» …); косые черты — разделители
 [char[]]$bad_name_chars = [IO.Path]::GetInvalidFileNameChars() | Where-Object { ($_ -ne [char]'/') -and ($_ -ne [char]'\') }
 # Заголовок запроса ищется в байтах как в тексте Latin-1 (байт — знак), строка запроса читается как UTF-8
 $latin1 = [Text.Encoding]::GetEncoding(28591)
-# Пустое соединение или незаконченный заголовок дольше этого — закрыть; заголовок длиннее — 431
+# Имена устройств Windows (NUL, CON, COM1 …, в том числе с расширением): файлом не открываются — 403
+$device_name = '^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$'
+# Пустое соединение или незаконченный заголовок дольше этого — закрыть; заголовок запроса длиннее head_limit — 431
 $idle_seconds = 15
 $head_limit = 65536
+# Код выхода при отказе с сообщением (порт занят, нет страницы мастера) — «Мастер настройки.cmd» второй раз не ждёт
+$refused_code = 2
 # Начат ли ответ на текущий запрос: после заголовков ответа 500 уже не отправить
 $script:response_started = $false
 $script:stdout = $null
@@ -75,11 +84,11 @@ function Wait-Key {
     }
 }
 
-# Сообщение об отказе запуска, ожидание клавиши и выход с кодом 1
+# Сообщение об отказе запуска, ожидание клавиши и выход с кодом отказа (refused_code)
 function Exit-Refused([string]$Text) {
     Write-Line $Text 'Yellow'
     Wait-Key
-    exit 1
+    exit $refused_code
 }
 
 # Открыть адрес в браузере по умолчанию (не при -NoBrowser); не вышло — адрес для ручного ввода
@@ -94,9 +103,30 @@ function Open-Wizard([string]$Url) {
     }
 }
 
-# Отвечает ли по адресу Url страница мастера (<title>Мастер настройки): ответ читается как UTF-8 — python http.server
-# не пишет charset, а Invoke-WebRequest тогда читал бы русский текст как Latin-1; без прокси — адрес петлевой
-function Test-Wizard([string]$Url) {
+# Слушает ли кто-то 127.0.0.1:Port — пробное подключение не дольше 0.5 с. Нужно до Start(): программа, которая
+# слушает все адреса (0.0.0.0, ::, python -m http.server без --bind), не мешает занять 127.0.0.1, и второй сервер
+# перехватил бы адрес
+function Test-PortBusy([int]$Port) {
+    $client = New-Object Net.Sockets.TcpClient
+    try {
+        $connect = $client.BeginConnect([Net.IPAddress]::Loopback, $Port, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne(500)) {
+            return $false
+        }
+        $client.EndConnect($connect)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+# Мастер ли отвечает по адресу Url (<title>Мастер настройки) и из какой папки: @{ Wizard = $true/$false; Root = полный
+# путь корня из заголовка X-TuneWizard-Root или $null — заголовка нет (python http.server). Ответ читается как UTF-8 —
+# python не пишет charset, а Invoke-WebRequest тогда читал бы русский текст как Latin-1; без прокси — адрес петлевой
+function Get-WizardOnPort([string]$Url) {
+    $none = @{ Wizard = $false; Root = $null }
     try {
         $request = [Net.HttpWebRequest]::Create($Url)
         $request.Proxy = $null
@@ -106,12 +136,16 @@ function Test-Wizard([string]$Url) {
         $response = $request.GetResponse()
         try {
             $reader = New-Object IO.StreamReader($response.GetResponseStream(), [Text.Encoding]::UTF8)
-            return $reader.ReadToEnd().Contains('<title>Мастер настройки')
+            if (-not $reader.ReadToEnd().Contains('<title>Мастер настройки')) {
+                return $none
+            }
+            $root_header = $response.Headers['X-TuneWizard-Root']
+            return @{ Wizard = $true; Root = $(if ($root_header) { [Uri]::UnescapeDataString($root_header) } else { $null }) }
         } finally {
             $response.Close()
         }
     } catch {
-        return $false
+        return $none
     }
 }
 
@@ -130,17 +164,22 @@ function Get-SocketException($ErrorRecord) {
 # Путь запроса → файл внутри корня. RawPath — путь из строки запроса без query и фрагмента, как прислал клиент
 # (%-кодирование не снято), Query — «?…» или пусто (для адреса 301). Выход — @{ Status = 200; File = полный путь },
 # @{ Status = 301; Location = … }, 403 или 404. 403: сегмент из одних точек («..», в том числе %2e%2e), недопустимый
-# в имени файла знак (двоеточие абсолютного пути, NUL) или путь после нормализации вне корня; обратная косая черта —
-# разделитель, как прямая. Папка — её index.html, без косой черты в конце — 301 на адрес с ней (иначе относительные
-# ссылки страницы сломаются)
+# в имени файла знак (двоеточие абсолютного пути и «::$DATA», NUL), имя устройства (NUL, CON …) или путь после
+# нормализации вне корня; обратная косая черта — разделитель, как прямая, пустые сегменты и «.» отбрасываются.
+# Папка — её index.html, без косой черты в конце — 301 на адрес с ней (иначе относительные ссылки страницы сломаются);
+# адрес 301 собирается из нормализованных сегментов (не из сырого пути: «//TuneWizard» дал бы «//TuneWizard/» — адрес
+# другого сайта). Корень без index.html (переносная папка) — 301 на /TuneWizard/
 function Resolve-RequestFile([string]$RawPath, [string]$Query) {
     $decoded = [Uri]::UnescapeDataString($RawPath).Replace('\', '/')
-    $segments = @($decoded.Split('/') | Where-Object { $_ -ne '' })
+    $segments = @($decoded.Split('/') | Where-Object { ($_ -ne '') -and ($_ -ne '.') })
     foreach ($segment in $segments) {
         $dots_only = (($segment -replace '[. ]', '') -eq '') -and (($segment -replace '[^.]', '').Length -ge 2)
-        if ($dots_only -or ($segment.IndexOfAny($bad_name_chars) -ge 0)) {
+        if ($dots_only -or ($segment.IndexOfAny($bad_name_chars) -ge 0) -or ($segment.TrimEnd('. ') -match $device_name)) {
             return @{ Status = 403 }
         }
+    }
+    if (($segments.Count -eq 0) -and (-not [IO.File]::Exists($root_prefix + 'index.html'))) {
+        return @{ Status = 301; Location = '/TuneWizard/' }
     }
     try {
         $full = [IO.Path]::GetFullPath($root_full + '\' + ($segments -join '\'))
@@ -152,7 +191,10 @@ function Resolve-RequestFile([string]$RawPath, [string]$Query) {
     }
     if ([IO.Directory]::Exists($full)) {
         if (-not $RawPath.EndsWith('/')) {
-            return @{ Status = 301; Location = $RawPath + '/' + $Query }
+            # Корень («/%2e») — «/», а не «//»
+            $joined = ($segments | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+            $location = $(if ($joined) { '/' + $joined + '/' } else { '/' }) + $Query
+            return @{ Status = 301; Location = $location }
         }
         $full = [IO.Path]::Combine($full, 'index.html')
     }
@@ -163,8 +205,9 @@ function Resolve-RequestFile([string]$RawPath, [string]$Query) {
 }
 
 # Ответ: строка состояния и заголовки (Content-Length; Cache-Control: no-cache — правки файлов видны без очистки кэша;
-# Connection: close — одно соединение на запрос; Extra — строки дополнительных заголовков), затем тело — байты Body или
-# файл File (открывается до заголовков: не открылся — ещё можно ответить 500); при HeadOnly тело не отправляется
+# Connection: close — одно соединение на запрос; X-TuneWizard-Root — корень в %-кодировании, по нему второй запуск
+# отличает мастер из другой папки; Extra — строки дополнительных заголовков), затем тело — байты Body или файл File
+# (открывается до заголовков: не открылся — ещё можно ответить 500); при HeadOnly тело не отправляется
 function Send-Response($Socket, [int]$Status, [string]$Type, [byte[]]$Body = $null, [string]$File = '', [string[]]$Extra = @(), [bool]$HeadOnly = $false) {
     $file_stream = $null
     $stream = New-Object Net.Sockets.NetworkStream($Socket, $false)
@@ -177,7 +220,7 @@ function Send-Response($Socket, [int]$Status, [string]$Type, [byte[]]$Body = $nu
         }
         # Запятая в PowerShell связывает сильнее «+» — каждая строка в скобках
         $lines = @(('HTTP/1.1 ' + $Status + ' ' + $reasons[$Status]), ('Content-Type: ' + $Type), ('Content-Length: ' + $length), 'Cache-Control: no-cache',
-                   'Connection: close') + $Extra
+                   'Connection: close', ('X-TuneWizard-Root: ' + $root_header)) + $Extra
         $head = [Text.Encoding]::UTF8.GetBytes(($lines -join "`r`n") + "`r`n`r`n")
         $script:response_started = $true
         $stream.Write($head, 0, $head.Length)
@@ -197,19 +240,43 @@ function Send-Response($Socket, [int]$Status, [string]$Type, [byte[]]$Body = $nu
     }
 }
 
-# Ответ-ошибка: короткая страница с причиной по-русски и ссылкой на мастер
-function Send-Error($Socket, [int]$Status, [bool]$HeadOnly = $false, [string[]]$Extra = @()) {
-    $html = '<!doctype html><meta charset="utf-8"><title>' + $Status + '</title><p>' + $Status + ' — ' + $error_texts[$Status] +
+# Ответ-ошибка: короткая страница с причиной по-русски (Text, по умолчанию — по коду) и ссылкой на мастер
+function Send-Error($Socket, [int]$Status, [bool]$HeadOnly = $false, [string[]]$Extra = @(), [string]$Text = '') {
+    if (-not $Text) {
+        $Text = $error_texts[$Status]
+    }
+    $html = '<!doctype html><meta charset="utf-8"><title>' + $Status + '</title><p>' + $Status + ' — ' + $Text +
             '</p><p><a href="/TuneWizard/">Мастер настройки</a></p>'
     Send-Response -Socket $Socket -Status $Status -Type 'text/html; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($html)) -Extra $Extra -HeadOnly $HeadOnly
 }
 
-# Один запрос по заголовку Head (текст до пустой строки): строка запроса — метод, путь, версия; остальные заголовки не
-# нужны. Путь — без query и фрагмента; путь не от корня (адрес прокси «http://…», «*») или с управляющими знаками — 400
+# Подходит ли заголовок Host: нет его или пусто (HTTP/1.0), 127.0.0.1:порт или localhost:порт без учёта регистра.
+# Другое имя — страница чужого сайта, имя которого указали на 127.0.0.1 (DNS rebinding), — отказ
+function Test-HostHeader([string[]]$Lines) {
+    foreach ($line in $Lines) {
+        $colon = $line.IndexOf(':')
+        if (($colon -gt 0) -and ($line.Substring(0, $colon).Trim() -eq 'Host')) {
+            $value = $line.Substring($colon + 1).Trim()
+            if (($value -ne '') -and ($value -ne ('127.0.0.1:' + $Port)) -and ($value -ne ('localhost:' + $Port))) {
+                return $false
+            }
+        }
+    }
+    return $true
+}
+
+# Один запрос по заголовку Head (текст до пустой строки): строка запроса — метод, путь, версия; из остальных заголовков
+# нужен только Host. Путь — без query и фрагмента; путь не от корня (адрес прокси «http://…», «*») или с управляющими
+# знаками — 400; Host не 127.0.0.1 и не localhost — 403
 function Invoke-Request($Socket, [string]$Head) {
-    $parts = $Head.Split("`n")[0].TrimEnd("`r").Split(' ')
+    $head_lines = @($Head.Split("`n") | ForEach-Object { $_.TrimEnd("`r") })
+    $parts = $head_lines[0].Split(' ')
     if (($parts.Count -ne 3) -or (-not $parts[1].StartsWith('/')) -or ($parts[1] -match '[\x00-\x1f\x7f]') -or (-not $parts[2].StartsWith('HTTP/'))) {
         Send-Error $Socket 400
+        return
+    }
+    if (-not (Test-HostHeader ($head_lines | Select-Object -Skip 1))) {
+        Send-Error $Socket 403 -Text 'Доступ запрещён: мастер открывается только по адресу 127.0.0.1 или localhost.'
         return
     }
     $head_only = $parts[0] -ceq 'HEAD'
@@ -299,7 +366,8 @@ function Receive-Head($Connection) {
             if ($end -lt 0) {
                 $end = $text.IndexOf("`n`n")
             }
-            if (($end -lt 0) -and ($Connection.Data.Length -gt $head_limit)) {
+            # Длина заголовка — и когда конец уже пришёл (заголовок мог прийти за несколько чтений), и пока его нет
+            if ((($end -lt 0) -and ($Connection.Data.Length -gt $head_limit)) -or ($end -gt $head_limit)) {
                 $Connection.Done = $true
                 Send-Error $socket 431
             }
@@ -320,6 +388,8 @@ function Receive-Head($Connection) {
 
 $root_full = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
 $root_prefix = $root_full + '\'
+# Корень в заголовке ответа — в %-кодировании: заголовок HTTP только латиница, а путь бывает с кириллицей
+$root_header = [Uri]::EscapeDataString($root_full)
 $url = 'http://127.0.0.1:' + $Port + '/TuneWizard/'
 if (-not [Console]::IsOutputRedirected) {
     try {
@@ -332,18 +402,29 @@ if (-not [IO.File]::Exists($root_prefix + 'TuneWizard\index.html')) {
 }
 
 $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
-try {
-    $listener.Start()
-} catch {
-    # Порт занят: мастером — открыть вкладку, второй сервер не нужен; чужой программой — отказ
-    $start_error = $_
-    if (Test-Wizard $url) {
-        Write-Line ('Мастер настройки уже запущен: ' + $url)
-        Open-Wizard $url
-        exit 0
+$busy = Test-PortBusy $Port
+$start_error = $null
+if (-not $busy) {
+    try {
+        $listener.Start()
+    } catch {
+        $start_error = $_
     }
-    $socket_error = Get-SocketException $start_error
-    if (($null -ne $socket_error) -and ($socket_error.SocketErrorCode -eq [Net.Sockets.SocketError]::AddressAlreadyInUse)) {
+}
+if ($busy -or ($null -ne $start_error)) {
+    # Порт занят: мастером из этой папки (или без заголовка корня — python http.server) — открыть вкладку, второй
+    # сервер не нужен; мастером из другой папки или чужой программой — отказ
+    $wizard = Get-WizardOnPort $url
+    if ($wizard.Wizard) {
+        if (($null -eq $wizard.Root) -or ($wizard.Root -eq $root_full)) {
+            Write-Line ('Мастер настройки уже запущен: ' + $url)
+            Open-Wizard $url
+            exit 0
+        }
+        Exit-Refused ('На порту ' + $Port + ' уже работает мастер из другой папки: ' + $wizard.Root + '. Закройте его окно и запустите снова.')
+    }
+    $socket_error = $(if ($null -ne $start_error) { Get-SocketException $start_error } else { $null })
+    if ($busy -or (($null -ne $socket_error) -and ($socket_error.SocketErrorCode -eq [Net.Sockets.SocketError]::AddressAlreadyInUse))) {
         Exit-Refused ('Порт ' + $Port + ' занят другой программой — закройте её и запустите мастер снова.')
     }
     Exit-Refused ('Порт ' + $Port + ' недоступен: ' + $start_error.Exception.Message)
