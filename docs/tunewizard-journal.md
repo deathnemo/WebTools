@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 30.10.2026 — в `main` слиты строка «Мастер настройки» первой на главной WebTools с `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9), `2d6a02b`) и задача `Host` на Windows через `python` ([PR #10](https://github.com/deathnemo/WebTools/pull/10), `4701235`). До этого — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`) и запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`). Мастер готов к тестированию на реальных логах. Этап 7 «Подготовка к полёту» сделан в ветке `tune-wizard-next3`, открыт [PR #11](https://github.com/deathnemo/WebTools/pull/11) внутри форка (сливает пользователь); до слияния — прогнать `npm run test:tunewizard` с тестовым логом.
+**Обновлено:** 30.10.2026 — этап 7 «Подготовка к полёту» слит в `main` ([PR #11](https://github.com/deathnemo/WebTools/pull/11), `810a5ff`); после слияния на втором компьютере с перенесённым тестовым логом прошли `npm run test:tunewizard` (главная и шаги 0–5, 129 с) и оба теста сравнения (отклонение 0). До этого в тот же день — мастер первым на главной и `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9), `2d6a02b`), задача `Host` на Windows ([PR #10](https://github.com/deathnemo/WebTools/pull/10), `4701235`), запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`); 29.10 — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`). Мастер готов к тестированию на реальных логах; ветка `tune-wizard-next4` — для следующих доработок (пока в ней только эта запись).
 
 ---
 
@@ -25,7 +25,7 @@ npm ci
 
 **Перенести вручную** (в git их нет):
 
-- тестовый лог `TuneWizard/logs/2026-06-18 18-54-42_anon.bin` (95 МБ, чужой лог, анонимизирован). Без него браузерные тесты пропускаются; второй лог `TuneWizard/logs/1 01.01.1970 2-00-00.bin` (44 МБ, другой аппарат — раздел 8) нужен только `npm run test:tunewizard-log2`. Браузерные тесты предпочитают тестовый лог по имени (второй по алфавиту первый);
+- тестовый лог `TuneWizard/logs/2026-06-18 18-54-42_anon.bin` (95 МБ, чужой лог, анонимизирован; на втором компьютере есть с 30.10.2026). Без него браузерные тесты не показательны: без логов вовсе пропускаются, а при одном втором логе основной берёт его и падает на проверках тестового лога (`test:tunewizard-prep` логов не требует); второй лог `TuneWizard/logs/1 01.01.1970 2-00-00.bin` (44 МБ, другой аппарат — раздел 8) нужен только `npm run test:tunewizard-log2`. Браузерные тесты предпочитают тестовый лог по имени (второй по алфавиту первый);
 - локальные настройки VS Code `.vscode/settings.json` (папка `.vscode/*` в `.gitignore`, кроме файлов upstream):
 
 ```jsonc
@@ -124,7 +124,8 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-next3` (от `main` = `2d6a02b`) — этап 7 «Подготовка к полёту» сделан, [PR #11](https://github.com/deathnemo/WebTools/pull/11) открыт: дизайн `docs/plans/2026-10-30-tune-wizard-stage7-design.md`, план из пяти задач — `docs/plans/2026-10-30-tune-wizard-stage7.md`; реализация по задачам (исполнитель, ревью на соответствие плану и качества). До этапа в ветке — записи журнала: слияние PR #9 и #10, исследование шага 4 на полёте в STABILIZE, настройка второго аппарата.
+- **Ветка:** `tune-wizard-next4` (от `main` = `810a5ff`) — для следующих доработок; пока в ней только запись журнала о слиянии PR #11.
+- **Этап 7 слит** ([PR #11](https://github.com/deathnemo/WebTools/pull/11), ветка `tune-wizard-next3` от `2d6a02b`): дизайн `docs/plans/2026-10-30-tune-wizard-stage7-design.md`, план из пяти задач — `docs/plans/2026-10-30-tune-wizard-stage7.md`; реализация по задачам (исполнитель, ревью на соответствие плану и качества). До этапа в ветке — записи журнала: слияние PR #9 и #10, исследование шага 4 на полёте в STABILIZE, настройка второго аппарата.
 - **Этап 7:**
 
 | Задача | Коммиты |
@@ -135,7 +136,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 | 4. Браузерный тест без лога `tests/tunewizard-prep-browser.cjs` (`npm run test:tunewizard-prep`, порт 8796, ≈3 с) по синтетической `tests/fixtures/prep.param`: список и вердикт по целям, предложение положения 6, скачанный `_prep.param` построчно, план, другое положение, печать плана, запоминание цели, отказы (без `ATC_RAT_RLL_P`, двоичный файл); в основном `tunewizard-browser.cjs` — блок на шаге 0 и пункты подготовки на шаге 5 (наличие и порядок, без чисел); по ревью — отбор пунктов перезагрузки шагов не ловит общий пункт подготовки, понятная ошибка при занятом порте, `finally` | `54704a8`, `d366ff0` |
 | 5. Документы: `TuneWizard/Readme.md` — раздел «Как готовить следующий полёт» (порядок работы, источник, цель, 13 правил, положение ACRO, `_prep.param`, план, печать, только Copter, сводка шага 5), «Структура», «Проверки», «Готовность»; `tests/README.md` — тесты ядра и браузерный без лога, вставки основного теста; по ревью — порядок работы по шагам, формулы словами, точность источников и исключений «нет параметра», источник у `acro_trainer` в `core/prep.js` | `03febb8`, `b80c458` |
 
-- **Финальные проверки этапа 7** (30.10.2026, второй компьютер): lint чистый, `npm test` 564 из 564, `npm run test:tunewizard-prep` ≈3 с, `npm run test:tunewizard-log2` — шаги 0–5; ручной прогон в Chrome: второй лог — на шаге 0 СТОП `acro_slot` и ВНИМ `log_buffer`, файл `LOG_FILE_BUFSIZE = 64`, `FLTMODE6 = 1` с перезагрузкой; с `1.param` поверх — один `FLTMODE6 = 1`; шаг 5 без повторов, с общим пунктом про `_prep.param`; ошибок консоли нет. **Не прогнаны:** `npm run test:tunewizard` (нет тестового лога — на основном компьютере или после переноса лога), тесты сравнения.
+- **Финальные проверки этапа 7** (30.10.2026, второй компьютер): lint чистый, `npm test` 564 из 564, `npm run test:tunewizard-prep` ≈3 с, `npm run test:tunewizard-log2` — шаги 0–5; ручной прогон в Chrome: второй лог — на шаге 0 СТОП `acro_slot` и ВНИМ `log_buffer`, файл `LOG_FILE_BUFSIZE = 64`, `FLTMODE6 = 1` с перезагрузкой; с `1.param` поверх — один `FLTMODE6 = 1`; шаг 5 без повторов, с общим пунктом про `_prep.param`; ошибок консоли нет. **После слияния** (`810a5ff`, тестовый лог перенесён пользователем): `npm run test:tunewizard` — главная и шаги 0–5 пройдены, проверок шага 0 — 9 (7 ok, 2 warn), 129 с; `npm run test:tunewizard-compare` — отклонение 0 (55 с), `npm run test:tunewizard-pid-compare` — отклонение 0 (44 с).
 
 - **Проверки после задачи 2** (30.10.2026): lint чистый, `npm test` 558 из 558, `npm run test:tunewizard-log2` — шаги 0–5 пройдены; Chrome — `1.param` без лога, второй лог, лог + файл, печать плана (PDF A4, 2 страницы), XSS-имена в `.param` экранируются, узкое окно 360–390 px без прокрутки. `npm run test:tunewizard` здесь не показателен: без тестового лога берёт второй лог и падает на проверках тестового лога.
 - **Аудит закрыт.** Исправления пяти областей делались пятью исполнителями в отдельных рабочих копиях (git worktree) от `d7e7001` и слиты в ветку по одному коммиту на область:
@@ -176,7 +177,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 - **Финальные проверки этапа 5** (28.10.2026, код `7cff023`): lint чистый, `npm test` 468 из 468, `npm run test:tunewizard` (шаги 0–5), `npm run test:tunewizard-compare` и `npm run test:tunewizard-pid-compare` — отклонение 0. На тестовом логе в сводке после блока «Устаревание» браузерного теста — 13 изменённых параметров, 29 без изменений, 5 пунктов «что сделать перед следующим полётом».
 
-- **`main`** = `origin/main` = `2d6a02b`: этапы 1–6, исправления аудита, запуск из VS Code, мастер первым на главной, `CLAUDE.md`, задача `Host` на Windows. На втором компьютере локальный `main` отслеживает `origin/main` (remote `upstream` там не заведён).
+- **`main`** = `origin/main` = `810a5ff`: этапы 1–7, исправления аудита, запуск из VS Code, мастер первым на главной, `CLAUDE.md`, задача `Host` на Windows. На втором компьютере локальный `main` отслеживает `origin/main` (remote `upstream` там не заведён).
 - **Этап 4** (план `docs/plans/2026-10-25-tune-wizard-stage4.md`, дизайн `…-stage4-design.md`):
 
 | Задача | Коммиты |
@@ -221,7 +222,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 - **PR запуска из VS Code:** [PR #8](https://github.com/deathnemo/WebTools/pull/8) (`tune-wizard-next2`) слит пользователем 30.10.2026 05:18 UTC (коммит слияния `aaa329e`).
 - **PR задачи `Host` на Windows:** [PR #10](https://github.com/deathnemo/WebTools/pull/10) (`windows-python-host`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `4701235`).
 - **PR главной и `CLAUDE.md`:** [PR #9](https://github.com/deathnemo/WebTools/pull/9) (`tune-wizard-landing-top`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `2d6a02b`); локальный `main` обновлён, создана ветка `tune-wizard-next3`.
-- **PR этапа 7:** [PR #11](https://github.com/deathnemo/WebTools/pull/11) (`tune-wizard-next3` → `main` в форке) открыт 30.10.2026 через `gh pr create --repo deathnemo/WebTools`; сливает пользователь кнопкой на GitHub, затем `git checkout main`, `git pull origin main`. До слияния — `npm run test:tunewizard` с тестовым логом (на втором компьютере его нет).
+- **PR этапа 7:** [PR #11](https://github.com/deathnemo/WebTools/pull/11) (`tune-wizard-next3`) слит пользователем 30.10.2026 11:03 UTC (коммит слияния `810a5ff`); локальный `main` обновлён, создана ветка `tune-wizard-next4`.
 - **Дальше:** тестовый полёт второго аппарата по плану подготовки (ACRO в положение 6, `FLTMODE6 = 1`) — он даст первый лог «Rate Loop Only» для перекалибровки проверок шага 4; пара логов одного аппарата для проверки памяти; остальные долги из списка выше.
 
 ---
