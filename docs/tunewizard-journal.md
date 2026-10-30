@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 30.10.2026 — в `main` слиты строка «Мастер настройки» первой на главной WebTools с `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9), `2d6a02b`) и задача `Host` на Windows через `python` ([PR #10](https://github.com/deathnemo/WebTools/pull/10), `4701235`). До этого — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`) и запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`). Мастер готов к тестированию на реальных логах. Начат этап 7 «Подготовка к полёту» (ветка `tune-wizard-next3`): дизайн утверждён, `docs/plans/2026-10-30-tune-wizard-stage7-design.md`.
+**Обновлено:** 30.10.2026 — в `main` слиты строка «Мастер настройки» первой на главной WebTools с `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9), `2d6a02b`) и задача `Host` на Windows через `python` ([PR #10](https://github.com/deathnemo/WebTools/pull/10), `4701235`). До этого — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`) и запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`). Мастер готов к тестированию на реальных логах. Этап 7 «Подготовка к полёту» сделан в ветке `tune-wizard-next3`, открыт [PR #11](https://github.com/deathnemo/WebTools/pull/11) внутри форка (сливает пользователь); до слияния — прогнать `npm run test:tunewizard` с тестовым логом.
 
 ---
 
@@ -124,7 +124,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-next3` (от `main` = `2d6a02b`) — этап 7 «Подготовка к полёту»: дизайн утверждён (`docs/plans/2026-10-30-tune-wizard-stage7-design.md`), план из пяти задач — `docs/plans/2026-10-30-tune-wizard-stage7.md`; реализация по задачам (исполнитель, ревью на соответствие плану и качества). До этапа в ветке — записи журнала: слияние PR #9 и #10, исследование шага 4 на полёте в STABILIZE, настройка второго аппарата.
+- **Ветка:** `tune-wizard-next3` (от `main` = `2d6a02b`) — этап 7 «Подготовка к полёту» сделан, [PR #11](https://github.com/deathnemo/WebTools/pull/11) открыт: дизайн `docs/plans/2026-10-30-tune-wizard-stage7-design.md`, план из пяти задач — `docs/plans/2026-10-30-tune-wizard-stage7.md`; реализация по задачам (исполнитель, ревью на соответствие плану и качества). До этапа в ветке — записи журнала: слияние PR #9 и #10, исследование шага 4 на полёте в STABILIZE, настройка второго аппарата.
 - **Этап 7:**
 
 | Задача | Коммиты |
@@ -221,7 +221,8 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 - **PR запуска из VS Code:** [PR #8](https://github.com/deathnemo/WebTools/pull/8) (`tune-wizard-next2`) слит пользователем 30.10.2026 05:18 UTC (коммит слияния `aaa329e`).
 - **PR задачи `Host` на Windows:** [PR #10](https://github.com/deathnemo/WebTools/pull/10) (`windows-python-host`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `4701235`).
 - **PR главной и `CLAUDE.md`:** [PR #9](https://github.com/deathnemo/WebTools/pull/9) (`tune-wizard-landing-top`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `2d6a02b`); локальный `main` обновлён, создана ветка `tune-wizard-next3`.
-- **Дальше:** мастер закончен; дальше — долги из списка выше по мере надобности (прежде всего тестовый полёт «Rate Loop Only» и пара логов одного аппарата для проверки памяти).
+- **PR этапа 7:** [PR #11](https://github.com/deathnemo/WebTools/pull/11) (`tune-wizard-next3` → `main` в форке) открыт 30.10.2026 через `gh pr create --repo deathnemo/WebTools`; сливает пользователь кнопкой на GitHub, затем `git checkout main`, `git pull origin main`. До слияния — `npm run test:tunewizard` с тестовым логом (на втором компьютере его нет).
+- **Дальше:** тестовый полёт второго аппарата по плану подготовки (ACRO в положение 6, `FLTMODE6 = 1`) — он даст первый лог «Rate Loop Only» для перекалибровки проверок шага 4; пара логов одного аппарата для проверки памяти; остальные долги из списка выше.
 
 ---
 
