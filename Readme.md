@@ -20,6 +20,8 @@ Host locally using python by running the following command in the root of the re
 python3 -m http.server --bind 127.0.0.1
 ```
 
+On Windows use `python` instead of `python3`: there `python3` usually resolves to the Microsoft Store stub, which only prints "Python was not found".
+
 The landing page can then be found at `http://127.0.0.1:8000/`
 
 You need to keep your submodules updated.
