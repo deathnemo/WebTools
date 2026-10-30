@@ -1,7 +1,8 @@
 // Тесты подготовки к следующему полёту (TuneWizard/core/prep.js): константы против core/checks.js и core/pidtune.js,
 // цели, правила prep_check — ok / warn / fail на своей цели и отсутствие на чужой, нет параметра — warn, параметр NaN;
 // запись лога (File или Block); источник записи гироскопа после исправления (batch из файла, raw важнее batch, до и
-// после фильтров, биты 1 и 2 batch вместе, буфер, старая прошивка без INS_RAW_LOG_OPT), обороты для notch, положения
+// после фильтров, бит 2 batch вместе с битом 1 или 0, буфер, старая прошивка без INS_RAW_LOG_OPT — текст raw как у шага 0),
+// обороты для notch, положения
 // переключателя (предложение ACRO, выбор положения — prep_acro_applied, пересчёт выхода), обучение газа висения,
 // значения файла исправлений (сложение масок, равные текущему не пишутся, текст .param), перезагрузка, план полёта
 // (и без положения выхода), имя файла; параметры — и из parse_param_file (обёртка get), и из log_params (core/log.js).
@@ -110,6 +111,9 @@ test('константы: ACRO и Rate Loop Only — из pidtune_rules, реж�
     assert.equal(prep_rules.acro_target_dps, pidtune_rules.target_min_dps)
     // Порядок целей правил — порядок таблицы дизайна
     assert.deepEqual(Object.keys(prep_rules.check_goals), ALL_IDS)
+    // Значения совета записи гироскопа — те же, что у шага 0 (check_rules), не копия
+    assert.equal(prep_rules.batch_fix, check_rules.gyro_batch_fix)
+    assert.equal(prep_rules.raw_hint, check_rules.gyro_raw_hint)
 })
 
 test('prep_goals: подписи и части целей; неизвестная цель — ошибка', () => {
@@ -269,8 +273,8 @@ test('gyro_data: нет записи — fail и batch в файл; gyro_prepost
     assert.equal(data.status, 'fail')
     assert.deepEqual(data.changes, [{ name: 'INS_LOG_BAT_MASK', value: 1 }, { name: 'INS_LOG_BAT_OPT', value: 4 }])
     assert.match(data.fix, /INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4/)
-    assert.match(data.fix, /H7.*INS_RAW_LOG_OPT = 9/)
-    assert.doesNotMatch(data.fix, /IMU_RAW/)
+    assert.match(data.fix, /H7.*INS_RAW_LOG_OPT = 9 \(основной гироскоп до и после фильтров; бит IMU_RAW не нужен\)$/)
+    assert.doesNotMatch(data.fix, /бит IMU_RAW \(19\) в LOG_BITMASK/)
     const prepost = item_of(items, 'gyro_prepost')
     assert.equal(prepost.status, 'ok')
     assert.deepEqual(prepost.changes, [])
@@ -292,6 +296,17 @@ test('gyro_data: старая прошивка без INS_RAW_LOG_OPT — под
     assert.match(data.fix, /H7.*бит IMU_RAW \(19\) в LOG_BITMASK \(\+524288/)
     assert.doesNotMatch(data.fix, /INS_RAW_LOG_OPT = 9/)
     assert.doesNotMatch(data.text, /INS_RAW_LOG_OPT/)
+})
+
+test('gyro_data: подсказка raw — тот же текст, что в совете шага 0 (gyro_log, core/checks.js), с INS_RAW_LOG_OPT и без', () => {
+    const info = { vehicle: 'Copter', messages: { pid: true, gyro_raw: false, gyro_batch: false }, flight: null, throttle_source: null }
+    for (const changes of [{ INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 0 }, { INS_RAW_LOG_OPT: undefined, INS_LOG_BAT_MASK: 0 }]) {
+        const values = with_values(changes)
+        const prep_hint = item_of(check(values, 'filters'), 'gyro_data').fix.split('можно вместо него raw: ')[1]
+        const step0_hint = run_checks(info, fake_params(values), null).find((c) => c.id === 'gyro_log').fix.split('обычно H7): ')[1]
+        assert.ok(prep_hint != null && prep_hint !== '', JSON.stringify(changes))
+        assert.equal(prep_hint, step0_hint, JSON.stringify(changes))
+    }
 })
 
 test('gyro_data: raw — по битам 0 и 1 INS_RAW_LOG_OPT или биту IMU_RAW; raw и batch вместе — оценивается raw', () => {
@@ -319,14 +334,22 @@ test('gyro_prepost: raw и batch — только после или только
         { values: { INS_RAW_LOG_OPT: 1 }, name: 'INS_RAW_LOG_OPT', expect: 9, text: /только до фильтров/ },
         // raw всех гироскопов только после фильтров (биты 1 и 2)
         { values: { INS_RAW_LOG_OPT: 6 }, name: 'INS_RAW_LOG_OPT', expect: 10, text: /только после фильтров/ },
-        // batch только после фильтров (бит 1): (opt | 4) & ~2; бит 0 (Sensor-Rate) сохраняется
+        // batch — исправление всегда INS_LOG_BAT_OPT = 4 (только бит 2): бит 2 работает только без битов 0 и 1.
+        // Только после фильтров (бит 1, и с битом 0 — Sensor-Rate)
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 2 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /только после фильтров/ },
-        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 3 }, name: 'INS_LOG_BAT_OPT', expect: 5, text: /только после фильтров/ },
-        // batch только до фильтров
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 3 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /только после фильтров/ },
+        // batch только до фильтров (и с битом 0)
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 0 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /только до фильтров/ },
-        // batch с битами 1 и 2 вместе — обе половины после фильтров (doing_post_filter_logging): снять бит 1
-        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 6 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /обе половины batch пишутся после фильтров/ },
-        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 7 }, name: 'INS_LOG_BAT_OPT', expect: 5, text: /обе половины batch пишутся после фильтров/ },
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 1 }, name: 'INS_LOG_BAT_OPT', expect: 4, text: /только до фильтров/ },
+        // бит 2 с битом 1 (без бита 0) — обе половины после фильтров (doing_post_filter_logging)
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 6 }, name: 'INS_LOG_BAT_OPT', expect: 4,
+          text: /^INS_LOG_BAT_OPT = 6: бит 2 \(до и после\) вместе с битом 1 \(после фильтров\) — обе половины batch пишутся после фильтров/ },
+        // бит 2 с битом 0 — на датчиках с выборкой на частоте датчика обе половины сырые
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 5 }, name: 'INS_LOG_BAT_OPT', expect: 4,
+          text: /^INS_LOG_BAT_OPT = 5: бит 2 \(до и после\) вместе с битом 0 \(Sensor-Rate\) — на датчиках с выборкой на частоте датчика \(Invensense v1\/v2 по SPI\) обе половины batch — сырые, до фильтров: реального «после» на таких датчиках не будет$/ },
+        // биты 0 и 1 — на таких датчиках обе сырые, на остальных обе после фильтров
+        { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 7 }, name: 'INS_LOG_BAT_OPT', expect: 4,
+          text: /вместе с битом 0 \(Sensor-Rate\) и битом 1 \(после фильтров\) — .*обе половины batch — сырые, до фильтров, на остальных бит 1 даёт обе после фильтров/ },
     ]
     for (const c of cases) {
         const values = with_values(c.values)
@@ -335,6 +358,12 @@ test('gyro_prepost: raw и batch — только после или только
         assert.equal(item.status, 'warn', JSON.stringify(c.values))
         assert.match(item.text, c.text)
         assert.deepEqual(prep_changes(fake_params(values), [item]), { [c.name]: c.expect })
+        // fix — с глагола: в сводке шага 5 он продолжение фразы (summary_lower_first)
+        assert.match(item.fix, /^(Добавьте|Запишите) /, item.fix)
+        if (c.name === 'INS_LOG_BAT_OPT') {
+            assert.deepEqual(item.changes, [{ name: 'INS_LOG_BAT_OPT', value: 4 }])
+            assert.equal(item.fix, 'Запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров)')
+        }
     }
     // batch до и после — ok
     assert.equal(item_of(check(with_values({ INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 })), 'gyro_prepost').status, 'ok')
@@ -413,13 +442,14 @@ test('acro_slot и acro_exit: без выбора — fail без changes; вы�
     const none = prep_check(params, 'pid', { acro_slot: null })
     assert.equal(item_of(none, 'acro_slot').status, 'fail')
     assert.deepEqual(item_of(none, 'acro_slot').changes, [])
-    assert.match(item_of(none, 'acro_slot').fix, /^Выберите положение для ACRO в таблице положений/)
+    // Где выбрать и где файл — названо: пункт виден и в сводке шага 5
+    assert.equal(item_of(none, 'acro_slot').fix, 'Выберите положение для ACRO в таблице положений переключателя на шаге 0')
     assert.equal(item_of(none, 'acro_exit').status, 'ok')
 
     const six = prep_check(params, 'pid', { acro_slot: 6 })
     assert.equal(item_of(six, 'acro_slot').status, 'fail')
     assert.deepEqual(item_of(six, 'acro_slot').changes, [{ name: 'FLTMODE6', value: 1 }])
-    assert.match(item_of(six, 'acro_slot').fix, /FLTMODE6 = 1/)
+    assert.match(item_of(six, 'acro_slot').fix, /^Запишите FLTMODE6 = 1 \(есть в файле _prep\.param шага 0\): .*в таблице положений переключателя на шаге 0$/)
     const exit = item_of(six, 'acro_exit')
     assert.equal(exit.status, 'ok')
     assert.match(exit.text, /положения 1 \(STABILIZE, PWM до 1230\), 2 .*5 \(ALT_HOLD, PWM 1621–1749\)/)

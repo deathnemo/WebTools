@@ -36,18 +36,24 @@ const prep_rules = {
     raw_opt_all_bit: 1,
     raw_opt_post_bit: 2,
     raw_opt_prepost_bit: 3,
-    // INS_LOG_BAT_OPT: бит 1 — после фильтров, бит 2 — до и после [код] AP_InertialSensor/BatchSampler.cpp:28. Оба бита
-    // вместе — обе половины после фильтров: флаг «после фильтров» включён (BatchSampler.cpp:97–102), и без Sensor-Rate
-    // doing_post_filter_logging() всегда true [код] AP_InertialSensor.h:351–353, AP_InertialSensor_Backend.cpp:507
+    // INS_LOG_BAT_OPT: бит 0 — Sensor-Rate, бит 1 — после фильтров, бит 2 — до и после [код] AP_InertialSensor/
+    // BatchSampler.cpp:28, AP_InertialSensor.h:386–388. Бит 2 работает только без битов 0 и 1: с битом 1 (без бита 0) обе
+    // половины после фильтров — флаг «после фильтров» включён (BatchSampler.cpp:97–102), и без Sensor-Rate
+    // doing_post_filter_logging() всегда true [код] AP_InertialSensor.h:351–353, AP_InertialSensor_Backend.cpp:507; с битом 0
+    // на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI с быстрой выборкой [код]
+    // AP_InertialSensor_Invensense.cpp:889–922, AP_InertialSensor_Invensensev2.cpp:611–638) batch берёт только сырые
+    // отсчёты — обе половины до фильтров [код] BatchSampler.cpp:103–115, AP_InertialSensor_Backend.cpp:503–508, 727–738.
+    // Исправление batch — всегда INS_LOG_BAT_OPT = batch_fix.INS_LOG_BAT_OPT (только бит 2); то же правило — pre_post шага 0
+    bat_opt_sensor_rate_bit: 0,
     bat_opt_post_bit: 1,
     bat_opt_prepost_bit: 2,
     // Нет записи гироскопа — в файл batch: работает на любой плате [решение пользователя 30.10.2026, раздел 10, в]; тот же
-    // совет у шага 0 (core/checks.js, gyro_log)
-    batch_fix: { INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 },
+    // совет и те же значения у шага 0 — из check_rules (core/checks.js, gyro_log), не повторяются
+    batch_fix: check_rules.gyro_batch_fix,
     // Подсказка raw для плат H7 и быстрее (в файл не пишется): основной гироскоп (бит 0) до и после фильтров (бит 3)
-    // [код] AP_InertialSensor_Backend.cpp:480–492. Нет INS_RAW_LOG_OPT (старая прошивка) — подсказка — бит IMU_RAW в
-    // LOG_BITMASK: тогда raw включается только им [код] AP_InertialSensor_Backend.cpp:485–487
-    raw_hint: 9,
+    // [код] AP_InertialSensor_Backend.cpp:480–492 — из check_rules. Нет INS_RAW_LOG_OPT (старая прошивка) — подсказка — бит
+    // IMU_RAW в LOG_BITMASK: тогда raw включается только им [код] AP_InertialSensor_Backend.cpp:485–487. Текст — как у шага 0
+    raw_hint: check_rules.gyro_raw_hint,
     // LOG_FILE_BUFSIZE, КиБ: при raw-записи ниже buffer_min_kib — warn, в файл — buffer_fix_kib. Умолчания прошивки
     // 16 / 50 / 80 / ≈200 по памяти платы [код] AP_Logger/AP_Logger.cpp:27–35; не хватит памяти — прошивка сама уменьшит
     // буфер [код] AP_Logger_File.cpp:82–85. Порог — [наше]: на втором логе пользователя (30.10.2026) при 8 КиБ поток GYR
@@ -240,7 +246,8 @@ function prep_slots_text(slots, with_mode) {
 // - gyro_prepost и log_buffer — от источника после исправления gyro_data: raw и batch вместе — raw (его берёт мастер;
 //   batch не пишется для гироскопов, которые пишет raw); нет записи — batch из файла: gyro_prepost ok, log_buffer не
 //   применяется (пункта нет). Источник не определить (gyro_data — warn о параметрах) — обоих пунктов нет. log_buffer —
-//   только при raw. Batch с битами 1 и 2 INS_LOG_BAT_OPT вместе — warn: обе половины после фильтров;
+//   только при raw. Batch: бит 2 INS_LOG_BAT_OPT вместе с битом 1 или битом 0 — warn (обе половины после фильтров или,
+//   с Sensor-Rate, обе сырые); любое warn batch — changes INS_LOG_BAT_OPT = batch_fix (только бит 2), { name, value };
 // - notch_source — по обоим notch (notch_param_names): warn, если включённый notch с MODE = 3 (ESC), а SERVO_BLH_BDMASK
 //   0 или нет и ни один SERIAL0–9_PROTOCOL не 16; нет INS_HNTC2_ENABLE — второй notch выключен;
 // - acro_slot — ACRO есть — ok; нет — fail, changes FLTMODE<acro_slot> = 1, только если файл его запишет
@@ -344,8 +351,9 @@ function prep_check(params, goal, ctx) {
                     "бит " + r.log_bitmask_imu_raw + " (IMU_RAW) в LOG_BITMASK выключен", prep_eq("INS_LOG_BAT_MASK", bat_mask)].filter((t) => t != null)
                 const fix_values = Object.entries(r.batch_fix)
                 // Без INS_RAW_LOG_OPT (старая прошивка) raw включается только битом IMU_RAW
+                // Текст raw — как у шага 0 (core/checks.js, gyro_log)
                 const raw_hint = (raw_opt != null)
-                    ? prep_eq("INS_RAW_LOG_OPT", r.raw_hint) + " (основной гироскоп до и после фильтров)"
+                    ? prep_eq("INS_RAW_LOG_OPT", r.raw_hint) + " (основной гироскоп до и после фильтров; бит IMU_RAW не нужен)"
                     : "бит IMU_RAW (" + r.log_bitmask_imu_raw + ") в LOG_BITMASK (+" + (1 << r.log_bitmask_imu_raw) + "; INS_RAW_LOG_OPT в этой прошивке нет)"
                 add(id, "fail", title, "Записи гироскопа нет: " + found.join(", ") + " — шагам 1–3 нечего считать",
                     "Batch: " + fix_values.map(([name, value]) => prep_eq(name, value)).join(", ") + " (до и после фильтров) — работает на любой плате. " +
@@ -378,27 +386,36 @@ function prep_check(params, goal, ctx) {
                     add_text + ": запись до и после фильтров", changes)
             }
         } else if (source === "batch") {
+            // Исправление одно — INS_LOG_BAT_OPT = 4 (только бит 2): бит 2 работает только без битов 0 и 1 (prep_rules);
+            // перезагрузку называет заметка файла (INS_LOG_BAT_OPT — в reboot_names)
             const bat_opt = get("INS_LOG_BAT_OPT")
             const prepost = r.bat_opt_prepost_bit
-            const post = r.bat_opt_post_bit
-            const changes = [{ name: "INS_LOG_BAT_OPT", set: 1 << prepost, clear: 1 << post }]
-            const add_text = "Добавьте бит " + prepost + " (+" + (1 << prepost) + ") к INS_LOG_BAT_OPT"
-            const clear_text = "снимите бит " + post + " (−" + (1 << post) + ")"
+            const target = r.batch_fix.INS_LOG_BAT_OPT
+            const changes = [{ name: "INS_LOG_BAT_OPT", value: target }]
+            const fix = "Запишите " + prep_eq("INS_LOG_BAT_OPT", target) + " (только бит " + prepost + " — до и после фильтров)"
             if (bat_opt == null) {
                 missing(id, title, ["INS_LOG_BAT_OPT"])
-            } else if (prep_bit(bat_opt, prepost) && prep_bit(bat_opt, post)) {
-                // Флаг «после фильтров» включён — без Sensor-Rate обе половины пишутся после фильтров (prep_rules)
-                add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": биты " + post + " (после фильтров) и " + prepost +
-                    " (до и после) вместе — обе половины batch пишутся после фильтров, спектра до фильтров не будет",
-                    "В INS_LOG_BAT_OPT " + clear_text + ", бит " + prepost + " оставьте: запись до и после фильтров", changes)
-            } else if (prep_bit(bat_opt, prepost)) {
-                add(id, "ok", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch до и после фильтров (бит " + prepost + ") — оценку «станет» можно сверить с реальными данными")
-            } else if (prep_bit(bat_opt, post)) {
-                add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только после фильтров — спектра до фильтров и оценки «станет» не будет",
-                    add_text + " и " + clear_text + ": запись до и после фильтров", changes)
             } else {
-                add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только до фильтров — реального «после» для сверки оценки «станет» не будет",
-                    add_text + ": запись до и после фильтров", changes)
+                const sensor_rate = prep_bit(bat_opt, r.bat_opt_sensor_rate_bit)
+                const post = prep_bit(bat_opt, r.bat_opt_post_bit)
+                if (prep_bit(bat_opt, prepost) && (post || sensor_rate)) {
+                    const others = [sensor_rate ? "битом " + r.bat_opt_sensor_rate_bit + " (Sensor-Rate)" : null,
+                        post ? "битом " + r.bat_opt_post_bit + " (после фильтров)" : null].filter((t) => t != null)
+                    const reason = !sensor_rate ? "обе половины batch пишутся после фильтров, спектра до фильтров не будет"
+                        : "на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины batch — сырые, до фильтров" +
+                          (post ? ", на остальных бит " + r.bat_opt_post_bit + " даёт обе после фильтров: «до» и «после» не различаются"
+                              : ": реального «после» на таких датчиках не будет")
+                    add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": бит " + prepost + " (до и после) вместе с " + others.join(" и ") + " — " + reason,
+                        fix, changes)
+                } else if (prep_bit(bat_opt, prepost)) {
+                    add(id, "ok", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch до и после фильтров (бит " + prepost + ") — оценку «станет» можно сверить с реальными данными")
+                } else if (post) {
+                    add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только после фильтров — спектра до фильтров и оценки «станет» не будет",
+                        fix, changes)
+                } else {
+                    add(id, "warn", title, prep_eq("INS_LOG_BAT_OPT", bat_opt) + ": batch только до фильтров — реального «после» для сверки оценки «станет» не будет",
+                        fix, changes)
+                }
             }
         }
     }
@@ -479,9 +496,9 @@ function prep_check(params, goal, ctx) {
             missing(id, title, absent)
         } else {
             const fix = (applied != null)
-                ? "Запишите FLTMODE" + applied + " = " + r.acro_mode + " (есть в файле исправлений): ACRO — " + prep_slots_text([now[applied - 1]], false) +
-                  "; другое положение — в таблице положений переключателя"
-                : "Выберите положение для ACRO в таблице положений переключателя"
+                ? "Запишите FLTMODE" + applied + " = " + r.acro_mode + " (есть в файле _prep.param шага 0): ACRO — " + prep_slots_text([now[applied - 1]], false) +
+                  "; другое положение — в таблице положений переключателя на шаге 0"
+                : "Выберите положение для ACRO в таблице положений переключателя на шаге 0"
             add(id, "fail", title, "Ни в одном из FLTMODE1–" + r.slot_count + " нет ACRO (" + r.acro_mode + "): тестовый полёт Acro «Rate Loop Only» не включить",
                 fix, (applied != null) ? [{ name: "FLTMODE" + applied, value: r.acro_mode }] : [])
         }

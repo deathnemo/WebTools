@@ -402,8 +402,11 @@ test('run_checks: нет данных гироскопа — fail с подск�
     assert.doesNotMatch(c.fix, /INS_RAW_LOG_OPT = 8/)
     // Нет INS_RAW_LOG_OPT (старая прошивка) — raw включается только битом IMU_RAW, как в подсказке подготовки
     const old_fw = by_id(checks.run_checks(info, fake_params({ MOT_THST_HOVER: 0.35, MOT_HOVER_LEARN: 2 }), good_vibe), 'gyro_log')
-    assert.match(old_fw.fix, /Raw \(нужна быстрая плата, обычно H7\): бит IMU_RAW \(19\) в LOG_BITMASK \(INS_RAW_LOG_OPT в этой прошивке нет\)$/)
+    assert.match(old_fw.fix, /Raw \(нужна быстрая плата, обычно H7\): бит IMU_RAW \(19\) в LOG_BITMASK \(\+524288; INS_RAW_LOG_OPT в этой прошивке нет\)$/)
     assert.doesNotMatch(old_fw.fix, /INS_RAW_LOG_OPT = /)
+    // Значения совета — из check_rules (их же берёт подготовка, core/prep.js)
+    assert.deepEqual(checks.check_rules.gyro_batch_fix, { INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 })
+    assert.equal(checks.check_rules.gyro_raw_hint, 9)
 })
 
 test('run_checks: raw pre/post по INS_RAW_LOG_OPT', () => {
@@ -419,32 +422,50 @@ test('run_checks: raw pre/post по INS_RAW_LOG_OPT', () => {
 test('run_checks: batch pre/post по INS_LOG_BAT_OPT', () => {
     const info = good_info({ messages: { ...good_info().messages, gyro_raw: false, gyro_batch: true } })
     assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 4 }), good_vibe), 'pre_post').status, 'ok')
-    const c = by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 2 }), good_vibe), 'pre_post')
-    assert.equal(c.status, 'warn')
-    assert.match(c.fix, /\+4/)
-    // Снятый бит 1 действует только после перезагрузки: флаги batch только выставляются [код] BatchSampler.cpp:97–102
-    assert.match(c.fix, /снимите бит 1 \(−2\) и перезагрузите полётный контроллер/)
+    // Только после фильтров (бит 1, и с битом 0) — одно исправление: INS_LOG_BAT_OPT = 4 и перезагрузка — снятый бит 1
+    // действует только после неё: флаги batch только выставляются [код] BatchSampler.cpp:97–102
+    for (const opt of [2, 3]) {
+        const c = by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: opt }), good_vibe), 'pre_post')
+        assert.equal(c.status, 'warn', 'INS_LOG_BAT_OPT = ' + opt)
+        assert.equal(c.fix, 'Запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров) и перезагрузите полётный контроллер: ' +
+            'флаг «после фильтров» сбрасывается только перезагрузкой')
+    }
     // Только до фильтров — норма, оценка «станет» строится расчётом
     assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 0 }), good_vibe), 'pre_post').status, 'ok')
 })
 
-test('run_checks: batch с битами 1 и 2 INS_LOG_BAT_OPT — warn: обе половины после фильтров; бит 2 без бита 1 — ok', () => {
+test('run_checks: batch — бит 2 INS_LOG_BAT_OPT вместе с битом 1 или 0 — warn с причиной, исправление INS_LOG_BAT_OPT = 4; только бит 2 — ok', () => {
     const info = good_info({ messages: { ...good_info().messages, gyro_raw: false, gyro_batch: true } })
     const pre_post_of = (opt) => by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: opt }), good_vibe), 'pre_post')
-    // 6 — биты 1 и 2, 7 — ещё и Sensor-Rate (бит 0): флаг «после фильтров» включён в обоих случаях
-    for (const opt of [6, 7]) {
-        const c = pre_post_of(opt)
-        assert.equal(c.status, 'warn', 'INS_LOG_BAT_OPT = ' + opt)
-        assert.match(c.text, /обе половины пишутся после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров/)
-        assert.equal(c.fix, 'Снимите бит 1 (−2) в INS_LOG_BAT_OPT, бит 2 оставьте, и перезагрузите полётный контроллер: ' +
-            'флаг «после фильтров» сбрасывается только перезагрузкой')
-    }
-    // Бит 2 без бита 1 — до и после фильтров, как раньше (с Sensor-Rate — тоже)
-    for (const opt of [4, 5]) {
-        const c = pre_post_of(opt)
-        assert.equal(c.status, 'ok', 'INS_LOG_BAT_OPT = ' + opt)
-        assert.equal(c.fix, null)
-    }
+    const fix = 'Запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров) и перезагрузите полётный контроллер'
+    const sensor_rate = 'на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины — сырые, до фильтров'
+
+    // Только бит 2 — до и после фильтров
+    const good = pre_post_of(4)
+    assert.equal(good.status, 'ok')
+    assert.equal(good.fix, null)
+
+    // 6 — бит 1 без бита 0: флаг «после фильтров» включён, обе половины после фильтров
+    const post = pre_post_of(6)
+    assert.equal(post.status, 'warn')
+    assert.equal(post.text, 'Batch-лог с INS_LOG_BAT_OPT = 6: бит 2 (до и после) вместе с битом 1 (после фильтров) — обе половины пишутся ' +
+        'после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров')
+    assert.equal(post.fix, fix + ': флаг «после фильтров» сбрасывается только перезагрузкой')
+
+    // 5 — бит 0 (Sensor-Rate): на датчиках с выборкой на частоте датчика batch берёт только сырые отсчёты
+    const raw = pre_post_of(5)
+    assert.equal(raw.status, 'warn')
+    assert.equal(raw.text, 'Batch-лог с INS_LOG_BAT_OPT = 5: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — ' + sensor_rate +
+        ': спектр «после фильтров» на шаге 1 на таких датчиках на самом деле до фильтров')
+    assert.equal(raw.fix, fix)
+
+    // 7 — биты 0 и 1: на таких датчиках обе сырые, на остальных бит 1 — обе после фильтров
+    const both = pre_post_of(7)
+    assert.equal(both.status, 'warn')
+    assert.equal(both.text, 'Batch-лог с INS_LOG_BAT_OPT = 7: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) и битом 1 (после фильтров) — ' +
+        sensor_rate + ', на остальных бит 1 даёт обе после фильтров: «до» и «после» на шаге 1 не различаются')
+    assert.equal(both.fix, fix + ': флаг «после фильтров» сбрасывается только перезагрузкой')
+
     // Raw-лог от INS_LOG_BAT_OPT не зависит: оценивается INS_RAW_LOG_OPT
     assert.equal(by_id(checks.run_checks(good_info(), fake_params({ INS_RAW_LOG_OPT: 9, INS_LOG_BAT_OPT: 6 }), good_vibe), 'pre_post').status, 'ok')
 })

@@ -5,8 +5,9 @@
 //
 // Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
 // (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()) и имён, от которых
-// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short), пункты подготовки к полёту
-// (prep0_items) и поиск записи в метаданных параметров (step_find_metadata).
+// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short), подготовка к полёту
+// (prep0_summary: пункты, имя файла исправлений, имена с перезагрузкой) и поиск записи в метаданных параметров
+// (step_find_metadata).
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, escmsk_present, mask_unsigned, mask_signed;
 // ему — Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
@@ -247,9 +248,12 @@ function summary_lower_first(text) {
 
 // «Что перелететь»: пункты [{ source, text }] по порядку, каждый текст — фраза с точкой (summary_period)
 // [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight }:
-// - checks — проверки шага 0 (state.checks: { status, title, fix }; null — проверок нет);
-// - prep — пункты подготовки к следующему полёту (prep_check, страница берёт prep0_items(): { status, title, fix };
-//   null или [] — пунктов нет: нет источника параметров, не Copter, блок подготовки не загрузился);
+// - checks — проверки шага 0 (state.checks: { id, status, title, fix }; null — проверок нет);
+// - prep — подготовка к следующему полёту, всё готовое от страницы (prep0_summary(); ядро prep_* не зовёт): null — нет
+//   (нет источника параметров, не Copter, блок подготовки не загрузился) или { items, file_name, reboot_names }:
+//   items — пункты prep_check ({ id, status, title, fix }; null или [] — нет), file_name — имя файла исправлений
+//   (prep_file_name) или null — в файл записать нечего, reboot_names — имена этого файла, которым нужна перезагрузка
+//   (prep_reboot_names; [] или null — не нужна);
 // - rows — строки итога, summary_rows(…).rows;
 // - reboot_names — имена, которым нужна перезагрузка (summary_reboot_names): [] — метаданные есть, перезагрузка не
 //   нужна; null — метаданные не загрузились;
@@ -259,32 +263,49 @@ function summary_lower_first(text) {
 // - test_flight — совет тестового полёта (step4_test_flight_short).
 // Пункты:
 // 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия), fix — продолжение
-//    фразы: первая буква обычного слова строчная (summary_lower_first);
+//    фразы: первая буква обычного слова строчная (summary_lower_first). Проверки, о которых есть пункт подготовки warn
+//    или fail с непустым fix (пары — twins ниже), не выводятся;
 // 2. "prep" — пункты подготовки warn или fail с непустым fix, по их порядку, текст — как у "check". Пункты без fix
 //    (fstrate — оговорка к прогнозу; «параметра X нет» — prep_missing_text) не попадают: перед полётом по ним делать
 //    нечего [дизайн этапа 7, раздел 6];
-// 3. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
+// 3. "prep_file" — есть file_name: «Исправления подготовки — в файле <имя> (шаг 0, …)» и, если есть reboot_names,
+//    «; после записи перезагрузите полётный контроллер: …» — эти значения не в файле шага 5 [дизайн этапа 7, раздел 6];
+// 4. "notch" — каждый включаемый notch (изменённая строка его ENABLE, summary_notch_enabling):
 //    summary_notch_enable_hint;
-// 4. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
+// 5. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
 //    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
-// 5. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
+// 6. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
 //    в порядке pidtune_axes, первая с заглавной;
-// 6. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
+// 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
 //    изменений проверять нечего, и список может быть пустым [наше]
 function summary_refly(ctx) {
     const items = []
     const add = (source, text) => items.push({ source: source, text: summary_period(text) })
-    // Проверки шага 0 и пункты подготовки: warn и fail с непустым fix — «title — fix»
-    const add_fixes = (source, list) => {
-        for (const item of list ?? []) {
-            if (((item.status === "warn") || (item.status === "fail")) && ((item.fix ?? "") !== "")) {
-                add(source, item.title + " — " + summary_lower_first(item.fix))
-            }
+    // Проверка шага 0 или пункт подготовки со своим «что сделать»: warn или fail с непустым fix → «title — fix»
+    const actionable = (item) => ((item.status === "warn") || (item.status === "fail")) && ((item.fix ?? "") !== "")
+    const line = (item) => item.title + " — " + summary_lower_first(item.fix)
+    // Проверка шага 0 (ключ) и пункты подготовки о том же (id prep_check): при таком пункте подготовки проверка не
+    // выводится — пункт конкретнее, и его значение уже в файле _prep.param [наше; дизайн этапа 7, раздел 6]. Остальные
+    // проверки (tracking — пришли ли обороты в логе, vibe, clipping, flight) — о самом логе, а не о параметрах
+    const twins = { pid_log: ["log_pid", "log_fast"], gyro_log: ["gyro_data"], pre_post: ["gyro_prepost"], hover_throttle: ["hover_learn"] }
+    const prep_items = (ctx.prep?.items ?? []).filter(actionable)
+    const prep_ids = prep_items.map((item) => item.id)
+    const covered = (check) => Object.hasOwn(twins, check.id) && twins[check.id].some((id) => prep_ids.includes(id))
+
+    for (const check of ctx.checks ?? []) {
+        if (actionable(check) && !covered(check)) {
+            add("check", line(check))
         }
     }
-
-    add_fixes("check", ctx.checks)
-    add_fixes("prep", ctx.prep)
+    for (const item of prep_items) {
+        add("prep", line(item))
+    }
+    const prep_file = ctx.prep?.file_name ?? null
+    if (prep_file != null) {
+        const reboot = ctx.prep.reboot_names ?? []
+        add("prep_file", "Исправления подготовки — в файле " + prep_file + " (шаг 0, «Подготовка к следующему полёту»)" +
+            ((reboot.length > 0) ? "; после записи перезагрузите полётный контроллер: " + reboot.join(", ") : ""))
+    }
 
     const changed = ctx.rows.filter((row) => row.changed)
     const enables = notch_param_names().map((notch) => notch.enable)

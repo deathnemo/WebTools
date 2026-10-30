@@ -123,12 +123,23 @@ function prep0_context() {
     return { source: source, goal: goal, refusal: null, slot: slot, items: items }
 }
 
-// Пункты подготовки для текущего источника, цели и положения ACRO (prep_check) или null — источника нет или он не
-// Copter (prep0_refusal). Для «что сделать перед следующим полётом» шага 5 (задача 3): сбой подготовки не должен ронять
-// сводку — ошибка в консоль, null
-function prep0_items() {
+// Подготовка для «что сделать перед следующим полётом» шага 5 (ctx.prep summary_refly) → null — источника нет или он не
+// Copter (prep0_refusal); иначе { items, file_name, reboot_names }: items — пункты prep_check для текущего источника,
+// цели и положения ACRO; file_name — имя файла исправлений (prep_file_name) или null — в файл записать нечего
+// (prep_changes пусто, как у выключенной кнопки «Скачать»); reboot_names — имена файла, которым нужна перезагрузка
+// (prep_reboot_names; [] — не нужна). Сбой подготовки не должен ронять сводку — ошибка в консоль, null
+function prep0_summary() {
     try {
-        return prep0_context()?.items ?? null
+        const ctx = prep0_context()
+        if ((ctx == null) || (ctx.items == null)) {
+            return null
+        }
+        const names = Object.keys(prep_changes(ctx.source.params, ctx.items))
+        return {
+            items: ctx.items,
+            file_name: (names.length > 0) ? prep_file_name(ctx.source.name) : null,
+            reboot_names: prep_reboot_names(names),
+        }
     } catch (e) {
         console.error(e)
         return null

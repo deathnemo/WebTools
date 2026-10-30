@@ -3,8 +3,9 @@
 // отличными от лога; ESCMSK по правилу escmsk_present, включаемый notch, параметры без лога, принятое не число, ненадёжные
 // оси шага 4, PID, менявшиеся после интервала анализа), значения и текст .param из изменённых, имя
 // файла, отпечаток входов принятого шага (по действующим отличиям от лога, у шага 4 — только по его фильтрам) и
-// «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы, пункты подготовки к полёту — и от prep_check,
-// включаемый notch, перезагрузка, тестовый полёт, повтор) и имена с перезагрузкой по метаданным.
+// «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы — без повторов пунктов подготовки, пункты
+// подготовки к полёту — и от prep_check, файл исправлений подготовки, включаемый notch, перезагрузка, тестовый полёт,
+// повтор) и имена с перезагрузкой по метаданным.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pidtune.test.cjs).
 const test = require('node:test')
@@ -25,8 +26,8 @@ function load_page_scripts(files) {
 
 // Нужное итогу и тестам в порядке страницы: param_file_text (Param_Helpers.js, params.js), notch_param_names
 // (filters.js), lowpass_param_names (lowpass.js; ему при загрузке нужен candidate_rules из candidates.js),
-// pidtune_axes (pidtune.js; ему — константы core/pid.js), prep_check (prep.js — пункты подготовки для summary_refly;
-// ему — check_rules из checks.js)
+// pidtune_axes (pidtune.js; ему — константы core/pid.js), prep_check, prep_changes, prep_file_name, prep_reboot_names
+// (prep.js — подготовка для summary_refly, как её собирает страница; ему — check_rules из checks.js)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
     'TuneWizard/core/checks.js',
@@ -705,10 +706,16 @@ const HNTC2_ENABLE_HINT = 'В логе INS_HNTC2_ENABLE = 0: на аппарат
 // Совет тестового полёта — подставной (страница передаёт step4_test_flight_short, он без точки и с двоеточием)
 const TEST_FLIGHT = 'нужен тестовый полёт: Acro'
 
-// Вход summary_refly: строки итога — summary_rows по принятым шагам; prep — пункты подготовки (null — блока нет)
+// Вход summary_refly: строки итога — summary_rows по принятым шагам; prep — подготовка (prep_ctx; null — блока нет)
 function refly_ctx({ checks = [], prep = null, steps = [], log = BASE_LOG, filter_version = 2, reboot_names = [], unreliable_axes = [] } = {}) {
     return { checks: checks, prep: prep, rows: summary_rows(rows_ctx({ log: log, steps: steps, filter_version: filter_version })).rows,
              reboot_names: reboot_names, unreliable_axes: unreliable_axes, test_flight: TEST_FLIGHT }
+}
+
+// Подготовка, как её отдаёт страница (prep0_summary): пункты, имя файла исправлений (null — файла нет), имена с
+// перезагрузкой
+function prep_ctx(items, file_name = null, reboot_names = []) {
+    return { items: items, file_name: file_name, reboot_names: reboot_names }
 }
 
 // Принятый шаг 2: правки changes поверх лога log
@@ -759,7 +766,7 @@ test('summary_notch_enable_hint: текст подсказки шага 2 дос
 })
 
 // Единственное место, где тексты пунктов проверяются целиком; в остальных тестах — состав
-test('summary_refly: тексты пунктов — законченные фразы с точкой; порядок — проверки, подготовка, notch, перезагрузка, тестовый полёт, повтор', () => {
+test('summary_refly: тексты пунктов — законченные фразы с точкой; порядок — проверки, подготовка, файл подготовки, notch, перезагрузка, тестовый полёт, повтор', () => {
     const checks = [
         { id: 'pid_log', status: 'warn', title: 'Сообщения PID', text: 'PID с частотой 10 Гц',
           fix: 'Включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter пишет PID с частотой 10 Гц' },
@@ -773,14 +780,16 @@ test('summary_refly: тексты пунктов — законченные фр
           changes: [{ name: 'LOG_FILE_BUFSIZE', value: 64 }] },
     ]
     const steps = steps_with2({ SCHED_LOOP_RATE: 800, INS_HNTCH_HMNCS: 7, INS_HNTC2_ENABLE: 1 })
-    const ctx = refly_ctx({ checks: checks, prep: prep, steps: steps, reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'],
-        unreliable_axes: ['roll', 'pitch'] })
+    const ctx = refly_ctx({ checks: checks, prep: prep_ctx(prep, 'лог_prep.param', ['LOG_FILE_BUFSIZE']), steps: steps,
+        reboot_names: ['SCHED_LOOP_RATE', 'INS_HNTCH_HMNCS'], unreliable_axes: ['roll', 'pitch'] })
     assert.deepEqual(summary_refly(ctx), [
         { source: 'check', text: 'Сообщения PID — включите бит ATTITUDE_FAST в LOG_BITMASK и перелетите: без него Copter ' +
             'пишет PID с частотой 10 Гц.' },
         { source: 'check', text: 'Вибрации — проверьте крепление автопилота.' },
         { source: 'prep', text: 'Тренер Acro — запишите ACRO_TRAINER = 0.' },
         { source: 'prep', text: 'Буфер лога — LOG_FILE_BUFSIZE = 64 КиБ.' },
+        { source: 'prep_file', text: 'Исправления подготовки — в файле лог_prep.param (шаг 0, «Подготовка к следующему полёту»); ' +
+            'после записи перезагрузите полётный контроллер: LOG_FILE_BUFSIZE.' },
         { source: 'notch', text: HNTC2_ENABLE_HINT },
         { source: 'reboot', text: 'После записи перезагрузите полётный контроллер — только после перезагрузки действуют: ' +
             'SCHED_LOOP_RATE, INS_HNTCH_HMNCS.' },
@@ -823,8 +832,8 @@ test('summary_refly: проверки warn и fail с fix — по порядк�
 
 test('summary_refly: пункты подготовки warn и fail с fix — источник prep по их порядку, сразу после проверок; ok и без fix — нет; null и [] — ничего', () => {
     const checks = [
-        { id: 'pid_log', status: 'fail', title: 'Сообщения PID', text: 'нет', fix: 'Включите бит PID (12) в LOG_BITMASK и перелетите' },
-        { id: 'vibe', status: 'ok', title: 'Вибрации', text: 'в норме', fix: null },
+        { id: 'vibe', status: 'fail', title: 'Вибрации', text: 'высокие', fix: 'Проверьте крепление автопилота' },
+        { id: 'clipping', status: 'ok', title: 'Clipping', text: 'нет', fix: null },
     ]
     const prep = [
         { id: 'log_backend', status: 'ok', title: 'Запись лога', text: 'File', fix: null, changes: [] },
@@ -837,35 +846,54 @@ test('summary_refly: пункты подготовки warn и fail с fix — �
         { id: 'acro_trainer', status: 'warn', title: 'Тренер Acro', text: 'параметра ACRO_TRAINER нет — проверьте версию прошивки', fix: null, changes: [] },
         { id: 'hover_learn', status: 'warn', title: 'Обучение газа висения', text: 'расхождение', fix: '', changes: [] },
         { id: 'gyro_prepost', status: 'warn', title: 'До/после фильтров', text: 'только после',
-          fix: 'Добавьте бит 2 (+4) к INS_LOG_BAT_OPT и снимите бит 1 (−2): запись до и после фильтров',
-          changes: [{ name: 'INS_LOG_BAT_OPT', set: 4, clear: 2 }] },
+          fix: 'Запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров)', changes: [{ name: 'INS_LOG_BAT_OPT', value: 4 }] },
     ]
     const steps = steps_with2({ INS_HNTC2_ENABLE: 1 })
-    const items = summary_refly(refly_ctx({ checks: checks, prep: prep, steps: steps, unreliable_axes: ['yaw'] }))
+    const items = summary_refly(refly_ctx({ checks: checks, prep: prep_ctx(prep), steps: steps, unreliable_axes: ['yaw'] }))
     assert.deepEqual(sources_of(items), ['check', 'prep', 'prep', 'notch', 'test_flight', 'repeat'])
     // Текст — «title — fix», fix — продолжение фразы (summary_lower_first), точка в конце
     assert.deepEqual(of_source(items, 'prep').map((item) => item.text), [
         'Частота PID и RATE — включите бит ATTITUDE_FAST (0) в LOG_BITMASK (+1).',
-        'До/после фильтров — добавьте бит 2 (+4) к INS_LOG_BAT_OPT и снимите бит 1 (−2): запись до и после фильтров.',
+        'До/после фильтров — запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров).',
     ])
 
-    // null (блока подготовки нет, источника нет, не Copter) и [] — ни одного пункта prep, остальное как без prep
+    // null (блока подготовки нет, источника нет, не Copter), items null и [] — ни одного пункта prep, остальное как без prep
     const without = sources_of(summary_refly(refly_ctx({ checks: checks, steps: steps, unreliable_axes: ['yaw'] })))
     assert.deepEqual(without, ['check', 'notch', 'test_flight', 'repeat'])
-    assert.deepEqual(sources_of(summary_refly(refly_ctx({ checks: checks, prep: [], steps: steps, unreliable_axes: ['yaw'] }))), without)
+    for (const empty of [prep_ctx([]), prep_ctx(null)]) {
+        assert.deepEqual(sources_of(summary_refly(refly_ctx({ checks: checks, prep: empty, steps: steps, unreliable_axes: ['yaw'] }))), without)
+    }
     // ctx без поля prep — как null
     const old_ctx = refly_ctx({ checks: checks, steps: steps, unreliable_axes: ['yaw'] })
     delete old_ctx.prep
     assert.deepEqual(sources_of(summary_refly(old_ctx)), without)
-    // Только ok-пункты — пусто
-    assert.deepEqual(summary_refly(refly_ctx({ prep: prep.filter((item) => item.status === 'ok') })), [])
+    // Только ok-пункты и файла нет — пусто
+    assert.deepEqual(summary_refly(refly_ctx({ prep: prep_ctx(prep.filter((item) => item.status === 'ok')) })), [])
     // Проверок нет (лога нет) — пункты подготовки первыми
-    assert.deepEqual(sources_of(summary_refly(refly_ctx({ checks: null, prep: prep }))), ['prep', 'prep'])
+    assert.deepEqual(sources_of(summary_refly(refly_ctx({ checks: null, prep: prep_ctx(prep) }))), ['prep', 'prep'])
 })
 
-test('summary_refly: пункты prep_check — fail и warn с fix по порядку правил; fstrate и нет параметра (без fix) — нет', () => {
+test('summary_refly: файл исправлений подготовки — общий пункт prep_file после пунктов prep; с перезагрузкой и без; без файла — нет', () => {
+    const prep = [{ id: 'log_buffer', status: 'warn', title: 'Буфер лога', text: 'LOG_FILE_BUFSIZE = 8', fix: 'LOG_FILE_BUFSIZE = 64',
+                    changes: [{ name: 'LOG_FILE_BUFSIZE', value: 64 }] }]
+    const file_text = 'Исправления подготовки — в файле лог_prep.param (шаг 0, «Подготовка к следующему полёту»)'
+    // С перезагрузкой — имена по порядку, точка в конце
+    const reboot = summary_refly(refly_ctx({ prep: prep_ctx(prep, 'лог_prep.param', ['LOG_FILE_BUFSIZE', 'INS_LOG_BAT_OPT']), steps: steps_with2({ INS_HNTC2_ENABLE: 1 }) }))
+    assert.deepEqual(sources_of(reboot), ['prep', 'prep_file', 'notch', 'repeat'])
+    assert.equal(of_source(reboot, 'prep_file')[0].text, file_text + '; после записи перезагрузите полётный контроллер: LOG_FILE_BUFSIZE, INS_LOG_BAT_OPT.')
+    // Без перезагрузки ([] и null) — только файл
+    for (const names of [[], null]) {
+        assert.deepEqual(of_source(summary_refly(refly_ctx({ prep: prep_ctx(prep, 'лог_prep.param', names) })), 'prep_file'),
+            [{ source: 'prep_file', text: file_text + '.' }], JSON.stringify(names))
+    }
+    // Файла нет (prep_changes пусто) — пункта нет, и имена перезагрузки не выводятся
+    assert.deepEqual(sources_of(summary_refly(refly_ctx({ prep: prep_ctx(prep, null, ['LOG_FILE_BUFSIZE']) }))), ['prep'])
+})
+
+test('summary_refly: изменений шагов нет, есть только исправления подготовки — пункты prep_check и общий пункт с файлом и перезагрузкой', () => {
     // Как синтетическая фикстура этапа 7: ACRO нет, ACRO_TRAINER нет, LOG_BITMASK без PID и ATTITUDE_FAST (176126),
-    // записи гироскопа нет, быстрый поток контура включён
+    // записи гироскопа нет, быстрый поток контура включён; положение для ACRO — предложение ядра (6). Значения
+    // file_name и reboot_names — как у страницы (prep0_summary): prep_changes, prep_file_name, prep_reboot_names
     const values = {
         LOG_BACKEND_TYPE: 1, LOG_BITMASK: 176126, LOG_FILE_BUFSIZE: 8,
         INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 0, INS_LOG_BAT_OPT: 0,
@@ -873,17 +901,61 @@ test('summary_refly: пункты prep_check — fail и warn с fix по пор
         FLTMODE1: 0, FLTMODE2: 0, FLTMODE3: 0, FLTMODE4: 2, FLTMODE5: 2, FLTMODE6: 2,
         ACRO_OPTIONS: 0, FSTRATE_ENABLE: 1, MOT_HOVER_LEARN: 2,
     }
-    const prep = prep_check(fake_params(values), 'both', { acro_slot: null, hover_check: null })
+    const params = fake_params(values)
+    const prep = prep_check(params, 'both', { acro_slot: prep_acro_suggestion(params), hover_check: null })
     const item_of = (id) => prep.find((item) => item.id === id)
     // Пункты без fix: в списке шага 0 есть, в «что перелететь» — нет
     assert.deepEqual([item_of('fstrate').status, item_of('fstrate').fix], ['warn', null])
     assert.deepEqual([item_of('acro_trainer').status, item_of('acro_trainer').fix], ['warn', null])
-    const items = of_source(summary_refly(refly_ctx({ prep: prep })), 'prep')
+    const names = Object.keys(prep_changes(params, prep))
+    const ctx = prep_ctx(prep, prep_file_name('1 01.01.1970 2-00-00.bin'), prep_reboot_names(names))
+
+    const items = summary_refly(refly_ctx({ checks: null, prep: ctx, steps: steps_with2({}) }))
+    // Шаг 2 принят без изменений: ни notch, ни перезагрузки шага 5, ни «слетайте тем же профилем»
+    assert.deepEqual(sources_of(items), ['prep', 'prep', 'prep', 'prep', 'prep', 'prep_file'])
     const expected = prep.filter((item) => ['warn', 'fail'].includes(item.status) && ((item.fix ?? '') !== ''))
     assert.deepEqual(expected.map((item) => item.id), ['log_pid', 'log_fast', 'gyro_data', 'acro_slot', 'acro_rate_only'])
-    assert.deepEqual(items.map((item) => item.text), expected.map((item) => summary_period(item.title + ' — ' + summary_lower_first(item.fix))))
-    assert.ok(items.every((item) => !item.text.startsWith(item_of('fstrate').title) && !item.text.startsWith(item_of('acro_trainer').title)),
-        items.map((item) => item.text).join(' | '))
+    assert.deepEqual(of_source(items, 'prep').map((item) => item.text), expected.map((item) => summary_period(item.title + ' — ' + summary_lower_first(item.fix))))
+    // Тексты настоящих пунктов дословно: fix — продолжение фразы со строчной
+    assert.equal(items[0].text, 'Сообщения PID — включите бит PID (12) в LOG_BITMASK (+4096).')
+    assert.equal(items[3].text, 'ACRO на переключателе — запишите FLTMODE6 = 1 (есть в файле _prep.param шага 0): ACRO — положение 6 ' +
+        '(PWM от 1750); другое положение — в таблице положений переключателя на шаге 0.')
+    assert.equal(items[5].text, 'Исправления подготовки — в файле 1 01.01.1970 2-00-00_prep.param (шаг 0, «Подготовка к следующему полёту»); ' +
+        'после записи перезагрузите полётный контроллер: INS_LOG_BAT_MASK, INS_LOG_BAT_OPT.')
+
+    // Batch только после фильтров — исправление gyro_prepost с глагола: «— запишите …», а не «— В …»
+    const batch = { ...values, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 6 }
+    const batch_items = prep_check(fake_params(batch), 'filters', { acro_slot: null, hover_check: null })
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ prep: prep_ctx(batch_items) })), 'prep').map((item) => item.text),
+        ['До/после фильтров — запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров).'])
+})
+
+test('summary_refly: проверка шага 0 не выводится, если о том же есть пункт подготовки warn или fail с fix; при ok или без fix — остаётся', () => {
+    const fix_of = { pid_log: 'Включите бит PID (12) в LOG_BITMASK и перелетите', gyro_log: 'Batch: INS_LOG_BAT_MASK = 1, INS_LOG_BAT_OPT = 4',
+                     pre_post: 'Запишите INS_LOG_BAT_OPT = 4', hover_throttle: 'MOT_HOVER_LEARN = 2 (обучение с сохранением)' }
+    const step0 = (id) => ({ id: id, status: 'warn', title: 'Проверка ' + id, text: '…', fix: fix_of[id] })
+    const prep_item = (id, status, fix) => ({ id: id, status: status, title: 'Пункт ' + id, text: '…', fix: fix, changes: [] })
+    const pairs = [['pid_log', 'log_pid'], ['pid_log', 'log_fast'], ['gyro_log', 'gyro_data'], ['pre_post', 'gyro_prepost'], ['hover_throttle', 'hover_learn']]
+    for (const [check_id, prep_id] of pairs) {
+        const label = check_id + ' ↔ ' + prep_id
+        const check_items = (prep) => of_source(summary_refly(refly_ctx({ checks: [step0(check_id)], prep: prep_ctx(prep) })), 'check')
+        // Пункт подготовки warn и fail с fix — проверки нет, пункт подготовки есть
+        for (const status of ['warn', 'fail']) {
+            const items = summary_refly(refly_ctx({ checks: [step0(check_id)], prep: prep_ctx([prep_item(prep_id, status, 'Сделайте так')]) }))
+            assert.deepEqual(sources_of(items), ['prep'], label + ', ' + status)
+        }
+        // Пункт подготовки ok, warn без fix, пункта нет — проверка шага 0 остаётся
+        assert.equal(check_items([prep_item(prep_id, 'ok', null)]).length, 1, label + ', ok')
+        assert.equal(check_items([prep_item(prep_id, 'warn', null)]).length, 1, label + ', без fix')
+        assert.equal(check_items([]).length, 1, label + ', нет пункта')
+    }
+    // Пункт подготовки чужой пары проверку не убирает: pid_log при gyro_data
+    assert.equal(of_source(summary_refly(refly_ctx({ checks: [step0('pid_log')], prep: prep_ctx([prep_item('gyro_data', 'fail', 'Сделайте так')]) })), 'check').length, 1)
+    // tracking, vibe, clipping, flight — о самом логе: остаются при любых пунктах подготовки
+    const log_checks = ['tracking', 'vibe', 'clipping', 'flight'].map((id) => ({ id: id, status: 'warn', title: 'Проверка ' + id, text: '…', fix: 'Проверьте' }))
+    const all_prep = ['notch_source', 'log_pid', 'log_fast', 'gyro_data', 'gyro_prepost', 'hover_learn'].map((id) => prep_item(id, 'fail', 'Сделайте так'))
+    assert.deepEqual(of_source(summary_refly(refly_ctx({ checks: log_checks, prep: prep_ctx(all_prep) })), 'check').map((item) => item.text),
+        log_checks.map((c) => c.title + ' — проверьте.'))
 })
 
 test('summary_refly: включение второго notch — пункт с подсказкой для INS_HNTC2_ENABLE', () => {
