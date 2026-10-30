@@ -116,6 +116,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 | 28.10 | Этап 6: ссылка «Мастер настройки» — на главной WebTools сразу после PID Review (подпись на русском); иконка — снимок «полоса шагов + спектр шага 2», как у соседних инструментов |
 | 28.10 | Этап 6 — через PR внутри форка (PR #6) |
 | 30.10 | Строка «Мастер настройки» на главной WebTools — первой, над Log Finder (было — сразу после PID Review) |
+| 30.10 | Продолжая проект на другом компьютере, Claude перед правками читает этот журнал целиком и общие правила проектов — записано в `CLAUDE.md` в корне (Claude Code загружает его сам) |
 
 ---
 
@@ -292,11 +293,13 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 - **Запуск из VS Code** (PR #8): конфигурация «Мастер настройки (python + Chrome)» первой в `.vscode/launch.json` — сервер задачей `Host` и Chrome сразу на `http://127.0.0.1:8000/TuneWizard/`.
 - **`python3` на Windows:** на втором компьютере (Python 3.12, Node 24.20, тестовых логов нет) `python3` — заглушка Microsoft Store, задача `Host` падала с «Python was not found»; настоящий Python 3.12 — `python` и `py`. Правка задачи (`"windows": { "command": "python …" }`) и примечание в корневом `Readme.md` — в ветке `windows-python-host`.
 - **Главная:** строка «Мастер настройки» перенесена первой, над Log Finder (решение пользователя, раздел 3); браузерный тест проверяет `rowIndex` 0 вместо соседства с PID Review; `TuneWizard/Readme.md` и `tests/README.md` поправлены.
+- **Правила на другом компьютере:** на втором компьютере первые правки сделаны до чтения журнала — английская строка в корневом `Readme.md` ArduPilot (ветка `windows-python-host`) и ссылка `pull/new/...`, которая для форка может открыть PR в ArduPilot. По просьбе пользователя добавлен `CLAUDE.md`: перед правками — журнал целиком и общие правила.
 
 ---
 
 ## 6. Где что лежит
 
+- `CLAUDE.md` — Claude Code загружает его в каждом сеансе: перед правками прочитать этот журнал и общие правила, главные запреты (upstream, `main`, файлы ArduPilot).
 - `TuneWizard/` — страница (`index.html`), каркас и шаг 0 (`wizard.js`), реестр графиков (`plots.js`), общий модуль шагов (`steps/common.js`), шаги (`steps/step1.js` … `steps/step5.js`), память прохода на странице (`steps/memory.js`), ядро `core/` (шаг 3 — `core/lowpass.js`; шаг 4 — `core/pid.js` перенос PIDReview и `core/pidtune.js`; шаг 5 — `core/summary.js` итог и `core/passmem.js` память прохода). Описание — `TuneWizard/Readme.md`.
 - `docs/plans/` — дизайн и планы:
   - `2026-10-23-tune-wizard-design.md` — общий дизайн;
