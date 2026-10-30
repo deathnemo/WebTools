@@ -93,7 +93,7 @@
 
 - **Разметка** (шаг 0): в первой строке `.lab` — второй выбор файла рядом с логом: `<input id="prep0_file" type="file" accept=".param,.parm,.txt">` и `<label class="pickbtn" for="prep0_file">Проверить .param…</label>`. Блок `<div id="prep0" hidden>` после `#log_checks` и до `#memory0`: шапка `.head` («Подготовка» / «Подготовка к следующему полёту»), строка источника `#prep0_source` с кнопкой «Убрать файл» (`#prep0_unfile`), поле цели `<select id="prep0_goal">`, вердикт `#prep0_verdict`, список `#prep0_checks` (как `.checks`), таблица положений `#prep0_modes` (столбцы: положение, PWM, режим сейчас) с полем `<select id="prep0_slot">` «Положение для ACRO» — видны, если цель включает PID; кнопки «Скачать .param исправлений» (`#prep0_download`) и «Печать плана» (`#prep0_print`), заметка `#prep0_note`, план `<ol id="prep0_plan">`, шапка печати `#prep0_print_head` (видна только при печати, как `.print-head` шага 5).
 - **Источник:** загружен файл — он (`parse_param_file`, обёртка `get`/`has`); иначе `state.params`; нет ни того ни другого — блок скрыт. Файл не сбрасывается при загрузке лога (`reset()`), «Убрать файл» — возврат к логу. Строка источника: «По файлу «…»» / «По параметрам лога «…»»; при файле и логе — «файл важнее параметров лога».
-- **Цель:** `localStorage` ключ `tunewizard_prep_goal` (чтение и запись в `try/catch`, без хранилища — по умолчанию `both`).
+- **Цель:** `localStorage` ключ `tunewizard_prep_goal` (чтение и запись в `try/catch`, без хранилища — по умолчанию `both`). Прочитанное значение проверить по ключам `prep_goals` до вызова ядра: `prep_goal_parts` бросает на неизвестную цель (ревью задачи 1).
 - **Положение ACRO:** при fail `acro_slot` — `<select>` с `FLTMODE1–6` (режим сейчас и PWM), выбрано `prep_acro_suggestion`, если оно есть, иначе пусто («— выберите —»). Смена — перерисовка блока. ACRO уже есть — поля нет.
 - **Список и вердикт** — разметка и подписи как `render_checks()`; вердикт: «Готово к полёту: <цель>» / «С оговорками: N» / «Не готово: N — см. список».
 - **Файл:** `prep_changes` пусто — кнопка выключена, подпись «менять нечего»; иначе `saveAs` с `param_file_text`, имя `prep_file_name(источник)`, заметка: «Файл …: N параметров» и, если `prep_reboot_names` не пусто, «после записи перезагрузите полётный контроллер: …». Значения пунктов `acro_exit`, `notch_source`, `fstrate` в файл не идут (их `changes` пусты).
@@ -116,7 +116,8 @@
 - `summary_refly`: `ctx.prep` — пункты подготовки (`prep0_items()`; `null` или `[]` — нет); пункты warn и fail с непустым `fix` — источник `"prep"`, текст «title — fix» (`summary_lower_first`), сразу после пунктов `"check"`. Контракт в комментарии дополнить.
 - `step5_render_refly`: `prep: (typeof prep0_items === "function") ? prep0_items() : null`.
 - `checks.js`, проверка `gyro_log` (нет данных): совет raw — «`INS_RAW_LOG_OPT = 9` (основной гироскоп до и после фильтров; бит IMU_RAW не нужен)» вместо «бит IMU_RAW (19) в LOG_BITMASK, INS_RAW_LOG_OPT = 8» — [код] `AP_InertialSensor_Backend.cpp:480–487`.
-- Тесты: источник `prep` (порядок, текст, ok-пункты не попадают, `null`), новый текст совета.
+- `checks.js`, проверка `pre_post` для batch: биты 1 и 2 `INS_LOG_BAT_OPT` вместе — warn «обе половины пишутся после фильтров: спектр «до» на шаге 1 на самом деле после фильтров», fix — снять бит 1 (−2). [код] `AP_InertialSensor.h:351–353` (`doing_post_filter_logging`), `BatchSampler.cpp:97–102`, `AP_InertialSensor_Backend.cpp:507`. Найдено ревью задачи 1; то же правило — `gyro_prepost` в `core/prep.js`.
+- Тесты: источник `prep` (порядок, текст, ok-пункты не попадают, `null`), новый текст совета, batch с битами 1 и 2.
 
 **Проверки:** lint, `npm test`.
 
