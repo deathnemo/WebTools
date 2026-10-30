@@ -123,12 +123,14 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 | 30.10 | Этап 8, по умолчанию: порт всегда 8000 (занят мастером — открыть вкладку, чужой программой — сообщение); `.cmd` в корне репозитория; сборка — `tests/tunewizard-portable.cjs`, выход — `dist/` (в `.gitignore`); имя «Мастер настройки <дата> <коммит>»; браузер по умолчанию в Windows (Chrome или Edge); ветка `tune-wizard-next4` |
 | 30.10 | Поддержка аппаратов: только Copter и QuadPlane (VTOL-часть ArduPlane); самолётная часть ArduPlane (крыло, `RLL_RATE_*`/`PTCH_RATE_*`) — не делаем. QuadPlane — отдельным этапом после этапа 8 (меняет решение 23.10 «только Copter») |
 | 30.10 | Этап 8, переносная папка: кнопки FilterReview/PIDReview на невключённые инструменты (Hardware Report, MAGFit, FilterTool) не добавлять — написать в «Прочитай меня», что они работают только на сайте WebTools (UAV Log Viewer — с интернетом) |
+| 30.10 | Этап 9 «QuadPlane (VTOL)»: шаги 0–3, сводка (5) и подготовка к полёту; шаг 4 для QuadPlane — «пока недоступно» (следующим этапом, по логу QACRO), подготовка подсказывает лог для него (бит 20 ATTITUDE_FULLRATE, QACRO, `ACRO_LOCKING = 0`); интервал по умолчанию — только VTOL-режимы, при нескольких участках — самый длинный; шаг 3 для QuadPlane — без формулы по размеру винта (источника нет) |
+| 30.10 | Этап 9, по умолчанию (раздел 14 дизайна): профиль `core/vehicle.js`; QuadPlane — `VER.BU = 3` и `Q_ENABLE ≥ 1`, tailsitter — `Q_TAILSIT_ENABLE > 0`; газ `QTUN.ThO` → `RATE.AOut`, режимы 17–23 по `MODE`; оси tailsitter — крен Z, тангаж Y, рыскание −X; шаг 3 без рекомендации; вид аппарата в ключе памяти; `.param` другого вида, чем лог, — отказ; ветка `tune-wizard-next5` |
 
 ---
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-next5` (от `main` = `04346d3`) — для этапа «QuadPlane (VTOL)»; пока в ней только запись журнала о слиянии PR #12.
+- **Ветка:** `tune-wizard-next5` (от `main` = `04346d3`) — этап 9 «QuadPlane (VTOL)»: дизайн утверждён (`docs/plans/2026-10-30-tune-wizard-stage9-design.md`; исследование — карта привязки мастера к Copter и факты ArduPlane 4.8.0-dev / тег `Plane-4.6.3`), план из шести задач — `docs/plans/2026-10-30-tune-wizard-stage9.md`; до этапа в ветке — запись журнала о слиянии PR #12.
 - **Этап 8 слит** ([PR #12](https://github.com/deathnemo/WebTools/pull/12), ветка `tune-wizard-next4` от `810a5ff`): дизайн `docs/plans/2026-10-30-tune-wizard-stage8-design.md` (с разделом 9а «Уточнено при реализации»), план из трёх задач — `docs/plans/2026-10-30-tune-wizard-stage8.md`; до этапа в ветке — записи журнала о слиянии PR #11, о QuadPlane и третьем логе.
 - **Этап 8:**
 
