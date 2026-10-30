@@ -2,7 +2,7 @@
 
 Журнал нужен, чтобы продолжить работу на другом компьютере или в новом сеансе Claude: что сделано, что решено, где что лежит, что дальше. Обновляется после каждой законченной задачи. При обновлении устаревшее исправляется на месте, а не дописывается снизу.
 
-**Обновлено:** 30.10.2026 — этап 7 «Подготовка к полёту» слит в `main` ([PR #11](https://github.com/deathnemo/WebTools/pull/11), `810a5ff`); после слияния на втором компьютере с перенесённым тестовым логом прошли `npm run test:tunewizard` (главная и шаги 0–5, 129 с) и оба теста сравнения (отклонение 0). До этого в тот же день — мастер первым на главной и `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9), `2d6a02b`), задача `Host` на Windows ([PR #10](https://github.com/deathnemo/WebTools/pull/10), `4701235`), запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8), `aaa329e`); 29.10 — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7), `89bba82`). Мастер готов к тестированию на реальных логах. Этап 8 «Запуск на Windows двойным кликом» сделан в ветке `tune-wizard-next4` (`Мастер настройки.cmd`, сервер на PowerShell, переносная папка и zip для других пилотов), открыт [PR #12](https://github.com/deathnemo/WebTools/pull/12) (сливает пользователь); следующий — этап «QuadPlane (VTOL)».
+**Обновлено:** 30.10.2026 — этап 8 «Запуск на Windows двойным кликом» слит в `main` ([PR #12](https://github.com/deathnemo/WebTools/pull/12), `04346d3`): `Мастер настройки.cmd`, сервер на PowerShell, переносная папка и zip для других пилотов; на слитом `main` — `npm test` 564 из 564, `test:tunewizard-serve` пройден. В тот же день — этап 7 «Подготовка к полёту» ([PR #11](https://github.com/deathnemo/WebTools/pull/11), `810a5ff`; с тестовым логом — шаги 0–5, сравнения — отклонение 0), мастер первым на главной и `CLAUDE.md` ([PR #9](https://github.com/deathnemo/WebTools/pull/9)), задача `Host` на Windows ([PR #10](https://github.com/deathnemo/WebTools/pull/10)), запуск из VS Code по F5 ([PR #8](https://github.com/deathnemo/WebTools/pull/8)); 29.10 — аудит ([PR #7](https://github.com/deathnemo/WebTools/pull/7)). Мастер готов к тестированию на реальных логах; ветка `tune-wizard-next5` — для следующего этапа «QuadPlane (VTOL)» (пока в ней только эта запись).
 
 ---
 
@@ -128,7 +128,8 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 ## 4. Состояние сейчас
 
-- **Ветка:** `tune-wizard-next4` (от `main` = `810a5ff`) — этап 8 «Запуск на Windows двойным кликом» сделан: дизайн `docs/plans/2026-10-30-tune-wizard-stage8-design.md` (с разделом 9а «Уточнено при реализации»), план из трёх задач — `docs/plans/2026-10-30-tune-wizard-stage8.md`; до этапа в ветке — записи журнала о слиянии PR #11, о QuadPlane и третьем логе.
+- **Ветка:** `tune-wizard-next5` (от `main` = `04346d3`) — для этапа «QuadPlane (VTOL)»; пока в ней только запись журнала о слиянии PR #12.
+- **Этап 8 слит** ([PR #12](https://github.com/deathnemo/WebTools/pull/12), ветка `tune-wizard-next4` от `810a5ff`): дизайн `docs/plans/2026-10-30-tune-wizard-stage8-design.md` (с разделом 9а «Уточнено при реализации»), план из трёх задач — `docs/plans/2026-10-30-tune-wizard-stage8.md`; до этапа в ветке — записи журнала о слиянии PR #11, о QuadPlane и третьем логе.
 - **Этап 8:**
 
 | Задача | Коммиты |
@@ -192,7 +193,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 
 - **Финальные проверки этапа 5** (28.10.2026, код `7cff023`): lint чистый, `npm test` 468 из 468, `npm run test:tunewizard` (шаги 0–5), `npm run test:tunewizard-compare` и `npm run test:tunewizard-pid-compare` — отклонение 0. На тестовом логе в сводке после блока «Устаревание» браузерного теста — 13 изменённых параметров, 29 без изменений, 5 пунктов «что сделать перед следующим полётом».
 
-- **`main`** = `origin/main` = `810a5ff`: этапы 1–7, исправления аудита, запуск из VS Code, мастер первым на главной, `CLAUDE.md`, задача `Host` на Windows. На втором компьютере локальный `main` отслеживает `origin/main` (remote `upstream` там не заведён).
+- **`main`** = `origin/main` = `04346d3`: этапы 1–8, исправления аудита, запуск из VS Code, мастер первым на главной, `CLAUDE.md`, задача `Host` на Windows. На втором компьютере локальный `main` отслеживает `origin/main` (remote `upstream` там не заведён).
 - **Этап 4** (план `docs/plans/2026-10-25-tune-wizard-stage4.md`, дизайн `…-stage4-design.md`):
 
 | Задача | Коммиты |
@@ -238,7 +239,7 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 - **PR задачи `Host` на Windows:** [PR #10](https://github.com/deathnemo/WebTools/pull/10) (`windows-python-host`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `4701235`).
 - **PR главной и `CLAUDE.md`:** [PR #9](https://github.com/deathnemo/WebTools/pull/9) (`tune-wizard-landing-top`) слит пользователем 30.10.2026 07:46 UTC (коммит слияния `2d6a02b`); локальный `main` обновлён, создана ветка `tune-wizard-next3`.
 - **PR этапа 7:** [PR #11](https://github.com/deathnemo/WebTools/pull/11) (`tune-wizard-next3`) слит пользователем 30.10.2026 11:03 UTC (коммит слияния `810a5ff`); локальный `main` обновлён, создана ветка `tune-wizard-next4`.
-- **PR этапа 8:** [PR #12](https://github.com/deathnemo/WebTools/pull/12) (`tune-wizard-next4` → `main` в форке) открыт 30.10.2026 через `gh pr create --repo deathnemo/WebTools`; сливает пользователь, затем `git checkout main`, `git pull origin main`. Вручную до или после слияния: двойной клик по `Мастер настройки.cmd` в окне и по `.cmd` в распакованном zip из `npm run tunewizard:portable`.
+- **PR этапа 8:** [PR #12](https://github.com/deathnemo/WebTools/pull/12) (`tune-wizard-next4`) слит пользователем 30.10.2026 13:43 UTC (коммит слияния `04346d3`); локальный `main` обновлён, создана ветка `tune-wizard-next5`. Вручную — за пользователем: двойной клик по `Мастер настройки.cmd` в окне и по `.cmd` в распакованном zip из `npm run tunewizard:portable`.
 - **Дальше:** этап 8 (запуск двойным кликом); затем — этап «QuadPlane (VTOL)» (решение пользователя 30.10): по исходникам VTOL-часть — тот же регулятор `AC_AttitudeControl`, что у Copter (`Q_A_RAT_*`, логи `PIQR/PIQP/PIQY`, PIDReview их уже читает — `PIDReview.js:1478–1489`), газ VTOL — `Q_M_*` (FilterReview — `tracking/Throttle.js:133`), тестовый полёт — QACRO при `ACRO_LOCKING = 0`: `input_rate_bf_roll_pitch_yaw_2` — только контур скорости, как Copter Acro «Rate Loop Only» (`ArduPlane/mode_qacro.cpp:65–69`); не проверено — масштаб I в этом режиме (у Copter 4.7 — `ATC_ANG_*_P`), номера режимов и биты `LOG_BITMASK` Plane, исключение участков самолётного полёта из интервала; нужен лог QuadPlane пользователя. Ещё: тестовый полёт второго аппарата по плану подготовки (ACRO в положение 6, `FLTMODE6 = 1`) — первый лог «Rate Loop Only» для перекалибровки проверок шага 4; пара логов одного аппарата для проверки памяти; остальные долги из списка выше.
 
 ---
