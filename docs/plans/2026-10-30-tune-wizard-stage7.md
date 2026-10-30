@@ -23,7 +23,7 @@
 
 **Тесты ядра под Node** грузят скрипты через `vm.runInThisContext` в порядке страницы (`load_page_scripts`, как в `tests/tunewizard-summary.test.cjs`). Новые файлы ядра в `DUAL_SCRIPTS` (`eslint.config.mjs`) не добавляются; глобалы страницы ESLint берёт из тегов `<script>` в `TuneWizard/index.html`.
 
-**Проверки (этот компьютер, Windows):** один раз `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci` (Chromium Playwright не нужен — есть Chrome); затем `npm run lint`; `npm test`; `CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe" npm run test:tunewizard-prep` (с задачи 4). Тестового лога здесь нет: `npm run test:tunewizard` пропускается целиком — его прогон на основном компьютере (в PR так и написать). Второй лог `TuneWizard/logs/1 01.01.1970 2-00-00.bin` и `TuneWizard/logs/1.param` (не в git) — для ручной проверки страницы.
+**Проверки (этот компьютер, Windows):** один раз `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci` (Chromium Playwright не нужен — есть Chrome); затем `npm run lint`; `npm test`; `CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe" npm run test:tunewizard-prep` (с задачи 4). Тестового лога здесь нет: `npm run test:tunewizard` без него берёт первый `.bin` в `TuneWizard/logs/` — второй лог — и падает на проверках, привязанных к тестовому логу (память прохода, `test_board`); здесь он не показателен (уточнено ревью задачи 2), прогон — на основном компьютере или после переноса тестового лога (в PR так и написать). `npm run test:tunewizard-log2` здесь идёт. Второй лог `TuneWizard/logs/1 01.01.1970 2-00-00.bin` и `TuneWizard/logs/1.param` (не в git) — для ручной проверки страницы.
 
 **Что уже есть и переиспользуется:**
 
@@ -129,14 +129,15 @@
 
 **Файлы:** создать `tests/fixtures/prep.param`, `tests/tunewizard-prep-browser.cjs`; изменить `package.json` (`"test:tunewizard-prep": "node tests/tunewizard-prep-browser.cjs"`), `tests/tunewizard-browser.cjs` (проверки с логом).
 
-- Фикстура — синтетическая (не файл пользователя), с комментарием-шапкой `#`: без ACRO в `FLTMODE1–6` (1–3 STABILIZE, 4–6 ALT_HOLD), `ACRO_OPTIONS 0`, `ACRO_TRAINER 2`, `INS_RAW_LOG_OPT 0`, `INS_LOG_BAT_MASK 0`, `LOG_BITMASK` без PID и ATTITUDE_FAST, `LOG_BACKEND_TYPE 1`, `LOG_FILE_BUFSIZE 8`, `INS_HNTCH_ENABLE 1`, `INS_HNTCH_MODE 3`, `SERVO_BLH_BDMASK 15`, `FSTRATE_ENABLE 0`, `MOT_HOVER_LEARN 2`.
+- Фикстура — синтетическая (не файл пользователя), с комментарием-шапкой `#`: без ACRO в `FLTMODE1–6` (1–3 STABILIZE, 4–6 ALT_HOLD), `ACRO_OPTIONS 0`, `ACRO_TRAINER 2`, `INS_RAW_LOG_OPT 0`, `INS_LOG_BAT_MASK 0`, `LOG_BITMASK` без PID и ATTITUDE_FAST, `LOG_BACKEND_TYPE 1`, `LOG_FILE_BUFSIZE 8`, `INS_HNTCH_ENABLE 1`, `INS_HNTCH_MODE 3`, `SERVO_BLH_BDMASK 15`, `FSTRATE_ENABLE 0`, `MOT_HOVER_LEARN 2`, `ATC_RAT_RLL_P` (без него блок отказывает: «не похоже на параметры Copter» — правка задачи 2 по ревью).
 - Скрипт — по образцу `tests/tunewizard-browser-log2.cjs` (сервер python, Chrome через `CHROME_PATH`, сбор ошибок консоли), но лог не нужен — тест идёт всегда:
   - открыть мастер, загрузить фикстуру в `#prep0_file`; блок виден, шаги 1–5 недоступны;
   - цель «Фильтры и PID»: fail у `log_pid`, `log_fast`, `gyro_data`, `acro_slot`, `acro_rate_only`, `acro_trainer`; поле положения предлагает 6; `acro_exit` ok;
   - цель «Фильтры» — пунктов Acro и PID нет; цель запоминается после перезагрузки страницы;
   - скачать файл (`page.waitForEvent("download")`): строки `ACRO_OPTIONS,2`, `ACRO_TRAINER,0`, `FLTMODE6,1`, `INS_LOG_BAT_MASK,1`, `INS_LOG_BAT_OPT,4`, `LOG_BITMASK` с битами 0 и 12; заметка называет перезагрузку;
   - план содержит положение 6 и выход положением 1;
-  - «Убрать файл» — блок скрыт; ошибок консоли нет.
+  - «Убрать файл» — блок скрыт; ошибок консоли нет;
+  - отказы: синтетический `.param` без `ATC_RAT_RLL_P` — вердикт «не похоже на параметры Copter», нет списка, файла и плана; двоичный файл (например, байты в scratchpad, не лог пользователя) — «не файл параметров ArduPilot», источник не меняется.
 - `tests/tunewizard-browser.cjs` (с логом, здесь не идёт): на шаге 0 блок по параметрам тестового лога виден; на шаге 5 при пунктах подготовки warn/fail они есть в «что перелететь». Значения — посчитать ядром под Node по параметрам тестового лога заранее нельзя (лога нет) — писать проверки на наличие и порядок, без конкретных чисел.
 
 **Проверки:** lint, `npm test`, `CHROME_PATH=… npm run test:tunewizard-prep`.
