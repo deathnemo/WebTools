@@ -2,21 +2,25 @@
 // zip того же имени рядом. Пилоту не нужны ни репозиторий, ни Python: двойной клик по «Мастер настройки.cmd» в папке
 // поднимает сервер TuneWizard/windows/serve.ps1 (PowerShell 5.1) и открывает мастер в браузере.
 // Запуск: npm run tunewizard:portable [-- --out <папка>] — вручную, в обычные проверки не входит (как скрипт иконки).
-// Выход — dist/ репозитория (в .gitignore) или папка --out; прежняя сборка с тем же именем удаляется и собирается
-// заново. Нужны: Windows (powershell.exe — архив через Compress-Archive) и git (версия — коммит HEAD).
+// Выход — dist/ репозитория (в .gitignore и ignores ESLint) или папка --out вне репозитория (внутри репозитория вне
+// dist/ — отказ: ESLint проверял бы копии); прежняя сборка с тем же именем удаляется и собирается заново. Нужны:
+// Windows (powershell.exe — архив), git (версия — коммит HEAD) и npm ci (espree — разбор скриптов).
 //
 // Состав — списки ниже: TuneWizard/ без logs/ (логи пилота), FilterReview/ и PIDReview/ целиком (кнопки «Открыть в …»
 // работают без интернета), из Libraries/, modules/ и images/ — только файлы, на которые ссылаются три страницы и их
 // скрипты; в корне — «Мастер настройки.cmd» (CRLF: в git он с LF) и «Прочитай меня.txt» (текст — здесь; UTF-8 с BOM и
 // CRLF, чтобы Блокнот любой Windows показал кириллицу). Файлы копируются, а не ссылки: символьная ссылка или junction в
-// составе — ошибка сборки. После копирования — проверка ссылок собранной папки: у каждого относительного src/href трёх
-// страниц и у каждого строкового import('…'), fetch("…"), load_param_inputs("…"), step_open_in("…") в их скриптах и
-// скриптах TuneWizard/ должен быть файл — иначе ошибка с перечнем (защита от «забыли новый файл»; внешние http(s)://,
-// «#…», data: пропускаются). Незакоммиченные изменения в файлах состава (и в этом скрипте — он пишет «Прочитай меня») —
-// предупреждение и «+изменения» в версии и имени.
+// составе — ошибка сборки; файл лога .bin и игнорируемое git (кроме TuneWizard/logs/) в составе — тоже: логи пилота не
+// должны уйти в архив. После копирования — проверка ссылок собранной папки: у каждого относительного src/href трёх
+// страниц и у каждого строкового import('…'), fetch("…"), load_param_inputs("…"), step_open_in("…") во встроенных
+// скриптах страниц, в их скриптах и скриптах TuneWizard/ (вызовы в комментариях не считаются) должен быть файл — иначе
+// ошибка с перечнем (защита от «забыли новый файл»; внешние http(s)://, «#…», data: пропускаются). Незакоммиченные
+// изменения в файлах состава (и в этом скрипте — он пишет «Прочитай меня») — предупреждение и «+изменения» в версии и
+// имени. В конце — команда теста сервера на собранной папке (tests/tunewizard-serve.cjs).
 const fs = require('node:fs')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
+const espree = require('espree')
 
 const repo = path.resolve(__dirname, '..')
 const title = 'Мастер настройки'
@@ -25,9 +29,10 @@ const readme_name = 'Прочитай меня.txt'
 const address = 'http://127.0.0.1:8000/TuneWizard/'
 // Пометка версии при незакоммиченных изменениях в файлах состава
 const dirty_mark = '+изменения'
-// Папки целиком (пути от корня репозитория через «/») и исключённое из них
+// Папки целиком (пути от корня репозитория через «/») и исключённое из них — без учёта регистра, как в Windows
+// (TuneWizard/Logs — та же папка логов)
 const whole_dirs = ['TuneWizard', 'FilterReview', 'PIDReview']
-const excluded = ['TuneWizard/logs']
+const excluded = ['tunewizard/logs']
 // Отдельные файлы — то, на что ссылаются страницы мастера, FilterReview и PIDReview (сверяется проверкой ссылок)
 const single_files = [
     // Общие скрипты WebTools (теги <script> страниц)
@@ -57,17 +62,24 @@ const single_files = [
 ]
 // Страницы, ссылки которых проверяются после сборки
 const pages = ['TuneWizard/index.html', 'FilterReview/index.html', 'PIDReview/index.html']
-// Чего в собранной папке быть не должно (имя любой папки пути)
+// Чего в собранной папке быть не должно (имя любой папки пути, без учёта регистра)
 const forbidden_dirs = ['logs', '.git', 'node_modules', 'tests']
+// Расширение логов полёта: такой файл в составе — ошибка сборки
+const log_ext = '.bin'
+const usage = 'запуск: node tests/tunewizard-portable.cjs [--out <папка>]'
 
-// Аргументы командной строки → { out } (папка выхода или null — dist/ репозитория); неизвестный аргумент — ошибка
+// Аргументы командной строки → { out } (папка выхода или null — dist/ репозитория); неизвестный аргумент или --out без
+// папки — ошибка
 function parse_args(argv) {
     const args = { out: null }
     for (let i = 0; i < argv.length; i++) {
-        if ((argv[i] === '--out') && (i + 1 < argv.length)) {
+        if (argv[i] === '--out') {
+            if ((i + 1 >= argv.length) || argv[i + 1].startsWith('--')) {
+                throw new Error('укажите папку после --out; ' + usage)
+            }
             args.out = argv[++i]
         } else {
-            throw new Error('неизвестный аргумент «' + argv[i] + '»; запуск: node tests/tunewizard-portable.cjs [--out <папка>]')
+            throw new Error('неизвестный аргумент «' + argv[i] + '»; ' + usage)
         }
     }
     return args
@@ -75,7 +87,36 @@ function parse_args(argv) {
 
 // Команда git в репозитории → вывод без концевых пробелов; имена файлов — как есть (без \-кодирования кириллицы)
 function git(args) {
-    return execFileSync('git', ['-C', repo, '-c', 'core.quotepath=false', ...args], { encoding: 'utf8' }).trimEnd()
+    try {
+        return execFileSync('git', ['-C', repo, '-c', 'core.quotepath=false', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd()
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            throw new Error('не найден git — сборка нужна из репозитория с git (версия — коммит HEAD)')
+        }
+        throw new Error('git ' + args.join(' ') + ': ' + ((e.stderr ?? '').toString().trim() || e.message))
+    }
+}
+
+// Путь target внутри папки base или совпадает с ней (сравнение — как у path.relative: без учёта регистра в Windows)
+function is_inside(base, target) {
+    const rel = path.relative(base, target)
+    return !((rel === '..') || rel.startsWith('..' + path.sep) || path.isAbsolute(rel))
+}
+
+// Настоящий путь папки p (junction и ссылки раскрыты), даже если её ещё нет: раскрывается ближайшая существующая
+// папка пути, остаток добавляется как есть — папка выхода не создаётся до проверок
+function real_dir(p) {
+    let head = path.resolve(p)
+    const tail = []
+    while (!fs.existsSync(head)) {
+        const parent = path.dirname(head)
+        if (parent === head) {
+            break
+        }
+        tail.unshift(path.basename(head))
+        head = parent
+    }
+    return path.join(fs.realpathSync.native(head), ...tail)
 }
 
 // Путь от корня репозитория через «/» → полный путь
@@ -95,12 +136,18 @@ function check_not_link(rel) {
     }
 }
 
+// Исключён ли путь rel (от корня через «/») из состава: он сам или папка из excluded выше него, без учёта регистра
+function is_excluded(rel) {
+    const lower = rel.toLowerCase()
+    return excluded.some((ex) => (lower === ex) || lower.startsWith(ex + '/'))
+}
+
 // Файлы папки rel (от корня репозитория) рекурсивно, кроме excluded → пути от корня через «/»; ссылка или junction —
-// ошибка, прочее (не файл и не папка) — тоже
+// ошибка, прочее (не файл и не папка) — тоже; файл лога .bin — ошибка (лог пилота не должен уйти в архив)
 function walk(rel, out) {
     for (const entry of fs.readdirSync(full(rel)).sort()) {
         const sub = rel + '/' + entry
-        if (excluded.includes(sub)) {
+        if (is_excluded(sub)) {
             continue
         }
         const stat = fs.lstatSync(full(sub))
@@ -109,6 +156,9 @@ function walk(rel, out) {
         } else if (stat.isDirectory()) {
             walk(sub, out)
         } else if (stat.isFile()) {
+            if (sub.toLowerCase().endsWith(log_ext)) {
+                throw new Error('в составе файл лога ' + log_ext + ': ' + sub + ' — логи кладите в TuneWizard/logs/ (в сборку не идёт)')
+            }
             out.push(sub)
         } else {
             throw new Error('в составе не файл и не папка: ' + sub)
@@ -117,12 +167,25 @@ function walk(rel, out) {
     return out
 }
 
-// Состав (без файлов, которые сборка пишет сама) → пути от корня через «/»; нет файла списка — ошибка с подсказкой
+// Игнорируемое git в папках состава (строки «!!» git status --ignored), кроме excluded → пути от корня через «/»
+// (папка целиком — с «/» в конце). Такое не в git, но лежит рядом (копии, логи, резервные файлы) и ушло бы в архив
+function ignored_files() {
+    const status = git(['status', '--porcelain', '--ignored', '--', ...whole_dirs])
+    return status.split('\n').filter((line) => line.startsWith('!! ')).map((line) => line.slice(3))
+        .filter((rel) => !is_excluded(rel.replace(/\/$/, '')))
+}
+
+// Состав (без файлов, которые сборка пишет сама) → пути от корня через «/»; нет файла списка — ошибка с подсказкой;
+// игнорируемое git в папках состава — ошибка с перечнем
 function collect() {
     const files = []
     for (const dir of whole_dirs) {
         check_not_link(dir)
         walk(dir, files)
+    }
+    const ignored = ignored_files()
+    if (ignored.length) {
+        throw new Error('в папках состава файлы, которые git игнорирует (в git их нет — уберите или перенесите):\n  ' + ignored.join('\n  '))
     }
     for (const rel of single_files) {
         if (!fs.existsSync(full(rel))) {
@@ -158,10 +221,10 @@ function today() {
 }
 
 // Удалить прежнюю сборку target (папку или файл), только если она прямо внутри папки выхода out; ссылку не удалять —
-// удаление могло бы задеть её цель
+// удаление могло бы задеть её цель. Файл занят (EPERM, EBUSY) — понятное сообщение: часть уже могла быть удалена.
+// e.path не показывается: rmSync отдаёт там папку, а не занятый файл, и кириллицу — нечитаемой (\\?\-путь)
 function remove_old(out, target) {
-    const rel = path.relative(out, target)
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) {
+    if ((path.dirname(target) !== out) || (path.basename(target) === '')) {
         throw new Error('удаление вне папки выхода запрещено: ' + target)
     }
     if (!fs.existsSync(target)) {
@@ -170,7 +233,15 @@ function remove_old(out, target) {
     if (fs.lstatSync(target).isSymbolicLink()) {
         throw new Error('на месте сборки символьная ссылка или junction — удалите её вручную: ' + target)
     }
-    fs.rmSync(target, { recursive: true, force: true })
+    try {
+        fs.rmSync(target, { recursive: true, force: true })
+    } catch (e) {
+        if (['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) {
+            throw new Error('не удалось удалить прежнюю сборку ' + target + ': файл занят (' + e.code + ') — закройте окно мастера из ' +
+                            'прежней сборки или архиватор, держащий файл, и соберите снова')
+        }
+        throw e
+    }
 }
 
 // «Мастер настройки.cmd» в папку dir: UTF-8 без BOM, концы строк CRLF (cmd читает файл построчно; в git он с LF)
@@ -183,8 +254,9 @@ function write_launcher(dir) {
 }
 
 // Текст «Прочитай меня.txt» для версии version (строка «2026-10-30, коммит 810a5ff…»); строки — до 100 знаков: в
-// старом Блокноте перенос по словам выключен
+// старом Блокноте перенос по словам выключен. Файл запуска назван так, как его видно в Проводнике (расширения скрыты)
 function readme_text(version) {
+    const launcher = '«' + title + '» (файл .cmd)'
     return [
         'Мастер настройки (TuneWizard) — переносная папка',
         'Версия: ' + version,
@@ -192,14 +264,18 @@ function readme_text(version) {
         'ЧТО ЭТО',
         'Пошаговый мастер настройки ArduCopter по одному логу полёта .bin: проверки лога, спектр шума,',
         'гармонический notch, низкочастотные фильтры, PID по осям, сводка и файл .param. Мастер предлагает',
-        'значения — вы подтверждаете. В папке есть и FilterReview с PIDReview из ArduPilot WebTools',
-        '(кнопки «Открыть в …»). Всё работает на этом компьютере: лог никуда не отправляется, интернет',
-        'не нужен (без него шрифты страницы — системные).',
+        'значения — вы подтверждаете. Мастер работает на этом компьютере: лог никуда не отправляется,',
+        'интернет мастеру не нужен (без него шрифты страницы — системные).',
+        '',
+        'В папке есть и FilterReview с PIDReview из ArduPilot WebTools — их открывают кнопки мастера',
+        '«Открыть в …». В самих FilterReview и PIDReview кнопки «Hardware Report», «MAGFit» и «Open in',
+        'filter tool» работают только на сайте WebTools (этих инструментов в папке нет), а UAV Log Viewer —',
+        'сайт, ему нужен интернет.',
         '',
         'КАК ЗАПУСТИТЬ',
         '1. Распакуйте весь архив в папку — файлы прямо из архива не запускаются.',
-        '2. Дважды щёлкните «' + launcher_name + '». Откроется окно консоли, а мастер — в браузере по адресу',
-        '   ' + address,
+        '2. Дважды щёлкните ' + launcher + '. Откроется окно консоли, а мастер — в браузере по',
+        '   адресу ' + address,
         '3. На шаге 0 выберите лог .bin.',
         '',
         'При первом запуске файла из интернета Windows может спросить «Запустить этот файл?» — нажмите',
@@ -209,8 +285,8 @@ function readme_text(version) {
         '',
         'КАК ОСТАНОВИТЬ',
         'Закройте окно консоли — мастер остановится: открытая вкладка перестанет загружать файлы. Чтобы',
-        'продолжить, снова запустите «' + launcher_name + '». Если окно уже открыто, повторный запуск',
-        'просто откроет вкладку.',
+        'продолжить, снова запустите ' + launcher + '. Если окно уже открыто, повторный',
+        'запуск просто откроет вкладку.',
         '',
         'БРАУЗЕР',
         'Нужен Google Chrome или Microsoft Edge. Мастер открывается в браузере, который выбран в Windows по',
@@ -226,7 +302,7 @@ function readme_text(version) {
         '- «Порт 8000 занят другой программой» — закройте её и запустите мастер снова. Другой порт мастер',
         '  не берёт: память прохода привязана к адресу.',
         '- «Уже работает мастер из другой папки» — закройте окно консоли другой версии мастера.',
-        '- «Распакуйте весь архив» — «' + launcher_name + '» запущен не из своей папки.',
+        '- «Распакуйте весь архив» — ' + launcher + ' запущен не из своей папки.',
         '',
     ].join('\r\n')
 }
@@ -274,10 +350,19 @@ function ref_exists(dir, rel) {
     return fs.statSync(file).isFile() || fs.existsSync(path.join(file, 'index.html'))
 }
 
-// Ссылки страницы html: значения src/href тегов (без комментариев и тела встроенных <script>/<style> — там «<» бывает
-// не тегом) и src тегов <script> — скрипты страницы
+// Ссылки страницы html (без HTML-комментариев): значения src/href тегов (без тела встроенных <script>/<style> — там
+// «<» бывает не тегом), src тегов <script> — скрипты страницы, и тела встроенных скриптов JavaScript (без type, или
+// module, text/javascript, application/javascript)
 function page_refs(html) {
-    const text = html.replace(/<!--[\s\S]*?-->/g, '').replace(/(<(script|style)\b[^>]*>)[\s\S]*?(<\/\2\s*>)/gi, '$1$3')
+    const no_comments = html.replace(/<!--[\s\S]*?-->/g, '')
+    const inline = []
+    for (const [, attrs, body] of no_comments.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+        const type = attrs.match(/\btype\s*=\s*["']?([^"'\s>]+)/i)?.[1].toLowerCase()
+        if (!/\ssrc\s*=/i.test(attrs) && ((type == null) || ['module', 'text/javascript', 'application/javascript'].includes(type))) {
+            inline.push(body)
+        }
+    }
+    const text = no_comments.replace(/(<(script|style)\b[^>]*>)[\s\S]*?(<\/\2\s*>)/gi, '$1$3')
     const refs = []
     const scripts = []
     for (const [tag] of text.matchAll(/<[a-z][^>]*>/gi)) {
@@ -289,59 +374,93 @@ function page_refs(html) {
             }
         }
     }
-    return { refs: refs, scripts: scripts }
+    return { refs: refs, scripts: scripts, inline: inline }
 }
 
-// Строковые адреса в скрипте: import('…') — от адреса скрипта; fetch("…"), load_param_inputs("…") (грузит описания
-// параметров), step_open_in("…") (открывает инструмент) — от адреса страницы. Только строка целиком (за ней «,» или
-// «)»): начало адреса («"../x/" + name») и шаблон с ${…} — не адрес, пропуск
+// Вызовы, строковый аргумент которых — адрес файла папки
+const ref_calls = ['import', 'fetch', 'load_param_inputs', 'step_open_in']
+
+// Строковые адреса в исходнике скрипта source: import('…') — от адреса скрипта; fetch("…"), load_param_inputs("…")
+// (грузит описания параметров), step_open_in("…") (открывает инструмент) — от адреса страницы. По лексемам espree, а
+// не по тексту: вызовы в комментариях не считаются, «/» регулярного выражения не путается с комментарием. Адрес —
+// только строка целиком (за ней «,» или «)»): начало адреса («"../x/" + name») и шаблон с ${…} — пропуск. Итог —
+// [{ call, ref }]; скрипт не разобран — исключение
 function script_refs(source) {
+    const tokens = espree.tokenize(source, { ecmaVersion: 'latest', sourceType: 'script' })
     const out = []
-    for (const m of source.matchAll(/\b(import|fetch|load_param_inputs|step_open_in)\(\s*(["'`])([^"'`$]*)\2(?=\s*[,)])/g)) {
-        out.push({ call: m[1], ref: m[3] })
+    for (let i = 0; i + 3 < tokens.length; i++) {
+        const name = tokens[i]
+        const arg = tokens[i + 2]
+        const next = tokens[i + 3].value
+        const whole = (arg.type === 'String') || ((arg.type === 'Template') && (arg.value.length >= 2) && arg.value.startsWith('`') && arg.value.endsWith('`'))
+        if (((name.type === 'Identifier') || (name.type === 'Keyword')) && ref_calls.includes(name.value) && (tokens[i + 1].value === '(') && whole &&
+            ((next === ',') || (next === ')'))) {
+            out.push({ call: name.value, ref: arg.value.slice(1, -1) })
+        }
     }
     return out
 }
 
-// Проверка ссылок собранной папки dir: страницы pages, их скрипты и все скрипты TuneWizard/ (страница —
-// TuneWizard/index.html). Итог — { checked: число разных проверенных файлов, used: Set путей, missing: [строки без
-// повторов — одна картинка-подсказка встречается на странице десятки раз] }
+// Проверка ссылок собранной папки dir: страницы pages, их встроенные скрипты (база — адрес страницы), их скрипты и все
+// скрипты TuneWizard/ (страница — TuneWizard/index.html). Итог — { checked: число разных проверенных файлов, used: Set
+// путей, problems: [строки без повторов — одна картинка-подсказка встречается на странице десятки раз] }
 function check_links(dir) {
     const used = new Set()
-    const missing = new Set()
+    const problems = new Set()
     const scripts_seen = new Set()
+    // Ссылка ref от адреса base (where — откуда она, для сообщения) → путь файла или null; не разобрана — в problems
+    function resolve(ref, base, where) {
+        try {
+            return resolve_ref(ref, base)
+        } catch (e) {
+            problems.add('ссылка не разобрана — ' + where + ': «' + ref + '» (' + e.message + ')')
+            return null
+        }
+    }
     function check(ref, base, where) {
-        const target = resolve_ref(ref, base)
+        const target = resolve(ref, base, where)
         if (target == null) {
             return
         }
         used.add(target)
         if (!ref_exists(dir, target)) {
-            missing.add(where + ': «' + ref + '» → ' + target)
+            problems.add('ссылка без файла — ' + where + ': «' + ref + '» → ' + target)
+        }
+    }
+    // Адреса исходника source: import — от script_base, остальные — от page; where — откуда, для сообщений
+    function check_source(source, script_base, page, where) {
+        let found = null
+        try {
+            found = script_refs(source)
+        } catch (e) {
+            problems.add('скрипт не разобран — ' + where + ': ' + e.message)
+            return
+        }
+        for (const { call, ref } of found) {
+            check(ref, (call === 'import') ? script_base : page, where + ' ' + call + '()')
         }
     }
     function check_script(script, page) {
-        const key = script + ' ' + page
-        if (scripts_seen.has(key) || !fs.existsSync(path.join(dir, ...script.split('/')))) {
+        const file = path.join(dir, ...script.split('/'))
+        if (scripts_seen.has(script + ' ' + page) || !fs.existsSync(file)) {
             return
         }
-        scripts_seen.add(key)
-        for (const { call, ref } of script_refs(fs.readFileSync(path.join(dir, ...script.split('/')), 'utf8'))) {
-            check(ref, (call === 'import') ? script : page, script + ' ' + call + '()')
-        }
+        scripts_seen.add(script + ' ' + page)
+        check_source(fs.readFileSync(file, 'utf8'), script, page, script)
     }
     for (const page of pages) {
         const file = path.join(dir, ...page.split('/'))
         if (!fs.existsSync(file)) {
-            missing.add('нет страницы ' + page)
+            problems.add('нет страницы ' + page)
             continue
         }
-        const { refs, scripts } = page_refs(fs.readFileSync(file, 'utf8'))
+        const { refs, scripts, inline } = page_refs(fs.readFileSync(file, 'utf8'))
         for (const ref of refs) {
             check(ref, page, page)
         }
+        inline.forEach((body, n) => check_source(body, page, page, page + ', встроенный скрипт ' + (n + 1)))
         for (const src of scripts) {
-            const script = resolve_ref(src, page)
+            const script = resolve(src, page, page)
             if (script != null) {
                 check_script(script, page)
             }
@@ -352,19 +471,27 @@ function check_links(dir) {
             check_script('TuneWizard/' + rel, 'TuneWizard/index.html')
         }
     }
-    return { checked: used.size, used: used, missing: [...missing] }
+    return { checked: used.size, used: used, problems: [...problems] }
 }
 
-// Архив zip папки dir (папка — верхний уровень архива) через Compress-Archive PowerShell. Пути — через переменные
-// окружения и -LiteralPath: кириллица и пробелы не требуют кавычек, «[ ]» не читаются как подстановка
+// Архив zip содержимого папки dir — файлы в корне архива, без верхней папки: «Извлечь все» Проводника само кладёт их
+// в папку с именем архива (с верхней папкой вышла бы папка в папке). PowerShell 5.1, ZipFile.CreateFromDirectory
+// с переключателем UseBackslash = false — разделитель в путях записей «/», как требует формат zip (Compress-Archive
+// PowerShell 5.1 и CreateFromDirectory по умолчанию пишут «\»); имена с кириллицей — UTF-8. Пути — через переменные
+// окружения: кириллица, пробелы и «[ ]» не требуют кавычек и не читаются как подстановка. Вывод PowerShell — UTF-8,
+// чтобы сообщение об ошибке пришло читаемым
 function make_zip(dir, zip) {
-    const command = "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; " +
-        'Compress-Archive -LiteralPath $env:TW_PORTABLE_DIR -DestinationPath $env:TW_PORTABLE_ZIP -CompressionLevel Optimal'
+    const command = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; " +
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+        "[AppContext]::SetSwitch('Switch.System.IO.Compression.ZipFile.UseBackslash', $false); " +
+        "[IO.Compression.ZipFile]::CreateFromDirectory($env:TW_PORTABLE_DIR, $env:TW_PORTABLE_ZIP, 'Optimal', $false)"
     try {
         execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', command],
                      { env: { ...process.env, TW_PORTABLE_DIR: dir, TW_PORTABLE_ZIP: zip }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     } catch (e) {
-        throw new Error('Compress-Archive не создал архив ' + zip + ': ' + (e.stderr ? e.stderr.toString() : e.message))
+        // CreateFromDirectory при сбое оставляет пустой или неполный архив — его раздавать нельзя
+        fs.rmSync(zip, { force: true })
+        throw new Error('PowerShell не создал архив ' + zip + ': ' + (e.stderr ? e.stderr.toString('utf8').trim() : e.message))
     }
 }
 
@@ -375,16 +502,16 @@ function mb(bytes) {
 
 function main() {
     if (process.platform !== 'win32') {
-        throw new Error('сборка переносной папки — на Windows (архив через PowerShell Compress-Archive)')
+        throw new Error('сборка переносной папки — на Windows (архив через PowerShell)')
     }
     const args = parse_args(process.argv.slice(2))
-    const out = path.resolve(args.out ?? path.join(repo, 'dist'))
-    // Папка выхода внутри папки состава попала бы в следующую сборку
-    for (const rel of [...whole_dirs, 'Libraries', 'images', 'modules']) {
-        const inside = path.relative(full(rel), out)
-        if (!inside.startsWith('..') && !path.isAbsolute(inside)) {
-            throw new Error('папка выхода внутри папки состава ' + rel + ': ' + out)
-        }
+    // Папка выхода — настоящий путь (junction раскрыт): внутри репозитория — только dist/ (в .gitignore и ignores
+    // ESLint); где-то ещё в репозитории сборка попала бы в следующую сборку (папка состава) или в проверку ESLint
+    const repo_real = fs.realpathSync.native(repo)
+    const out = real_dir(args.out ?? path.join(repo, 'dist'))
+    if (is_inside(repo_real, out) && !is_inside(path.join(repo_real, 'dist'), out)) {
+        throw new Error('папка выхода внутри репозитория вне dist/: ' + out + ' — ESLint проверял бы копии страниц и modules/, а папка ' +
+                        'состава попала бы в следующую сборку; укажите папку вне репозитория или соберите без --out (в dist/)')
     }
 
     const files = collect()
@@ -409,10 +536,11 @@ function main() {
 
     // Проверки собранной папки; не прошли — папка удаляется, архива нет (такую папку раздавать нельзя)
     const built = list_files(target)
-    const problems = built.filter(({ rel }) => rel.split('/').slice(0, -1).some((part) => forbidden_dirs.includes(part)))
+    const problems = built.filter(({ rel }) => rel.toLowerCase().split('/').slice(0, -1).some((part) => forbidden_dirs.includes(part)) ||
+                                               rel.toLowerCase().endsWith(log_ext))
         .map(({ rel }) => 'лишнее в папке: ' + rel)
     const links = check_links(target)
-    problems.push(...links.missing.map((line) => 'ссылка без файла — ' + line))
+    problems.push(...links.problems)
     if (problems.length) {
         fs.rmSync(target, { recursive: true, force: true })
         throw new Error('сборка не прошла проверку, папка удалена:\n  ' + problems.join('\n  '))
@@ -430,6 +558,7 @@ function main() {
     console.log('tunewizard-portable: ' + target)
     console.log('  файлов ' + built.length + ', ' + mb(size) + '; архив ' + path.basename(zip) + ' — ' + mb(fs.statSync(zip).size))
     console.log('  ссылки страниц и скриптов: ' + links.checked + ' файлов, все на месте')
+    console.log('  проверка сервера на этой папке: node tests/tunewizard-serve.cjs "' + target + '" (нужен CHROME_PATH или Chromium Playwright)')
 }
 
 try {
