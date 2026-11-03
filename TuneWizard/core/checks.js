@@ -1,5 +1,7 @@
 // Проверки пригодности лога (шаг 0). Чистые функции без DOM.
 // Источники порогов: [wiki] — ardupilot.org, [код] — исходники ArduPilot, [наше] — эвристика, у ArduPilot числа нет.
+// Глобал страницы, без которого файл работает: decode_devid и DEVICE_TYPE_IMU (Libraries/DecodeDevID.js) — тип гироскопа
+// для «до/после фильтров» batch (check_gyro_sensor_rate); без них (под Node через require) тип не определить.
 
 const check_rules = {
     vibe_warn: 30,                  // м/с²: выше — возможны проблемы [wiki, Measuring Vibration]
@@ -38,6 +40,75 @@ const check_rules = {
     // фильтров (бит 3); бит IMU_RAW в LOG_BITMASK не нужен — он пишет raw всех гироскопов и акселерометров
     // [код] AP_InertialSensor/AP_InertialSensor_Backend.cpp:480–487, 489–492, 750–751. Подготовка — prep_rules.raw_hint
     gyro_raw_hint: 9,
+    // Выборку на частоте датчика (Sensor-Rate, бит 0 INS_LOG_BAT_OPT) включают только драйверы Invensense v1 и v2 — при
+    // быстрой выборке (INS_FAST_SAMPLE) и только по SPI [код] AP_InertialSensor/AP_InertialSensor_Invensense.cpp:889–922,
+    // AP_InertialSensor_Invensensev2.cpp:611–638 (других вызовов _set_gyro_sensor_rate_sampling_enabled нет); на
+    // остальных датчиках бит 0 batch не действует [код] BatchSampler.cpp:103–115. Типы устройств гироскопа этих драйверов —
+    // имена Libraries/DecodeDevID.js (decode_devid): Invensense — GYR_MPU6000 (и MPU6000, MPU6500, ICM20608), GYR_MPU9250,
+    // ICM20602, ICM20601, ICM20789, ICM20689 [код] AP_InertialSensor_Invensense.cpp:240–283; Invensensev2 — ICM20648,
+    // ICM20649, ICM20948 [код] AP_InertialSensor_Invensensev2.cpp:188–206. ICM42688, ICM45686 и другие Invensensev3, BMI088 и
+    // прочие — не включают. [лог] третий лог: ICM45686, при INS_LOG_BAT_OPT = 5 «после» — настоящее после фильтров
+    // (журнал, раздел 8)
+    gyro_sensor_rate_names: ["GYR_MPU6000", "GYR_MPU9250", "ICM20602", "ICM20601", "ICM20789", "ICM20689", "ICM20648", "ICM20649", "ICM20948"],
+    gyro_sensor_rate_bus: "SPI",
+}
+
+// Имя параметра типа гироскопа экземпляра i (0…4): INS_GYR_ID, INS_GYR2_ID, INS_GYR3_ID, INS4_GYR_ID, INS5_GYR_ID —
+// первые три читает и подпись датчика шага 1 (load_gyro, core/gyro.js) [код] AP_InertialSensor.cpp (группы INS_, INS4_, INS5_)
+function check_gyro_id_param(i) {
+    return (i == 0) ? "INS_GYR_ID" : (i < 3) ? "INS_GYR" + (i + 1) + "_ID" : "INS" + (i + 1) + "_GYR_ID"
+}
+
+// Гироскопы batch и выборка на частоте датчика (бит 0 INS_LOG_BAT_OPT, check_rules.gyro_sensor_rate_*) →
+// { sensor_rate, other, unknown } — подписи гироскопов «ИМЯ (параметр)»: sensor_rate — драйвер включает выборку на
+// частоте датчика (Invensense v1/v2 по SPI), other — не включает, unknown — тип не определить (параметра типа нет или он
+// 0, decode_devid недоступен). Гироскопы — экземпляры из INS_LOG_BAT_MASK (нет параметра — все пять, у которых есть
+// параметр типа); тип — по INS_GYR*_ID через decode_devid (Libraries/DecodeDevID.js, глобал страницы; под Node без него —
+// unknown), как подпись датчика шага 1. Тип вне таблицы decode_devid («Unknown») — не Invensense v1/v2: их типы в таблице
+// есть. На Invensense v1/v2 выборку на частоте датчика выключает ещё INS_FAST_SAMPLE без бита экземпляра — не
+// учитывается (бит — по номеру акселерометра, AP_InertialSensor_Backend.h:333–335): предупреждение тогда лишнее, но
+// безвредное [наше]
+function check_gyro_sensor_rate(params) {
+    const r = check_rules
+    const mask = params.get("INS_LOG_BAT_MASK")
+    const result = { sensor_rate: [], other: [], unknown: [] }
+    const decoder = (typeof decode_devid === "function") && (typeof DEVICE_TYPE_IMU !== "undefined")
+    for (let i = 0; i < 5; i++) {
+        const name = check_gyro_id_param(i)
+        const id = params.get(name)
+        if ((mask != null) ? ((mask & (1 << i)) === 0) : (id == null)) {
+            continue
+        }
+        if (!decoder || (id == null) || !(id > 0)) {
+            result.unknown.push(name)
+            continue
+        }
+        const decoded = decode_devid(id, DEVICE_TYPE_IMU)
+        const sensor_rate = (decoded.bus_type === r.gyro_sensor_rate_bus) && r.gyro_sensor_rate_names.includes(decoded.name)
+        // Тип вне таблицы — номером из ID (у DroneCAN decode_devid вместо devtype отдаёт sensor_id)
+        const label = ((decoded.name !== "Unknown") ? decoded.name : "тип 0x" + (id >> 16).toString(16)) + " (" + name + ")"
+        result[sensor_rate ? "sensor_rate" : "other"].push(label)
+    }
+    return result
+}
+
+// Batch с битами 0 (Sensor-Rate) и 2 (до и после) без бита 1 → { status: "ok" | "warn", reason } по гироскопам batch
+// (check_gyro_sensor_rate): есть гироскоп с выборкой на частоте датчика — warn, обе половины сырые; тип какого-то не
+// определить (или гироскопов batch нет — INS_LOG_BAT_MASK = 0) — warn с оговоркой «если датчик Invensense v1/v2»; все
+// известны и без неё — ok, бит 0 не действует. reason — продолжение фразы после «… вместе с битом 0 (Sensor-Rate) — »;
+// effect — чем это плохо (у шага 0 и у подготовки свои слова), конец reason при warn. Одно правило для pre_post шага 0 и
+// gyro_prepost подготовки (core/prep.js) [дизайн этапа 9, раздел 5: итог сверки задачи 2]
+function check_sensor_rate_prepost(params, effect) {
+    const g = check_gyro_sensor_rate(params)
+    if (g.sensor_rate.length > 0) {
+        return { status: "warn", reason: g.sensor_rate.join(", ") + " — Invensense v1/v2: драйвер включает выборку на частоте датчика (по SPI с быстрой " +
+            "выборкой), и обе половины batch — сырые, до фильтров: " + effect }
+    }
+    if ((g.unknown.length > 0) || (g.other.length === 0)) {
+        return { status: "warn", reason: "тип гироскопа не определить" + ((g.unknown.length > 0) ? " (" + g.unknown.join(", ") + ")" : "") +
+            ": если датчик Invensense v1/v2 (по SPI с быстрой выборкой), обе половины batch — сырые, до фильтров: " + effect }
+    }
+    return { status: "ok", reason: g.other.join(", ") + ": драйвер не включает выборку на частоте датчика — бит 0 не действует" }
 }
 
 // info — из log_info (в том числе info.esc — сводка ESC-телеметрии; info.profile — профиль аппарата core/vehicle.js,
@@ -143,7 +214,9 @@ function run_checks(info, params, vibe) {
         // - с битом 0 на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI с быстрой выборкой
         //   [код] AP_InertialSensor_Invensense.cpp:889–922, AP_InertialSensor_Invensensev2.cpp:611–638) batch берёт только
         //   сырые отсчёты — обе половины до фильтров [код] BatchSampler.cpp:103–115, AP_InertialSensor_Backend.cpp:503–508,
-        //   727–738; на остальных датчиках бит 0 не действует, и с битом 1 обе половины — после фильтров.
+        //   727–738; на остальных датчиках бит 0 не действует, и с битом 1 обе половины — после фильтров. Бит 0 с битом 2
+        //   без бита 1 — warn, только если такой датчик в batch есть или тип не определить (check_sensor_rate_prepost: тип —
+        //   по INS_GYR*_ID); на остальных — до и после, ok [дизайн этапа 9, раздел 5; лог ICM45686 — журнал, раздел 8].
         // Исправление одно — INS_LOG_BAT_OPT = 4 (gyro_batch_fix) и перезагрузка: флаги batch при смене параметра только
         // выставляются, не сбрасываются (BatchSampler.cpp:97–102) — снятый бит 1 действует после перезагрузки [наше, по
         // коду]. То же правило — gyro_prepost в core/prep.js
@@ -153,16 +226,25 @@ function run_checks(info, params, vibe) {
         const prepost = (opt & (1 << 2)) != 0
         const fix = "Запишите INS_LOG_BAT_OPT = " + r.gyro_batch_fix.INS_LOG_BAT_OPT + " (только бит 2 — до и после фильтров) и перезагрузите полётный контроллер"
         const fix_post = fix + ": флаг «после фильтров» сбрасывается только перезагрузкой"
-        if (prepost && (post || sensor_rate)) {
-            const others = [sensor_rate ? "битом 0 (Sensor-Rate)" : null, post ? "битом 1 (после фильтров)" : null].filter((t) => t != null)
+        const prepost_ok = "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными"
+        if (prepost && sensor_rate && !post) {
+            const rate = check_sensor_rate_prepost(params, "спектр «после фильтров» на шаге 1 на самом деле до фильтров")
+            if (rate.status === "warn") {
+                add("pre_post", "warn", "До/после фильтров", "Batch-лог с INS_LOG_BAT_OPT = " + opt + ": бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — " + rate.reason, fix)
+            } else {
+                add("pre_post", "ok", "До/после фильтров", prepost_ok + "; бит 0 (Sensor-Rate) в INS_LOG_BAT_OPT = " + opt + " — " + rate.reason)
+            }
+        } else if (prepost && post) {
+            // С битом 1 — warn при любом датчике: на Invensense v1/v2 с битом 0 обе половины сырые, на остальных — обе после
+            // фильтров
+            const others = [sensor_rate ? "битом 0 (Sensor-Rate)" : null, "битом 1 (после фильтров)"].filter((t) => t != null)
             const reason = !sensor_rate ? "обе половины пишутся после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров"
-                : "на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины — сырые, до фильтров" +
-                  (post ? ", на остальных бит 1 даёт обе после фильтров: «до» и «после» на шаге 1 не различаются"
-                      : ": спектр «после фильтров» на шаге 1 на таких датчиках на самом деле до фильтров")
+                : "на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины — сырые, до фильтров, на остальных бит 1 даёт обе " +
+                  "после фильтров: «до» и «после» на шаге 1 не различаются"
             add("pre_post", "warn", "До/после фильтров", "Batch-лог с INS_LOG_BAT_OPT = " + opt + ": бит 2 (до и после) вместе с " + others.join(" и ") + " — " + reason,
-                post ? fix_post : fix)
+                fix_post)
         } else if (prepost) {
-            add("pre_post", "ok", "До/после фильтров", "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными")
+            add("pre_post", "ok", "До/после фильтров", prepost_ok)
         } else if (post) {
             add("pre_post", "warn", "До/после фильтров", "Batch-лог только после фильтров: спектра до фильтров и оценки «станет» не будет", fix_post)
         } else {
@@ -294,5 +376,5 @@ function checks_summary(checks) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { check_rules, run_checks, checks_summary }
+    module.exports = { check_rules, check_gyro_id_param, check_gyro_sensor_rate, check_sensor_rate_prepost, run_checks, checks_summary }
 }

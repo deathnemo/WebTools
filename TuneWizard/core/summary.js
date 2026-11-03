@@ -252,7 +252,8 @@ function summary_lower_first(text) {
 // [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight }:
 // - checks — проверки шага 0 (state.checks: { id, status, title, fix }; null — проверок нет);
 // - prep — подготовка к следующему полёту, всё готовое от страницы (prep0_summary(); ядро prep_* не зовёт): null — нет
-//   (нет источника параметров, не Copter, блок подготовки не загрузился) или { items, file_name, reboot_names }:
+//   (нет источника параметров, отказ подготовки — вид не поддержан или файл и лог разных видов, блок подготовки не
+//   загрузился) или { items, file_name, reboot_names }:
 //   items — пункты prep_check ({ id, status, title, fix }; null или [] — нет), file_name — имя файла исправлений
 //   (prep_file_name) или null — в файл записать нечего, reboot_names — имена этого файла, которым нужна перезагрузка
 //   (prep_reboot_names; [] или null — не нужна);
@@ -347,8 +348,12 @@ function summary_refly(ctx) {
     return items
 }
 
-// Шаги словами: один — «шаг 2»; подряд — «шаги 2–4»; иначе — «шаги 2, 4»
+// Шаги словами: один — «шаг 2»; подряд — «шаги 2–4»; иначе — «шаги 2, 4»; пустой список — пустая строка (у
+// summary_refly до неё не дойти: «repeat» — только у вида с шагами 2–4, ревью задачи 4 этапа 9)
 function summary_steps_text(steps) {
+    if (steps.length == 0) {
+        return ""
+    }
     if (steps.length == 1) {
         return "шаг " + steps[0]
     }

@@ -63,8 +63,9 @@ const vehicle_profiles = {
             20: "GUIDED_NOGPS", 21: "SMART_RTL", 22: "FLOWHOLD", 23: "FOLLOW", 24: "ZIGZAG", 25: "SYSTEMID", 26: "AUTOROTATE",
             27: "AUTO_RTL", 28: "TURTLE",
         },
-        // То же, что pidtune_rules.acro_mode и prep_rules.level_modes (STABILIZE, ALT_HOLD, LOITER, POSHOLD) — равенство
-        // закреплено в tests/tunewizard-vehicle.test.cjs [код] ArduCopter/mode.h; [наше, решение пользователя 30.10.2026]
+        // ACRO — то же, что pidtune_rules.acro_mode (равенство закреплено в tests/tunewizard-vehicle.test.cjs); выход —
+        // STABILIZE, ALT_HOLD, LOITER, POSHOLD, их берёт подготовка (core/prep.js) [код] ArduCopter/mode.h; [наше, решение
+        // пользователя 30.10.2026]
         acro_mode: 1,
         level_modes: [0, 2, 5, 16],
         // Шаг 3 (core/lowpass.js) берёт их отсюда для параметров, которых нет в логе: FLTT и FLTD всех осей — 20 Гц

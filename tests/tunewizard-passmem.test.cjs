@@ -288,7 +288,8 @@ test('passmem_read: битые записи отбрасываются, оста
     // Без saved_at, estimates, bits и kind (запись до этапа 9), с пустым changed — запись годна; kind null или строка — тоже
     const minimal = { key: 'm', changed: [] }
     assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ m: minimal }) })), { passes: { m: minimal }, error: null, dropped: false })
-    for (const kind of [null, 'copter', 'quadplane']) {
+    // Неизвестная строка (будущий вид) — тоже не битая: её нет ни в одном списке passmem_list (тест ниже)
+    for (const kind of [null, 'copter', 'quadplane', 'rover']) {
         const record = { ...base, kind: kind }
         assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ x: record }) })), { passes: { x: record }, error: null, dropped: false }, String(kind))
     }
@@ -660,6 +661,7 @@ test('passmem_list: только проходы того же вида; запи
         copter: { ...pass_at('copter', 40), kind: 'copter' },
         'quadplane·a': qp('quadplane·a', 30),
         'quadplane·b': qp('quadplane·b', 50),
+        rover: { ...pass_at('rover', 60), kind: 'rover' },      // неизвестный вид — ни в одном списке
     }
     assert.deepEqual(passmem_list(passes, 'copter').map((pass) => pass.key), ['copter', 'old'])
     assert.deepEqual(passmem_list(passes, 'quadplane').map((pass) => pass.key), ['quadplane·b', 'quadplane·a'])

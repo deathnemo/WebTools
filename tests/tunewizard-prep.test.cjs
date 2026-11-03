@@ -6,6 +6,9 @@
 // переключателя (предложение ACRO, выбор положения — prep_acro_applied, пересчёт выхода), обучение газа висения,
 // значения файла исправлений (сложение масок, равные текущему не пишутся, текст .param), перезагрузка, план полёта
 // (и без положения выхода), имя файла; параметры — и из parse_param_file (обёртка get), и из log_params (core/log.js).
+// Этап 9 (задача 5): бит 0 с битом 2 batch — по типу гироскопа (INS_GYR*_ID, decode_devid) у подготовки и у шага 0, у
+// Copter и QuadPlane; правила QuadPlane по профилю (бит 20, QACRO 23, выход 17/18/19, ACRO_LOCKING, Q_M_HOVER_LEARN, без
+// log_pid, тренера и быстрого потока), положения с режимами Plane, третий лог (значения параметров), план QuadPlane.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-summary.test.cjs).
 const test = require('node:test')
@@ -24,11 +27,13 @@ function load_page_scripts(files) {
     }
 }
 
-// Нужное ядру подготовки в порядке страницы: param_to_string и get_param_download_text (Param_Helpers.js), vehicle_profile
-// (vehicle.js; профиль Copter для run_checks), log_params (log.js), check_rules (checks.js), notch_param_names
-// (filters.js), pidtune_rules и pidtune_mode_names (pidtune.js; ему — константы pid.js), param_file_text и
-// parse_param_file (params.js), summary_period и summary_lower_first (summary.js)
+// Нужное ядру подготовки в порядке страницы: decode_devid и DEVICE_TYPE_IMU (DecodeDevID.js; тип гироскопа для бита 0
+// batch), param_to_string и get_param_download_text (Param_Helpers.js), vehicle_profiles и vehicle_profile (vehicle.js),
+// log_params (log.js), check_rules и check_sensor_rate_prepost (checks.js), notch_param_names (filters.js), pidtune_rules
+// и pidtune_mode_names (pidtune.js; ему — константы pid.js), param_file_text и parse_param_file (params.js),
+// summary_period и summary_lower_first (summary.js)
 load_page_scripts([
+    'Libraries/DecodeDevID.js',
     'Libraries/Param_Helpers.js',
     'TuneWizard/core/vehicle.js',
     'TuneWizard/core/log.js',
@@ -100,13 +105,18 @@ function item_of(items, id) {
 
 // ---------------------------------------------------------------- константы и цели
 
-test('константы: ACRO и Rate Loop Only — из pidtune_rules, режимы выхода, время висения и Acro', () => {
-    assert.equal(prep_rules.acro_mode, pidtune_rules.acro_mode)
-    assert.equal(prep_rules.acro_rate_only_mask, pidtune_rules.acro_rate_only_bit)
-    assert.equal(pidtune_mode_names[prep_rules.acro_mode], 'ACRO')
+test('константы: ACRO и Rate Loop Only — из профиля Copter и pidtune_rules, режимы выхода, время висения и Acro', () => {
+    // С задачи 5 этапа 9 ACRO и выход — из профиля аппарата (core/vehicle.js), Rate Loop Only Copter — из pidtune_rules
+    const copter = vehicle_profiles.copter
+    assert.equal(copter.acro_mode, pidtune_rules.acro_mode)
+    assert.equal(prep_vehicles.copter.acro_rate_only.mask, pidtune_rules.acro_rate_only_bit)
+    assert.equal(pidtune_mode_names[copter.acro_mode], 'ACRO')
     // Маска бита 1 ACRO_OPTIONS, а не номер бита
-    assert.equal(prep_rules.acro_rate_only_mask, 2)
-    assert.deepEqual(prep_rules.level_modes.map((m) => pidtune_mode_names[m]), ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD'])
+    assert.equal(prep_vehicles.copter.acro_rate_only.mask, 2)
+    assert.deepEqual(copter.level_modes.map((m) => pidtune_mode_names[m]), ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD'])
+    // Без профиля — Copter
+    assert.equal(prep_vehicle(null), prep_vehicles.copter)
+    assert.throws(() => prep_vehicle({ kind: 'rover' }), /не знает вид аппарата: rover/)
     assert.equal(prep_rules.hover_min_s, check_rules.hover_min_s)
     assert.equal(prep_rules.hover_learn_s, check_rules.hover_learn_s)
     assert.equal(prep_rules.acro_data_s, pidtune_rules.min_data_s)
@@ -118,11 +128,18 @@ test('константы: ACRO и Rate Loop Only — из pidtune_rules, реж�
     assert.equal(prep_rules.raw_hint, check_rules.gyro_raw_hint)
 })
 
-test('prep_goals: подписи и части целей; неизвестная цель — ошибка', () => {
+test('prep_goals: подписи и части целей, пояснения по виду аппарата; неизвестная цель — ошибка', () => {
     assert.equal(prep_goals.filters.title, 'Фильтры')
     assert.equal(prep_goals.pid.title, 'PID')
     assert.equal(prep_goals.both.title, 'Фильтры и PID')
     assert.deepEqual(prep_goal_parts('both'), ['filters', 'pid'])
+    // Пояснения: Copter — как до этапа 9 (и без профиля), QuadPlane — дизайн этапа 9, раздел 9
+    assert.deepEqual(['filters', 'pid', 'both'].map((goal) => prep_goal_text(goal)),
+        ['шаги 1–3: висение в любом режиме', 'шаг 4: тестовый полёт Acro «Rate Loop Only»', 'шаги 1–4: висение и Acro в одном полёте'])
+    assert.deepEqual(['filters', 'pid', 'both'].map((goal) => prep_goal_text(goal, vehicle_profiles.copter)), ['filters', 'pid', 'both'].map((goal) => prep_goal_text(goal)))
+    assert.deepEqual(['filters', 'pid', 'both'].map((goal) => prep_goal_text(goal, vehicle_profiles.quadplane)),
+        ['шаги 1–3: висение в Q-режиме', 'лог QACRO для будущего шага 4', 'висение и QACRO в одном полёте'])
+    assert.throws(() => prep_goal_text('acro'), /Неизвестная цель/)
     assert.throws(() => prep_goal_parts('acro'), /Неизвестная цель/)
     assert.throws(() => prep_check(fake_params(GOOD), 'toString', {}), /Неизвестная цель/)
     assert.throws(() => prep_flight_plan(undefined, {}), /Неизвестная цель/)
@@ -347,9 +364,10 @@ test('gyro_prepost: raw и batch — только после или только
         // бит 2 с битом 1 (без бита 0) — обе половины после фильтров (doing_post_filter_logging)
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 6 }, name: 'INS_LOG_BAT_OPT', expect: 4,
           text: /^INS_LOG_BAT_OPT = 6: бит 2 \(до и после\) вместе с битом 1 \(после фильтров\) — обе половины batch пишутся после фильтров/ },
-        // бит 2 с битом 0 — на датчиках с выборкой на частоте датчика обе половины сырые
+        // бит 2 с битом 0, тип гироскопа не определить (INS_GYR_ID нет) — warn с оговоркой: на Invensense v1/v2 обе
+        // половины сырые (типы датчиков — тест «бит 0 с битом 2 — по типу гироскопа» ниже)
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 5 }, name: 'INS_LOG_BAT_OPT', expect: 4,
-          text: /^INS_LOG_BAT_OPT = 5: бит 2 \(до и после\) вместе с битом 0 \(Sensor-Rate\) — на датчиках с выборкой на частоте датчика \(Invensense v1\/v2 по SPI\) обе половины batch — сырые, до фильтров: реального «после» на таких датчиках не будет$/ },
+          text: /^INS_LOG_BAT_OPT = 5: бит 2 \(до и после\) вместе с битом 0 \(Sensor-Rate\) — тип гироскопа не определить \(INS_GYR_ID\): если датчик Invensense v1\/v2 \(по SPI с быстрой выборкой\), обе половины batch — сырые, до фильтров: реального «после» не будет$/ },
         // биты 0 и 1 — на таких датчиках обе сырые, на остальных обе после фильтров
         { values: { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 7 }, name: 'INS_LOG_BAT_OPT', expect: 4,
           text: /вместе с битом 0 \(Sensor-Rate\) и битом 1 \(после фильтров\) — .*обе половины batch — сырые, до фильтров, на остальных бит 1 даёт обе после фильтров/ },
@@ -370,6 +388,104 @@ test('gyro_prepost: raw и batch — только после или только
     }
     // batch до и после — ok
     assert.equal(item_of(check(with_values({ INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4 })), 'gyro_prepost').status, 'ok')
+})
+
+// ---------------------------------------------------------------- бит 0 с битом 2 batch — по типу гироскопа
+
+// INS_GYR*_ID: тип устройства devtype, шина bus_type (1 I2C, 2 SPI, 3 DroneCAN — Libraries/DecodeDevID.js), шина 1, адрес 1
+function devid(devtype, bus_type = 2) {
+    return (devtype << 16) | (1 << 8) | (1 << 3) | bus_type
+}
+
+// Типы гироскопа (DecodeDevID.js): Invensense v1 — GYR_MPU6000, GYR_MPU9250, ICM20602, ICM20601, ICM20789, ICM20689;
+// Invensense v2 — ICM20648, ICM20649, ICM20948 (выборка на частоте датчика — [код] AP_InertialSensor_Invensense.cpp:922,
+// AP_InertialSensor_Invensensev2.cpp:638); Invensense v3 и другие — ICM42688, ICM45686, ICM40609, BMI088, BMI270
+const SENSOR_RATE_TYPES = [0x21, 0x24, 0x2F, 0x30, 0x27, 0x28, 0x2D, 0x2E, 0x2C]
+const OTHER_TYPES = [0x34, 0x3B, 0x33, 0x2B, 0x38]
+// Третий лог (QuadPlane, ICM45686 ×2, INS_LOG_BAT_MASK = 1) — журнал, раздел 8
+const LOG3_GYROS = { INS_GYR_ID: 3866890, INS_GYR2_ID: 3867154, INS_GYR3_ID: 0 }
+
+test('check_gyro_sensor_rate: Invensense v1/v2 по SPI — с выборкой на частоте датчика, остальные — без, тип не определить — unknown', () => {
+    assert.deepEqual(SENSOR_RATE_TYPES.map((t) => decode_devid(devid(t), DEVICE_TYPE_IMU).name), check_rules.gyro_sensor_rate_names)
+    const of = (values) => check_gyro_sensor_rate(fake_params(values))
+    for (const t of SENSOR_RATE_TYPES) {
+        const name = decode_devid(devid(t), DEVICE_TYPE_IMU).name
+        assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t) }), { sensor_rate: [name + ' (INS_GYR_ID)'], other: [], unknown: [] }, name)
+        // Не по SPI (I2C, DroneCAN) драйвер быструю выборку не включает
+        for (const bus of [1, 3]) {
+            assert.equal(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t, bus) }).other.length, 1, name + ', шина ' + bus)
+        }
+    }
+    for (const t of OTHER_TYPES) {
+        const name = decode_devid(devid(t), DEVICE_TYPE_IMU).name
+        assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t) }), { sensor_rate: [], other: [name + ' (INS_GYR_ID)'], unknown: [] }, name)
+    }
+    // Тип вне таблицы decode_devid — не Invensense v1/v2 (их типы в таблице есть): подпись — номер типа
+    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(0x41) }).other, ['тип 0x41 (INS_GYR_ID)'])
+    // Тип не определить: параметра нет или 0
+    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1 }), { sensor_rate: [], other: [], unknown: ['INS_GYR_ID'] })
+    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: 0 }).unknown, ['INS_GYR_ID'])
+    // Гироскопы — экземпляры INS_LOG_BAT_MASK; маски нет — все с параметром типа; имена INS4_/INS5_
+    const mixed = { INS_GYR_ID: devid(0x3B), INS_GYR2_ID: devid(0x2F), INS4_GYR_ID: devid(0x2C) }
+    assert.deepEqual(of({ ...mixed, INS_LOG_BAT_MASK: 1 }), { sensor_rate: [], other: ['ICM45686 (INS_GYR_ID)'], unknown: [] })
+    assert.deepEqual(of({ ...mixed, INS_LOG_BAT_MASK: 3 }).sensor_rate, ['ICM20602 (INS_GYR2_ID)'])
+    assert.deepEqual(of({ ...mixed, INS_LOG_BAT_MASK: 4 }).unknown, ['INS_GYR3_ID'])
+    assert.deepEqual(of(mixed), { sensor_rate: ['ICM20602 (INS_GYR2_ID)', 'ICM20948 (INS4_GYR_ID)'], other: ['ICM45686 (INS_GYR_ID)'], unknown: [] })
+    assert.deepEqual([0, 1, 2, 3, 4].map(check_gyro_id_param), ['INS_GYR_ID', 'INS_GYR2_ID', 'INS_GYR3_ID', 'INS4_GYR_ID', 'INS5_GYR_ID'])
+    // Третий лог: ICM45686
+    assert.deepEqual(of({ ...LOG3_GYROS, INS_LOG_BAT_MASK: 1 }), { sensor_rate: [], other: ['ICM45686 (INS_GYR_ID)'], unknown: [] })
+})
+
+test('бит 0 с битом 2 batch — по типу гироскопа: Invensense v1/v2 — warn, ICM45686 и другие — ok, тип неизвестен — warn с оговоркой; шаг 0 и подготовка одинаково, Copter и QuadPlane одинаково', () => {
+    const batch = { INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 5 }
+    const prepost = (values) => item_of(check(with_values({ ...batch, ...values }), 'filters'), 'gyro_prepost')
+    // Шаг 0 по тем же параметрам (batch-лог) — у Copter и у QuadPlane
+    const step0 = (values, kind) => {
+        const info = { vehicle: 'x', kind: kind, profile: vehicle_profile(kind), messages: { pid: true, gyro_raw: false, gyro_batch: true }, flight: null, throttle_source: null }
+        return run_checks(info, fake_params({ ...batch, ...values }), null).find((c) => c.id === 'pre_post')
+    }
+    const cases = [
+        ...SENSOR_RATE_TYPES.map((t) => ({ values: { INS_GYR_ID: devid(t) }, status: 'warn' })),
+        ...OTHER_TYPES.map((t) => ({ values: { INS_GYR_ID: devid(t) }, status: 'ok' })),
+        { values: { INS_GYR_ID: devid(0x2F, 1) }, status: 'ok' },
+        { values: {}, status: 'warn' },
+        { values: LOG3_GYROS, status: 'ok' },
+    ]
+    for (const c of cases) {
+        const label = JSON.stringify(c.values)
+        assert.equal(prepost(c.values).status, c.status, 'подготовка ' + label)
+        for (const kind of ['copter', 'quadplane']) {
+            assert.equal(step0(c.values, kind).status, c.status, 'шаг 0, ' + kind + ' ' + label)
+        }
+    }
+    // Invensense v1/v2: названы датчик и драйвер; в файл — INS_LOG_BAT_OPT = 4
+    const inv = prepost({ INS_GYR_ID: devid(0x2F) })
+    assert.equal(inv.text, 'INS_LOG_BAT_OPT = 5: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — ICM20602 (INS_GYR_ID) — Invensense v1/v2: драйвер включает ' +
+        'выборку на частоте датчика (по SPI с быстрой выборкой), и обе половины batch — сырые, до фильтров: реального «после» не будет')
+    assert.deepEqual(inv.changes, [{ name: 'INS_LOG_BAT_OPT', value: 4 }])
+    assert.equal(step0({ INS_GYR_ID: devid(0x2F) }, 'copter').text, 'Batch-лог с INS_LOG_BAT_OPT = 5: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — ' +
+        'ICM20602 (INS_GYR_ID) — Invensense v1/v2: драйвер включает выборку на частоте датчика (по SPI с быстрой выборкой), и обе половины batch — сырые, ' +
+        'до фильтров: спектр «после фильтров» на шаге 1 на самом деле до фильтров')
+    assert.equal(step0({ INS_GYR_ID: devid(0x2F) }, 'copter').fix, 'Запишите INS_LOG_BAT_OPT = 4 (только бит 2 — до и после фильтров) и перезагрузите полётный контроллер')
+    // ICM45686 (третий лог): ok, бит 0 не действует, в файл ничего
+    const log3 = prepost(LOG3_GYROS)
+    assert.equal(log3.text, 'INS_LOG_BAT_OPT = 5: batch до и после фильтров (бит 2) — оценку «станет» можно сверить с реальными данными; бит 0 (Sensor-Rate) — ' +
+        'ICM45686 (INS_GYR_ID): драйвер не включает выборку на частоте датчика — бит 0 не действует')
+    assert.deepEqual([log3.fix, log3.changes], [null, []])
+    assert.deepEqual([step0(LOG3_GYROS, 'quadplane').text, step0(LOG3_GYROS, 'quadplane').fix],
+        ['Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными; бит 0 (Sensor-Rate) в INS_LOG_BAT_OPT = 5 — ICM45686 (INS_GYR_ID): ' +
+         'драйвер не включает выборку на частоте датчика — бит 0 не действует', null])
+    // Тип не определить — оговорка «если датчик Invensense v1/v2»
+    assert.match(prepost({}).text, /— тип гироскопа не определить \(INS_GYR_ID\): если датчик Invensense v1\/v2 \(по SPI с быстрой выборкой\), обе половины batch — сырые/)
+    assert.match(step0({}, 'quadplane').text, /— тип гироскопа не определить \(INS_GYR_ID\): если датчик Invensense v1\/v2/)
+    // С битом 1 — warn при любом датчике (на ICM45686 обе половины после фильтров)
+    for (const opt of [6, 7]) {
+        assert.equal(prepost({ ...LOG3_GYROS, INS_LOG_BAT_OPT: opt }).status, 'warn', 'INS_LOG_BAT_OPT = ' + opt)
+        assert.equal(step0({ ...LOG3_GYROS, INS_LOG_BAT_OPT: opt }, 'quadplane').status, 'warn', 'шаг 0, INS_LOG_BAT_OPT = ' + opt)
+    }
+    // Бит 0 без бита 2 — «только до фильтров», от типа не зависит
+    assert.equal(prepost({ ...LOG3_GYROS, INS_LOG_BAT_OPT: 1 }).status, 'warn')
+    assert.equal(step0({ ...LOG3_GYROS, INS_LOG_BAT_OPT: 1 }, 'copter').status, 'ok')
 })
 
 test('log_buffer: raw и буфер 8 КиБ — warn, в файл 64; 50 и больше — ok', () => {
@@ -681,4 +797,171 @@ test('prep_file_name: имя без расширения + «_prep.param»; им
     assert.equal(prep_file_name('copter'), 'copter_prep.param')
     assert.equal(prep_file_name(''), 'prep.param')
     assert.equal(prep_file_name(null), 'prep.param')
+})
+
+// ---------------------------------------------------------------- QuadPlane (этап 9, дизайн — раздел 9)
+
+const QP = vehicle_profiles.quadplane
+const QP_IDS = ['log_backend', 'log_fast', 'gyro_data', 'gyro_prepost', 'notch_source', 'acro_slot', 'acro_exit', 'acro_rate_only', 'hover_learn']
+const QP_FILTER_IDS = ['log_backend', 'gyro_data', 'gyro_prepost', 'notch_source', 'hover_learn']
+const QP_PID_IDS = ['log_backend', 'log_fast', 'acro_slot', 'acro_exit', 'acro_rate_only']
+
+// Параметры QuadPlane, при которых все правила — ok: бит 20 в LOG_BITMASK (65535 + 1048576), batch ICM45686 до и после
+// фильтров, notch по ESC с двунаправленным DShot, QACRO в положении 6, выход — QSTABILIZE, QHOVER, QLOITER, без удержания
+// угла, обучение газа висения. Copter-параметров (ACRO_OPTIONS, ACRO_TRAINER, MOT_*) нет — у Plane их и нет
+const QP_GOOD = {
+    Q_ENABLE: 1, Q_A_RAT_RLL_P: 0.25, LOG_BACKEND_TYPE: 1, LOG_BITMASK: 1114111, LOG_FILE_BUFSIZE: 16,
+    INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 1, INS_LOG_BAT_OPT: 4, INS_GYR_ID: 3866890,
+    INS_HNTCH_ENABLE: 1, INS_HNTCH_MODE: 3, INS_HNTC2_ENABLE: 0, SERVO_BLH_BDMASK: 15,
+    FLTMODE1: 17, FLTMODE2: 18, FLTMODE3: 19, FLTMODE4: 5, FLTMODE5: 0, FLTMODE6: 23, FLTMODE_CH: 8,
+    ACRO_LOCKING: 0, Q_M_HOVER_LEARN: 2,
+}
+// Как третий лог (журнал, раздел 8): LOG_BITMASK 65535, режимы QSTABILIZE, RTL, FBWA, FBWA, MANUAL, FBWA — QACRO нет,
+// ACRO_LOCKING 0, Q_M_HOVER_LEARN 0, batch ICM45686 с INS_LOG_BAT_OPT = 5
+const QP_LOG3 = {
+    ...QP_GOOD, ...LOG3_GYROS, LOG_BITMASK: 65535, INS_LOG_BAT_OPT: 5, FLTMODE1: 17, FLTMODE2: 11, FLTMODE3: 5, FLTMODE4: 5, FLTMODE5: 0, FLTMODE6: 5,
+    FLTMODE_CH: 6, Q_M_HOVER_LEARN: 0,
+}
+const HOVER_WARN = { id: 'hover_throttle', status: 'warn' }
+
+function qp_check(values, goal = 'both', ctx = {}) {
+    return prep_check(fake_params(values), goal, { ...ctx, profile: QP })
+}
+
+test('QuadPlane: правила по профилю — без log_pid, acro_trainer, fstrate; всё ok; по цели — только её правила', () => {
+    // Параметры Copter в файле QuadPlane правил не добавляют
+    const both = qp_check({ ...QP_GOOD, ACRO_TRAINER: 2, FSTRATE_ENABLE: 1, ACRO_OPTIONS: 0, MOT_HOVER_LEARN: 0 })
+    assert.deepEqual(both.map((i) => i.id), QP_IDS)
+    for (const item of both) {
+        assert.equal(item.status, 'ok', item.id + ': ' + item.text)
+        assert.deepEqual([item.fix, item.changes], [null, []], item.id)
+    }
+    assert.deepEqual(qp_check(QP_GOOD, 'filters').map((i) => i.id), QP_FILTER_IDS)
+    assert.deepEqual(qp_check(QP_GOOD, 'pid').map((i) => i.id), QP_PID_IDS)
+    assert.equal(item_of(both, 'log_fast').text, 'LOG_BITMASK = 1114111: бит 20 (ATTITUDE_FULLRATE) включён — PIQR/PIQP/PIQY пишутся с частотой цикла')
+    assert.equal(item_of(both, 'acro_slot').text, 'QACRO — положение 6 (PWM от 1750)')
+    assert.equal(item_of(both, 'acro_exit').text, 'Выход из QACRO — положения 1 (QSTABILIZE, PWM до 1230), 2 (QHOVER, PWM 1231–1360), 3 (QLOITER, PWM 1361–1490): ' +
+        'проверьте, что тумблер достаёт до одного из этих положений')
+    assert.equal(item_of(both, 'acro_rate_only').text, 'ACRO_LOCKING = 0: удержания угла нет — в QACRO только контур скорости, цель скорости — прямая команда пилота')
+    assert.deepEqual(both.map((i) => i.title).filter((t) => /ACRO|PID/.test(t)), ['Частота PID VTOL', 'QACRO на переключателе', 'Выход из QACRO', 'QACRO без удержания угла'])
+})
+
+test('QuadPlane: log_fast — бит 20 ATTITUDE_FULLRATE (65535 → 1114111), бит 12 не советуется', () => {
+    const item = item_of(qp_check({ ...QP_GOOD, LOG_BITMASK: 65535 }, 'pid'), 'log_fast')
+    assert.equal(item.status, 'fail')
+    assert.equal(item.text, 'LOG_BITMASK = 65535: бит 20 (ATTITUDE_FULLRATE) выключен — PIQR/PIQP/PIQY пишутся с частотой 25 Гц (бит ATTITUDE_FAST) или 10 Гц ' +
+        '(только ATTITUDE_MED) — для будущего шага 4 нужна частота цикла')
+    assert.equal(item.fix, 'Включите бит ATTITUDE_FULLRATE (20) в LOG_BITMASK (+1048576)')
+    assert.deepEqual(item.changes, [{ name: 'LOG_BITMASK', set: 1 << QP.fullrate_bit, clear: 0 }])
+    assert.deepEqual(prep_changes(fake_params({ LOG_BITMASK: 65535 }), [item]), { LOG_BITMASK: 1114111 })
+    // Бит 12 у Plane — CAMERA: без него пункта нет, совета нет
+    const no12 = qp_check({ ...QP_GOOD, LOG_BITMASK: 1114111 & ~(1 << 12) }, 'pid')
+    assert.equal(item_of(no12, 'log_pid'), undefined)
+    assert.ok(no12.every((i) => i.status === 'ok'), JSON.stringify(no12.map((i) => [i.id, i.status])))
+    assert.equal(item_of(qp_check(with_values({ LOG_BITMASK: undefined }, QP_GOOD), 'pid'), 'log_fast').text, prep_missing_text(['LOG_BITMASK']))
+})
+
+test('QuadPlane: положения переключателя — режимы Plane, QACRO 23; предложение положения 6, выход 17/18/19', () => {
+    const params = fake_params(QP_LOG3)
+    const slots = prep_mode_slots(params, null, QP)
+    assert.deepEqual(slots.map((s) => s.mode_name), ['QSTABILIZE', 'RTL', 'FBWA', 'FBWA', 'MANUAL', 'FBWA'])
+    assert.equal(prep_mode_slots(params, 6, QP)[5].mode_name, 'QACRO')
+    assert.equal(prep_acro_suggestion(params, QP), 6)
+    assert.deepEqual(prep_plan_slots(params, 6, QP), { acro: 6, exit: 1 })
+    // Номер ACRO Copter (1) у Plane — CIRCLE: не ACRO; STABILIZE Copter (0) у Plane — MANUAL: не выход
+    const copter_like = fake_params({ ...QP_GOOD, FLTMODE1: 0, FLTMODE2: 0, FLTMODE3: 2, FLTMODE4: 2, FLTMODE5: 5, FLTMODE6: 1 })
+    const items = prep_check(copter_like, 'pid', { profile: QP, acro_slot: 6 })
+    assert.deepEqual(prep_mode_slots(copter_like, null, QP).map((s) => s.mode_name), ['MANUAL', 'MANUAL', 'STABILIZE', 'STABILIZE', 'FBWA', 'CIRCLE'])
+    assert.equal(item_of(items, 'acro_slot').status, 'fail')
+    assert.deepEqual(item_of(items, 'acro_slot').changes, [{ name: 'FLTMODE6', value: 23 }])
+    const exit = item_of(items, 'acro_exit')
+    assert.equal(exit.status, 'fail')
+    assert.equal(exit.text, 'Кроме QACRO, на переключателе нет режима с самовыравниванием (QSTABILIZE, QHOVER, QLOITER): в QACRO аппарат сам не выравнивается, и выйти из него будет некуда')
+    assert.equal(exit.fix, 'Поставьте QSTABILIZE (17), QHOVER (18) или QLOITER (19) в одно из положений FLTMODE1–6, кроме положения QACRO, и проверьте, что тумблер достаёт до него')
+    assert.equal(prep_acro_suggestion(copter_like, QP), null, 'выхода нет — предложения нет')
+    // Тот же файл по правилам Copter — ACRO есть (1), выход есть (0, 2, 5) — другое
+    assert.equal(prep_acro_suggestion(copter_like), null)
+    assert.equal(item_of(prep_check(copter_like, 'pid', {}), 'acro_slot').status, 'ok')
+})
+
+test('QuadPlane: acro_slot — fail без QACRO, в файл FLTMODE6 = 23; acro_rate_only — ACRO_LOCKING = 0', () => {
+    const none = qp_check(QP_LOG3, 'pid', { acro_slot: null })
+    assert.equal(item_of(none, 'acro_slot').text, 'Ни в одном из FLTMODE1–6 нет QACRO (23): тестовый полёт QACRO для будущего шага 4 не включить')
+    assert.equal(item_of(none, 'acro_slot').fix, 'Выберите положение для QACRO в таблице положений переключателя на шаге 0')
+    const six = item_of(qp_check(QP_LOG3, 'pid', { acro_slot: 6 }), 'acro_slot')
+    assert.equal(six.fix, 'Запишите FLTMODE6 = 23 (есть в файле _prep.param шага 0): QACRO — положение 6 (PWM от 1750); другое положение — в таблице положений переключателя на шаге 0')
+    assert.deepEqual(six.changes, [{ name: 'FLTMODE6', value: 23 }])
+    for (const locking of [1, 2]) {
+        const item = item_of(qp_check({ ...QP_GOOD, ACRO_LOCKING: locking }, 'pid'), 'acro_rate_only')
+        assert.equal(item.status, 'fail', 'ACRO_LOCKING = ' + locking)
+        assert.equal(item.text, 'ACRO_LOCKING = ' + locking + ': в QACRO при отпущенных стиках удерживается угол (поправка углового контура) — контур скорости по такому полёту точно не измерить')
+        assert.equal(item.fix, 'Запишите ACRO_LOCKING = 0 (тогда в QACRO при отпущенных стиках аппарат не держит и угол — выход только переключателем)')
+        assert.deepEqual(prep_changes(fake_params({ ACRO_LOCKING: locking }), [item]), { ACRO_LOCKING: 0 })
+    }
+    assert.equal(item_of(qp_check(with_values({ ACRO_LOCKING: undefined }, QP_GOOD), 'pid'), 'acro_rate_only').text, prep_missing_text(['ACRO_LOCKING']))
+})
+
+test('QuadPlane: hover_learn — Q_M_HOVER_LEARN, совет висеть в QHOVER или QLOITER', () => {
+    const warn = item_of(qp_check({ ...QP_GOOD, Q_M_HOVER_LEARN: 0 }, 'filters', { hover_check: HOVER_WARN }), 'hover_learn')
+    assert.equal(warn.status, 'warn')
+    assert.equal(warn.text, 'Q_M_HOVER_LEARN = 0: обучение газа висения выключено, а по логу газ висения расходится с Q_M_THST_HOVER (проверка шага 0 «Газ висения»)')
+    assert.equal(warn.fix, 'Q_M_HOVER_LEARN = 2 и не меньше 30 с висения в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится')
+    assert.deepEqual(warn.changes, [{ name: 'Q_M_HOVER_LEARN', value: 2 }])
+    const ok = item_of(qp_check({ ...QP_GOOD, Q_M_HOVER_LEARN: 1 }, 'filters'), 'hover_learn')
+    assert.equal(ok.status, 'ok')
+    assert.match(ok.text, /^Q_M_HOVER_LEARN = 1: газ висения обучается, но не сохраняется; по логу не проверено\. Совет: Q_M_HOVER_LEARN = 2/)
+    // MOT_HOVER_LEARN у QuadPlane не в счёт: нет Q_M_HOVER_LEARN — параметра нет
+    assert.equal(item_of(qp_check(with_values({ Q_M_HOVER_LEARN: undefined, MOT_HOVER_LEARN: 2 }, QP_GOOD), 'filters'), 'hover_learn').text, prep_missing_text(['Q_M_HOVER_LEARN']))
+})
+
+test('QuadPlane, как третий лог: «Фильтры и PID» — СТОП log_fast и acro_slot (положение 6, выход 1), ВНИМ hover_learn, OK gyro_prepost и acro_rate_only; файл', () => {
+    const params = fake_params(QP_LOG3)
+    const items = prep_check(params, 'both', { profile: QP, acro_slot: prep_acro_suggestion(params, QP), hover_check: HOVER_WARN })
+    assert.deepEqual(Object.fromEntries(items.map((i) => [i.id, i.status])), {
+        log_backend: 'ok', log_fast: 'fail', gyro_data: 'ok', gyro_prepost: 'ok', notch_source: 'ok', acro_slot: 'fail', acro_exit: 'ok', acro_rate_only: 'ok', hover_learn: 'warn',
+    })
+    assert.match(item_of(items, 'acro_exit').text, /^Выход из QACRO — положение 1 \(QSTABILIZE, PWM до 1230\)/)
+    const values = prep_changes(params, items)
+    assert.deepEqual(values, { LOG_BITMASK: 1114111, FLTMODE6: 23, Q_M_HOVER_LEARN: 2 })
+    assert.deepEqual(prep_reboot_names(Object.keys(values)), [])
+    for (const line of ['FLTMODE6,23', 'LOG_BITMASK,1114111', 'Q_M_HOVER_LEARN,2']) {
+        assert.ok(param_file_text(values).split('\n').includes(line), line)
+    }
+})
+
+test('QuadPlane: план полёта — Q-режимы, QACRO, tailsitter — стики, последний пункт — «сохраните лог»; без шага 4 — без требований к участкам', () => {
+    const ctx = { acro_slot: 6, exit_slot: 1, checks: null, profile: QP }
+    const hover = 'Взлёт в QSTABILIZE или QHOVER, висение не меньше 30 с (лучше 60) без движений стиками в Q-режиме: по нему шаги 1–3 считают спектр ' +
+        'гироскопа; VTOL-участки AUTO и GUIDED шаги 1–3 не берут.'
+    assert.deepEqual(prep_flight_plan('filters', ctx), [hover, 'Посадка; загрузите лог в мастер.'])
+    const sticks = '2–3 минуты резких отклонений стиков с возвратом, по одной оси за раз — крен, тангаж, рыскание — с разной амплитудой'
+    assert.deepEqual(prep_flight_plan('both', { ...ctx, tailsitter: true }), [
+        hover,
+        'После висения наберите безопасную высоту и включите QACRO положением 6 (PWM от 1750).',
+        sticks + '; у tailsitter крен VTOL — стиком руля направления, рыскание — элеронами.',
+        'Выход из QACRO — положением 1 (PWM до 1230): в QACRO аппарат сам не выравнивается.',
+        'Посадка; загрузите лог в мастер и сохраните лог: шаг 4 для QuadPlane — следующим этапом.',
+    ])
+    const pid = prep_flight_plan('pid', ctx)
+    assert.equal(pid[1], sticks + '.', 'не tailsitter — без заметки о стиках')
+    assert.ok(!pid.some((t) => /мастеру нужно|Интервал — участок ACRO/.test(t)), pid.join(' | '))
+    assert.match(prep_flight_plan('pid', { ...ctx, acro_slot: null })[0], /^Наберите безопасную высоту и включите QACRO — положение для QACRO не выбрано/)
+    assert.deepEqual(prep_flight_plan('pid', { ...ctx, exit_slot: null }), [
+        'Положения с самовыравниванием на переключателе нет: в QACRO аппарат сам не выравнивается — не включайте QACRO, пока его не будет (QSTABILIZE, QHOVER ' +
+        'или QLOITER в одном из положений, кроме положения QACRO).',
+        'Посадка; загрузите лог в мастер.',
+    ])
+    // Copter с tailsitter: true — заметки нет (tailsitter у Copter не бывает), план прежний
+    assert.deepEqual(prep_flight_plan('both', { acro_slot: 6, exit_slot: 1, tailsitter: true }), prep_flight_plan('both', { acro_slot: 6, exit_slot: 1 }))
+    assert.deepEqual(prep_flight_plan('both', { acro_slot: 6, exit_slot: 1, profile: vehicle_profiles.copter }), prep_flight_plan('both', { acro_slot: 6, exit_slot: 1 }))
+})
+
+test('prep_modes_text и prep_mode_name: режимы словами по профилю', () => {
+    assert.equal(prep_modes_text([0, 2], null), 'STABILIZE или ALT_HOLD')
+    assert.equal(prep_modes_text([0, 2], null, true), 'STABILIZE (0) или ALT_HOLD (2)')
+    assert.equal(prep_modes_text([17, 18, 19], QP), 'QSTABILIZE, QHOVER или QLOITER')
+    assert.equal(prep_modes_text([23], QP), 'QACRO')
+    assert.equal(prep_mode_name(99, QP), 'режим 99')
+    assert.equal(prep_mode_name(1, null), 'ACRO')
+    assert.equal(prep_mode_name(1, QP), 'CIRCLE')
 })

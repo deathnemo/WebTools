@@ -21,8 +21,8 @@ const repo = path.resolve(__dirname, '..')
 globalThis.FFTJS = require('../modules/fft.js/lib/fft.js')
 
 // Скрипты ядра в порядке страницы (index.html) — до core/prep.js: pidtune_mode_names и pidtune_rules (pidtune.js),
-// prep_rules (prep.js), lowpass_log_values, lowpass_param_names и lowpass_vehicle_axes (lowpass.js), LOG_DEFAULT_PROFILE
-// (log.js)
+// prep_mode_slots и prep_exit_slots (prep.js), lowpass_log_values, lowpass_param_names и lowpass_vehicle_axes
+// (lowpass.js), LOG_DEFAULT_PROFILE (log.js)
 for (const file of [
     'Libraries/Array_Math.js',
     'Libraries/fft.js',
@@ -189,8 +189,9 @@ test('профиль Copter совпадает с константами ядр�
     // pidtune_mode_names и pidtune_rules.acro_mode — шаг 4 Copter (не меняется на этапе 9)
     assert.deepEqual(copter.modes, pidtune_mode_names)
     assert.equal(copter.acro_mode, pidtune_rules.acro_mode)
-    // prep_rules.level_modes — подготовка Copter (до задачи 5 этапа 9)
-    assert.deepEqual(copter.level_modes, prep_rules.level_modes)
+    // Подготовка (prep.js) с задачи 5 этапа 9 берёт ACRO и выход из профиля; без профиля — Copter
+    assert.deepEqual(prep_exit_slots(prep_mode_slots(fake_params({ FLTMODE1: 0, FLTMODE2: 2, FLTMODE3: 5, FLTMODE4: 16, FLTMODE5: 1, FLTMODE6: 3 }))).map((s) => s.slot),
+        [1, 2, 3, 4])
     // lowpass.js с задачи 3 этапа 9 берёт заводские и оси из профиля; без профиля — Copter, как до этапа 9
     const empty = fake_params({})
     assert.deepEqual(lowpass_log_values(empty), lowpass_log_values(empty, vehicle_profiles.copter))

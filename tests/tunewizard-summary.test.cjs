@@ -1063,8 +1063,8 @@ test('summary_refly: «repeat» — шаги сравнения из досту�
     assert.deepEqual(repeat(null), [text('шаги 2–4')])
     assert.deepEqual(repeat(vehicle_profiles.copter.steps), [text('шаги 2–4')])
     assert.deepEqual(repeat(vehicle_profiles.quadplane.steps), [text('шаги 2–3')])
-    // Шаги словами: один, подряд, с пропуском
-    assert.deepEqual([summary_steps_text([2]), summary_steps_text([2, 3, 4]), summary_steps_text([2, 4])], ['шаг 2', 'шаги 2–4', 'шаги 2, 4'])
+    // Шаги словами: один, подряд, с пропуском; пустой список — пустая строка (не «шаги undefined–undefined», ревью задачи 4)
+    assert.deepEqual([summary_steps_text([2]), summary_steps_text([2, 3, 4]), summary_steps_text([2, 4]), summary_steps_text([])], ['шаг 2', 'шаги 2–4', 'шаги 2, 4', ''])
 })
 
 // ---------------------------------------------------------------- QuadPlane (этап 9)

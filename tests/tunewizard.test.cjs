@@ -645,12 +645,16 @@ test('run_checks: batch — бит 2 INS_LOG_BAT_OPT вместе с битом 
         'после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров')
     assert.equal(post.fix, fix + ': флаг «после фильтров» сбрасывается только перезагрузкой')
 
-    // 5 — бит 0 (Sensor-Rate): на датчиках с выборкой на частоте датчика batch берёт только сырые отсчёты
+    // 5 — бит 0 (Sensor-Rate): на датчиках с выборкой на частоте датчика (Invensense v1/v2) batch берёт только сырые
+    // отсчёты. Тип гироскопа — по INS_GYR*_ID через decode_devid (Libraries/DecodeDevID.js, глобал страницы): здесь
+    // (require, без него) и без параметров тип не определить — warn с оговоркой; типы датчиков — tests/tunewizard-prep.test.cjs
     const raw = pre_post_of(5)
     assert.equal(raw.status, 'warn')
-    assert.equal(raw.text, 'Batch-лог с INS_LOG_BAT_OPT = 5: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — ' + sensor_rate +
-        ': спектр «после фильтров» на шаге 1 на таких датчиках на самом деле до фильтров')
+    assert.equal(raw.text, 'Batch-лог с INS_LOG_BAT_OPT = 5: бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — тип гироскопа не определить: ' +
+        'если датчик Invensense v1/v2 (по SPI с быстрой выборкой), обе половины batch — сырые, до фильтров: спектр «после фильтров» на шаге 1 на самом деле до фильтров')
     assert.equal(raw.fix, fix)
+    assert.equal(by_id(checks.run_checks(info, fake_params({ INS_LOG_BAT_OPT: 5, INS_LOG_BAT_MASK: 1, INS_GYR_ID: 3866890 }), good_vibe), 'pre_post').status, 'warn',
+        'без decode_devid тип не определить и по INS_GYR_ID')
 
     // 7 — биты 0 и 1: на таких датчиках обе сырые, на остальных бит 1 — обе после фильтров
     const both = pre_post_of(7)
