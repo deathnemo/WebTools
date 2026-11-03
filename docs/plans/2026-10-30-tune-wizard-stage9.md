@@ -67,6 +67,7 @@
 **Файлы:** `TuneWizard/core/prep.js`, `TuneWizard/steps/prep.js`, `tests/tunewizard-prep.test.cjs`, создать `tests/fixtures/prep_quadplane.param`, `tests/tunewizard-prep-browser.cjs` (сценарий QuadPlane), вставка в `tests/tunewizard-browser-log3.cjs`.
 
 - Раздел 9 дизайна: правила по профилю (`ctx.profile`); у QuadPlane — `log_fast` = бит 20, `acro_slot` = QACRO 23, `acro_exit` = 17/18/19, `acro_rate_only` = `ACRO_LOCKING = 0`, `hover_learn` = `Q_M_HOVER_LEARN`; без `log_pid`, `acro_trainer`, `fstrate`; общие правила записи и фильтров; таблица положений — режимы Plane; тексты целей и плана (tailsitter: крен VTOL — руль направления, рыскание — элероны; последний пункт — «сохраните лог: шаг 4 для QuadPlane — следующим этапом»); вид источника — `vehicle_kind_of_params`, файл и лог разных видов — отказ; `hover_check` — только того же вида.
+- **Уточнение правила «бит 0 с битом 2»** (итог сверки задачи 2, дизайн, раздел 5): `pre_post` в `core/checks.js` и `gyro_prepost` в `core/prep.js` — ВНИМ только когда драйвер гироскопа включает выборку на частоте датчика (Invensense v1/v2: [код] `AP_InertialSensor_Invensense.cpp:922`, `AP_InertialSensor_Invensensev2.cpp:638`); тип — по `INS_GYR_ID`/`INS_GYR2_ID`… (`Libraries/DecodeDevID.js`, как подпись датчика на шаге 1); тип неизвестен — ВНИМ с оговоркой «если датчик Invensense v1/v2»; для Copter и QuadPlane одинаково. Третий лог (ICM45686) — OK; тесты на типы.
 - Фикстура синтетическая; сценарий в `tunewizard-prep-browser.cjs`: вид по файлу, правила и план QuadPlane, отказ для файла Plane без `Q_A_RAT_RLL_P` и для файла QuadPlane при логе Copter (если в тесте без лога — только первые два).
 - Третий лог: цель «Фильтры и PID» — СТОП `log_fast`, `acro_slot` (предложено 6, выход 1), ВНИМ `gyro_prepost`, `hover_learn`, OK `acro_rate_only`; файл — `LOG_BITMASK` 1114111, `FLTMODE6 = 23`, `INS_LOG_BAT_OPT = 4`, `Q_M_HOVER_LEARN = 2`.
 
@@ -76,7 +77,7 @@
 
 ### Задача 6: документы и финальный прогон
 
-**Файлы:** `TuneWizard/Readme.md`, `tests/README.md` (раздел 12 дизайна).
+**Файлы:** `TuneWizard/Readme.md`, `tests/README.md` (раздел 12 дизайна); `TuneWizard/index.html` — надпись в шапке «ArduPilot · Copter» → «ArduPilot · Copter и QuadPlane» (замечание задачи 2).
 
 **Проверки:** все Copter-прогоны (`test:tunewizard`, `-log2`, `-prep`, `-compare`, `-pid-compare`, `-serve`) — прежние результаты; `test:tunewizard-log3` — шаги 0–3 и 5; сборка переносной папки и `node tests/tunewizard-serve.cjs <папка>` (в папку попал `core/vehicle.js`, ссылки на месте).
 
