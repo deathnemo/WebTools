@@ -76,7 +76,7 @@ Copter — без изменений. Лог QuadPlane:
 | `vibe` | как сейчас, по всему логу: в него попадает и самолётный полёт — ограничение, в Readme | раздел 14, д |
 | `hover_throttle` | `Q_M_THST_HOVER` против среднего газа VTOL-окна, допуск 0.05 [наше]; что сделать — `Q_M_HOVER_LEARN = 2`, а при включённом — «повисите не меньше 30 с в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится». Ещё условие обучения — оценка воздушной скорости ниже 0.3·`AIRSPEED_MIN`; есть ли она без датчика скорости — не проверено (на третьем логе ARSP есть) | [код] `quadplane.cpp:1918–1960`, 1951–1953 |
 
-[лог] ожидается: `vehicle` OK, `pid_log` ВНИМ (24 Гц), `pre_post` ВНИМ (`INS_LOG_BAT_OPT = 5`), `flight` OK (≈65 с), `vibe` СТОП (уровень мастера 71.6 м/с²), `clipping` ВНИМ, `hover_throttle` ВНИМ (0.35 против 0.47, `Q_M_HOVER_LEARN = 0`).
+[лог] ожидается: `vehicle` OK, `pid_log` ВНИМ (24 Гц), `pre_post` OK (`INS_LOG_BAT_OPT = 5`, датчик ICM45686 — по правилу, уточнённому в задаче 5, `5062109`; до уточнения здесь стояло ВНИМ), `flight` OK (≈65 с), `vibe` СТОП (уровень мастера 71.6 м/с²), `clipping` ВНИМ, `hover_throttle` ВНИМ (0.35 против 0.47, `Q_M_HOVER_LEARN = 0`).
 
 ## 5. Шаги 1–2
 
@@ -117,7 +117,7 @@ Copter — без изменений. Лог QuadPlane:
 |---|---|---|---|---|
 | `log_backend`, `gyro_data`, `gyro_prepost`, `log_buffer`, `notch_source` | как у Copter | как у Copter: общий код AP_Logger, AP_InertialSensor, AP_BLHeli; IMU_RAW — бит 19 | как у Copter | [код] `system.cpp:13`, `defines.h:117`, `BatchSampler.cpp:23–30`, `AP_Vehicle.cpp:878–893` |
 | `log_pid` | P | нет правила: PIQx пишутся вместе с ATT без своего бита, бит 12 — CAMERA | — | [код] `Log.cpp:30–39`, `defines.h:102–121` |
-| `log_fast` | P | бит 20 ATTITUDE_FULLRATE в `LOG_BITMASK`: без него PIQx — 25 Гц; нет — СТОП | бит 20 (+1048576: 65535 → 1114111) | [код] `Plane.cpp:269–330`, `Log.cpp:58–65`; нужен ли вместе с ним бит 0 — не проверено |
+| `log_fast` | P | бит 20 ATTITUDE_FULLRATE в `LOG_BITMASK`: без него PIQx — 25 Гц; нет — СТОП | бит 20 (+1048576: 65535 → 1114111) | [код] `Plane.cpp:269–330`, `Log.cpp:58–65`; бит 0 вместе с ним не нужен: `Log_Write_FullRate` проверяет только бит 20 и стоит в планировщике на 400 Гц (`Log.cpp:59–65`, `Plane.cpp:115`; сверено в ревью задачи 5, на логе не проверено) |
 | `acro_slot` | P | QACRO (23) в одном из `FLTMODE1–6`; нет — СТОП; предложение положения 6 — как у Copter | `FLTMODE<N> = 23` | [код] `mode.h:38–75` |
 | `acro_exit` | P | кроме QACRO — QSTABILIZE 17, QHOVER 18 или QLOITER 19; нет — СТОП | — | [код] `mode_qstabilize.cpp:12–40`; [решение пользователя 30.10.2026] |
 | `acro_rate_only` | P | `ACRO_LOCKING = 0`; иначе — СТОП: 1 и 2 в QACRO удерживают угол (поправка углового контура), но не выравнивают | `ACRO_LOCKING = 0` | [код] `mode_qacro.cpp:64–69`, `AC_AttitudeControl.cpp:650–737`, `Parameters.cpp:573–578` |
@@ -127,7 +127,7 @@ Copter — без изменений. Лог QuadPlane:
 - **Перезагрузка** — прежний список (`INS_LOG_BAT_*`, `LOG_BACKEND_TYPE`, `LOG_FILE_BUFSIZE`): у `LOG_BITMASK`, `FLTMODE1–6`, `ACRO_LOCKING` в Plane `@RebootRequired` нет ([код] `Parameters.cpp:475–510, 573–578, 628–633`, сверено при дизайне).
 - **План:** фильтры — «взлёт в QSTABILIZE или QHOVER, висение не меньше 30 с (лучше 60) без стиков в Q-режиме: VTOL-участки AUTO и GUIDED шаги 1–3 не берут»; PID — QACRO положением N, 2–3 минуты резких отклонений по одной оси, выход — положением QSTABILIZE/QHOVER/QLOITER, «в QACRO аппарат сам не выравнивается»; у tailsitter — «крен VTOL — стиком руля направления, рыскание — элеронами» ([код] `mode_qacro.cpp:53–57`); последний пункт — «сохраните лог: шаг 4 для QuadPlane появится следующим этапом» вместо «Интервал — участок ACRO».
 - **Источник:** вид файла — по признаку (раздел 3). Файл и лог разных видов — отказ: «Файл «…» — <вид>, лог — <вид>: выберите файл этого аппарата или уберите файл»; без лога — любой поддержанный вид. `hover_check` из лога — только при том же виде.
-- [лог] третий лог, цель «Фильтры и PID»: СТОП `log_fast` и `acro_slot` (предложено положение 6: FBWA → QACRO, выход — положение 1, QSTABILIZE); ВНИМ `gyro_prepost` (`INS_LOG_BAT_OPT = 4`) и `hover_learn` (`Q_M_HOVER_LEARN = 2`); OK `acro_rate_only`.
+- [лог] третий лог, цель «Фильтры и PID»: СТОП `log_fast` и `acro_slot` (предложено положение 6: FBWA → QACRO, выход — положение 1, QSTABILIZE); ВНИМ `hover_learn` (`Q_M_HOVER_LEARN = 2`); OK `acro_rate_only` и `gyro_prepost` (датчик ICM45686 — по правилу, уточнённому в задаче 5, `5062109`; до уточнения здесь стояло ВНИМ `gyro_prepost` с `INS_LOG_BAT_OPT = 4` в файле).
 
 ## 10. Код
 
