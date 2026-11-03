@@ -6,6 +6,8 @@ const check_rules = {
     vibe_fail: 60,                  // м/с²: выше — почти наверняка проблемы [wiki, Measuring Vibration]
     hover_min_s: 30,                // с: минимальное висение для усреднения спектра [wiki, Initial tuning flight]
     hover_throttle_tolerance: 0.05, // допустимое расхождение MOT_THST_HOVER и среднего газа [наше]
+    // Пределы и время обучения газа висения — одни у MOT_THST_HOVER Copter и Q_M_THST_HOVER QuadPlane: тот же
+    // AP_MotorsMulticopter [код] ArduPlane/quadplane.cpp:17–19
     hover_learn_min: 0.125,         // нижний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MIN]
     hover_learn_max: 0.6875,        // верхний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MAX]
     hover_learn_s: 30,              // с висения для обучения MOT_THST_HOVER: постоянная времени 10 с, ~95 % за 30 с [код, AP_MOTORS_THST_HOVER_TC]
@@ -13,6 +15,15 @@ const check_rules = {
     log_bitmask_imu_raw: 19,        // номер бита IMU_RAW [код, MASK_LOG_IMU_RAW]
     log_bitmask_attitude_fast: 0,   // номер бита ATTITUDE_FAST [код, MASK_LOG_ATTITUDE_FAST]; без него Copter пишет PIDx
                                     // и RATE с 10 Гц [код, ArduCopter/Copter.cpp ten_hz_logging_loop, rate_thread.cpp medium_logging_rate]
+    // ArduPlane (QuadPlane): PIQR/PIQP/PIQY пишутся вместе с ATT, пока работал регулятор VTOL; с частотой цикла — только при
+    // бите ATTITUDE_FULLRATE (номер — fullrate_bit профиля, core/vehicle.js), при ATTITUDE_FAST без него — 25 Гц, при одном
+    // ATTITUDE_MED — 10 Гц; бита PID нет, бит 12 у Plane — CAMERA [код] ArduPlane/defines.h:102–121, Plane.cpp:269–312,
+    // Log.cpp:30–34, 59–65; [4.6.3] defines.h:109–126. RATE у QuadPlane пишется с частотой цикла без LOG_BITMASK
+    // [код] ArduPlane/quadplane.cpp:1812–1826
+    plane_log_bitmask_attitude_fast: 0,
+    plane_attitude_fast_hz: 25,
+    plane_log_bitmask_attitude_med: 1,
+    plane_attitude_med_hz: 10,
     pid_log_min_rate_hz: 100,       // Гц: ниже отклик на ступеньку шага 4 не считается [наше; шумовая оценка метода PIDReview —
                                     // до 25 Гц, дефект upstream 5]. То же, что PID_STEP_MIN_RATE в core/pid.js: этот файл
                                     // грузится раньше и под Node без него, равенство закреплено в tests/tunewizard-pid.test.cjs
@@ -29,42 +40,71 @@ const check_rules = {
     gyro_raw_hint: 9,
 }
 
-// info — из log_info (в том числе info.esc — сводка ESC-телеметрии), params — из log_params, vibe — из vibe_summary
-// (может быть null). Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }.
+// info — из log_info (в том числе info.esc — сводка ESC-телеметрии; info.profile — профиль аппарата core/vehicle.js,
+// null — вид не поддержан; info.tailsitter), params — из log_params, vibe — из vibe_summary (может быть null).
+// Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }. Без профиля — «Аппарат» (СТОП) и проверки,
+// не зависящие от аппарата (данные гироскопа, до/после фильтров, трекинг, вибрации, clipping): сообщения PID, газ полёта и
+// газ висения неподдержанного аппарата судить не по чему (у Plane без QuadPlane PIDR — самолётные регуляторы, бит 12 —
+// CAMERA, CTUN.ThO — самолётный мотор)
 function run_checks(info, params, vibe) {
     const checks = []
     const add = (id, status, title, text, fix) => checks.push({ id, status, title, text, fix: fix ?? null })
     const m = info.messages
     const r = check_rules
+    const profile = info.profile ?? null
 
     // Аппарат
-    if (info.vehicle === "Copter") {
-        add("vehicle", "ok", "Аппарат", "Copter, " + (info.fw_string ?? "версия неизвестна") + (info.board ? ", " + info.board : ""))
+    if (profile != null) {
+        add("vehicle", "ok", "Аппарат", profile.title + (info.tailsitter ? " (tailsitter)" : "") + ", " + (info.fw_string ?? "версия неизвестна") + (info.board ? ", " + info.board : ""))
     } else {
-        add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает только Copter", "Загрузите лог ArduCopter")
+        add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает Copter и QuadPlane",
+            "Загрузите лог ArduCopter или ArduPlane с Q_ENABLE ≥ 1")
     }
 
     // Сообщения PID и их частота: ниже pid_log_min_rate_hz (с запасом pid_log_rate_margin) отклик на ступеньку шага 4
-    // не считается. Частота — того сообщения, по которому выбрана ветка: PIDR при messages.pid, иначе RATE
-    // (info.pid_log_rates; нет частоты — объявлено без отсчётов или старые сведения — проверки частоты нет)
-    const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
-    const rate_message = m.pid ? "PIDR" : (m.rate ? "RATE" : null)
+    // не считается. Частота — того сообщения, по которому выбрана ветка: первое сообщение PID профиля (PIDR, PIQR) при
+    // messages.pid, иначе RATE (info.pid_log_rates; нет частоты — объявлено без отсчётов или старые сведения — проверки
+    // частоты нет)
+    const pid_names = profile?.pid_messages ?? []
+    const rate_message = m.pid ? pid_names[0] : (m.rate ? "RATE" : null)
     const hz = (rate_message != null) ? (info.pid_log_rates?.[rate_message] ?? null) : null
     const slow = (hz != null) && (hz < r.pid_log_min_rate_hz * r.pid_log_rate_margin)
     // Частота словами — с отбрасыванием до десятых, без округления вверх: 98.97 — «98.9», а не «99»
     const hz_text = (hz == null) ? "" : String(Math.floor(hz * 10) / 10)
-    const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
-    const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
-    if (m.pid && slow) {
-        add("pid_log", "warn", "Сообщения PID", "PIDR/PIDP/PIDY есть, но " + slow_text,
-            "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
-    } else if (m.pid) {
-        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
-    } else if (m.rate) {
-        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила" + (slow ? "; " + slow_text : ""),
-            slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
-    } else {
-        add("pid_log", "fail", "Сообщения PID", "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
+    if ((profile != null) && (profile.fullrate_bit == null)) {
+        // Copter: PID с частотой цикла — биты PID и ATTITUDE_FAST; без PID и RATE шаг 4 недоступен
+        const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
+        const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
+        const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
+        if (m.pid && slow) {
+            add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + slow_text,
+                "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
+        } else if (m.pid) {
+            add("pid_log", "ok", profile.pid_title, pid_names.join("/") + " есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
+        } else if (m.rate) {
+            add("pid_log", "warn", profile.pid_title, "Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила" + (slow ? "; " + slow_text : ""),
+                slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
+        } else {
+            add("pid_log", "fail", profile.pid_title, "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
+        }
+    } else if (profile != null) {
+        // QuadPlane: PID с частотой цикла пишет один бит fullrate_bit (ATTITUDE_FULLRATE), совета «бит 12» нет — у Plane это
+        // CAMERA (check_rules, plane_*). RATE не в счёт: он пишется всегда. Пока шага 4 у вида нет (profile.steps), проверка
+        // справочная — без СТОП, совет — для будущего шага 4 [решение пользователя 30.10.2026, дизайн этапа 9, раздел 4]
+        const step4 = profile.steps.includes(4)
+        const step4_note = step4 ? "" : "; шаг 4 для " + profile.title + " пока недоступен"
+        const bit = profile.fullrate_bit
+        const fullrate_fix = "Включите бит ATTITUDE_FULLRATE (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ") — " + (step4 ? "для шага 4" : "для будущего шага 4") +
+            ": без него " + pid_names.join("/") + " пишутся с частотой " + r.plane_attitude_fast_hz + " Гц (бит ATTITUDE_FAST, " + r.plane_log_bitmask_attitude_fast +
+            ") или " + r.plane_attitude_med_hz + " Гц (только бит ATTITUDE_MED, " + r.plane_log_bitmask_attitude_med + ")"
+        if (m.pid && slow) {
+            add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + rate_message + " пишется с частотой " + hz_text + " Гц — ниже " +
+                r.pid_log_min_rate_hz + " Гц отклик на ступеньку не считается" + step4_note, fullrate_fix)
+        } else if (m.pid) {
+            add("pid_log", "ok", profile.pid_title, pid_names.join("/") + " есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + step4_note)
+        } else {
+            add("pid_log", "warn", profile.pid_title, "Сообщений " + pid_names.join("/") + " нет" + step4_note, fullrate_fix)
+        }
     }
 
     // Данные гироскопа. Совет — batch (gyro_batch_fix) или raw (gyro_raw_hint); нет INS_RAW_LOG_OPT (старая прошивка) —
@@ -142,19 +182,40 @@ function run_checks(info, params, vibe) {
             "Если регуляторы умеют телеметрию или двунаправленный DShot — включите, это точнее")
     }
 
-    // Полёт
-    if (info.flight == null) {
-        if (info.throttle_source == null) {
-            add("flight", "fail", "Полёт", "Газ не определить: в логе нет CTUN и RATE")
+    // Полёт: окно log_flight (core/log.js) по газу профиля (profile.throttle — ряды по порядку), у QuadPlane — самое длинное
+    // окно участков VTOL-режимов (profile.vtol_modes), остальные называются («ещё VTOL»); в логе нет MODE — окно по газу за
+    // весь лог с предупреждением [решение пользователя 30.10.2026, дизайн этапа 9, раздел 4]
+    if (profile != null) {
+        const flight = info.flight
+        const vtol = profile.vtol_modes != null
+        const mode_names = (modes) => modes.map((n) => profile.modes[n] ?? ("режим " + n)).join(", ")
+        const span = (w) => w.start + "–" + w.end + " с"
+        if (flight == null) {
+            if (info.throttle_source == null) {
+                add("flight", "fail", "Полёт", "Газ не определить: в логе нет " + profile.throttle.map(([name]) => name).join(" и "))
+            } else if (!vtol) {
+                // Окно полёта схлопывается, если ненулевой газ короче отступов throttle_window
+                add("flight", "fail", "Полёт", "Ненулевого газа нет или он короче 3 с: полёта в логе нет")
+            } else if (m.mode) {
+                add("flight", "fail", "Полёт", "Участков VTOL-режимов (Q-режимов) с ненулевым газом дольше 3 с нет: VTOL-полёта в логе нет")
+            } else {
+                add("flight", "fail", "Полёт", "Ненулевого газа VTOL-моторов нет или он короче 3 с: VTOL-полёта в логе нет")
+            }
         } else {
-            // Окно полёта схлопывается, если ненулевой газ короче отступов throttle_window
-            add("flight", "fail", "Полёт", "Ненулевого газа нет или он короче 3 с: полёта в логе нет")
+            const where = vtol ? " (" + span(flight) + ((flight.modes != null) ? ", " + mode_names(flight.modes) : "") + ")" : ""
+            const others = (vtol && (flight.segments.length > 0))
+                ? "; ещё VTOL: " + flight.segments.map((s) => span(s) + " (" + mode_names(s.modes) + ")").join(", ") : ""
+            const text = profile.flight_title + " " + Math.round(flight.duration_s) + " с" + where
+            const mean_text = (flight.mean_throttle != null) ? ", средний газ " + flight.mean_throttle.toFixed(2) : ""
+            if (flight.duration_s < r.hover_min_s) {
+                add("flight", "warn", "Полёт", text + ": мало для усреднения спектра" + others, "Висение не меньше " + r.hover_min_s + " с без ввода")
+            } else if (vtol && (flight.modes == null)) {
+                add("flight", "warn", "Полёт", text + mean_text + ": в логе нет MODE — окно взято по газу, в него мог попасть самолётный полёт",
+                    "Проверьте окно по графику полёта и при необходимости задайте интервал вручную")
+            } else {
+                add("flight", "ok", "Полёт", text + mean_text + others)
+            }
         }
-    } else if (info.flight.duration_s < r.hover_min_s) {
-        add("flight", "warn", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с: мало для усреднения спектра", "Висение не меньше " + r.hover_min_s + " с без ввода")
-    } else {
-        const mean_text = (info.flight.mean_throttle != null) ? ", средний газ " + info.flight.mean_throttle.toFixed(2) : ""
-        add("flight", "ok", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с" + mean_text)
     }
 
     // Вибрации
@@ -181,26 +242,33 @@ function run_checks(info, params, vibe) {
         }
     }
 
-    // Газ висения против MOT_THST_HOVER. Расхождение считается не к самому среднему газу, а к тому значению,
-    // которое обучение вообще может дать: ArduPilot зажимает MOT_THST_HOVER в пределах hover_learn_min…hover_learn_max
-    const hover = params.get("MOT_THST_HOVER")
+    // Газ висения против <mot>THST_HOVER (MOT_ у Copter, Q_M_ у QuadPlane — тот же AP_MotorsMulticopter; средний газ — окна
+    // полёта, у QuadPlane — VTOL-окна). Расхождение считается не к самому среднему газу, а к тому значению, которое обучение
+    // вообще может дать: ArduPilot зажимает THST_HOVER в пределах hover_learn_min…hover_learn_max. Где газ висения учится —
+    // profile.hover_learn_modes (у QuadPlane — только с регулятором высоты: не в QSTABILIZE и QACRO, profile.hover_learn_note)
+    const hover_name = (profile != null) ? profile.mot + "THST_HOVER" : null
+    const hover = (hover_name != null) ? params.get(hover_name) : null
     const mean = info.flight?.mean_throttle ?? null
     if ((hover != null) && (mean != null)) {
+        const learn_name = profile.mot + "HOVER_LEARN"
         const target = Math.min(Math.max(mean, r.hover_learn_min), r.hover_learn_max)
         const diff = Math.abs(hover - target)
         // Пояснение, почему значение не совпадёт с газом даже после обучения — в обеих ветках
         const limit_note = (mean < r.hover_learn_min)
             ? " (обучение ограничено снизу значением " + r.hover_learn_min + " — для очень мощного аппарата это нормально)"
             : ""
-        let text = "MOT_THST_HOVER " + hover.toFixed(2) + ", средний газ в полёте " + mean.toFixed(2)
+        let text = hover_name + " " + hover.toFixed(2) + ", " + profile.hover_throttle_text + " " + mean.toFixed(2)
         if (diff > r.hover_throttle_tolerance) {
-            const learning = params.get("MOT_HOVER_LEARN") == 2
+            const learning = params.get(learn_name) == 2
+            const modes = profile.hover_learn_modes
+            const note = (profile.hover_learn_note != null) ? ": " + profile.hover_learn_note : ""
             text += ": расхождение " + diff.toFixed(2) + limit_note
             if (learning) {
-                text += " (обучение включено: большое расхождение значит, что висения в AltHold было мало)"
+                text += " (обучение включено: большое расхождение значит, что висения в " + modes + " было мало)"
             }
-            add("hover_throttle", "warn", "Газ висения", text,
-                learning ? "Повисите не меньше " + r.hover_learn_s + " с в AltHold, чтобы значение обучилось" : "MOT_HOVER_LEARN = 2 (обучение с сохранением)")
+            add("hover_throttle", "warn", "Газ висения", text, learning
+                ? "Повисите не меньше " + r.hover_learn_s + " с в " + modes + ", чтобы значение обучилось" + note
+                : learn_name + " = 2 (обучение с сохранением)" + ((note != "") ? " и висение не меньше " + r.hover_learn_s + " с в " + modes + note : ""))
         } else {
             add("hover_throttle", "ok", "Газ висения", text + limit_note)
         }

@@ -408,7 +408,9 @@ async function load(buffer, file = null) {
     state.log = log
     state.version = get_version_and_board(log)
     state.params = log_params(log)
-    state.info = log_info(log, state.version)
+    // Вид аппарата (core/vehicle.js) — до сведений о логе: от профиля зависят газ, окно полёта, сообщения PID и проверки
+    // (run_checks берёт его из state.info.profile; null — вид не поддержан)
+    state.info = log_info(log, state.version, vehicle_profile(vehicle_kind(state.version.build_type, state.params)))
     state.vibe = vibe_summary(log)
     state.checks = run_checks(state.info, state.params, state.vibe)
     // Окружение ядра. Версия фильтра из VER.FV, как в FilterReview: без неё — 1 (FilterReview оставляет 1.0 из reset),

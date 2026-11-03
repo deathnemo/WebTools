@@ -758,48 +758,11 @@ function pidtune_param_values(params, name, range) {
     return values
 }
 
-// Участки режимов полёта в интервале range = [t0, t1] по сообщениям MODE (поле Mode): действующий на t0 (последний
-// MODE не позже t0) — с t0, каждый MODE внутри (t0 < t < t1) открывает новый участок, последний — до t1; подряд один
-// и тот же режим (повторная запись ACRO) — один участок. Режим до первого MODE неизвестен — участка нет. MODE ровно
-// на t1 участка не даёт: его длительность в интервале нулевая (и кнопка «Интервал — участок ACRO» шага 4 ставит
-// конец интервала на целую секунду не позже смены режима). → [{ mode (номер), start, end (с) }] по времени; [] — нет MODE
+// Участки режимов полёта в интервале range = [t0, t1] по сообщениям MODE → [{ mode (номер), start, end (с) }] по времени;
+// [] — нет MODE. Обёртка: функция перенесена в core/log.js (log_mode_segments — там описание), окно VTOL шага 0 берёт её
+// без ядра шага 4
 function pidtune_mode_segments(log, range) {
-    if ((log == null) || !("MODE" in log.messageTypes)) {
-        return []
-    }
-    const time = log.get("MODE", "TimeUS")
-    const mode = log.get("MODE", "Mode")
-    if ((time == null) || (mode == null)) {
-        return []
-    }
-    let current = null
-    const inner = []
-    for (let i = 0; i < time.length; i++) {
-        const t = time[i] * US2S
-        if (t <= range[0]) {
-            current = mode[i]
-        } else if (t < range[1]) {
-            inner.push([mode[i], t])
-        }
-    }
-    const segments = []
-    const open = (m, t) => {
-        const last = segments[segments.length - 1]
-        if (last != null) {
-            if (last.mode == m) {
-                return
-            }
-            last.end = t
-        }
-        segments.push({ mode: m, start: t, end: range[1] })
-    }
-    if (current != null) {
-        open(current, range[0])
-    }
-    for (const [m, t] of inner) {
-        open(m, t)
-    }
-    return segments
+    return log_mode_segments(log, range)
 }
 
 // Номера режимов полёта в интервале range (pidtune_mode_segments): без повторов, в порядке появления. [] — нет MODE
