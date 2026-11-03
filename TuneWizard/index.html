@@ -348,6 +348,7 @@ details.more > .tablewrap{margin-top:8px}
         <input id="FFTWindow_size" type="number" min="64" step="1" value="1024" disabled onchange="window_size_changed(this)">
       </div>
     </div>
+    <p class="note" id="interval_vtol_note" hidden>Интервал по умолчанию у QuadPlane — только VTOL-режимы (Q-режимы): самый длинный участок с газом, другие называет проверка «Полёт». VTOL-взлёт и посадка внутри AUTO и GUIDED по MODE не видны — такой участок задайте вручную.</p>
     <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1. «Проверить .param» — подготовка к следующему полёту по файлу параметров, можно и без лога.</p>
   </div>
 
@@ -489,6 +490,7 @@ details.more > .tablewrap{margin-top:8px}
 
   <div class="head"><span class="eyebrow">Средний спектр</span><h2>Гироскопы по осям: до фильтров, после и оценка «после»</h2></div>
   <div id="Spectrum1" class="plot"></div>
+  <p class="note" id="spec_axes_note" hidden></p>
 
   <div class="head"><span class="eyebrow">Спектрограмма</span><h2>Спектр по времени</h2></div>
   <div class="row">

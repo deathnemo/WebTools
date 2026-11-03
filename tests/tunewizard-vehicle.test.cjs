@@ -114,6 +114,13 @@ test('vehicle_profile, vehicle_atc, vehicle_mot: профиль по виду и
 test('профиль QuadPlane: шаги без 4, PIQx, газ QTUN.ThO → RATE.AOut, VTOL-режимы 17–23, QACRO и выход, бит 20, рама', () => {
     assert.deepEqual(copter.steps, [0, 1, 2, 3, 4, 5])
     assert.deepEqual(quadplane.steps, [0, 1, 2, 3, 5])
+    // Почему шаг закрыт — у каждого шага мастера вне steps, и только у них (подсказка кнопки шага, дизайн, раздел 7)
+    for (const profile of [copter, quadplane]) {
+        for (let n = 0; n <= 5; n++) {
+            assert.equal(Object.hasOwn(profile.closed_steps, n), !profile.steps.includes(n), profile.kind + ', шаг ' + n)
+        }
+    }
+    assert.match(quadplane.closed_steps[4], /^Шаг 4 \(PID\) для QuadPlane пока недоступен: .+ Нужен лог QACRO/)
     assert.deepEqual(quadplane.pid_messages, ['PIQR', 'PIQP', 'PIQY'])
     assert.deepEqual(quadplane.throttle, [['QTUN', 'ThO'], ['RATE', 'AOut']])
     assert.deepEqual(quadplane.vtol_modes.map((m) => quadplane.modes[m]), ['QSTABILIZE', 'QHOVER', 'QLOITER', 'QLAND', 'QRTL', 'QAUTOTUNE', 'QACRO'])

@@ -359,6 +359,40 @@ test('log_info QuadPlane: без MODE — окно по газу за весь �
     assert.deepEqual(equal.flight.segments.map((s) => [s.start, s.end, s.modes]), [[102, 138, [18]]])
 })
 
+test('log_info QuadPlane: газ до первого MODE (режим неизвестен) в окно не входит', () => {
+    // Газ 0.45 с 15 с, первый MODE (QSTABILIZE) — на 30 с: окно с 32 (30.05 → 31 + 1 с отступа), а не с 17
+    const info = quadplane_info(quadplane_log({ mode: { TimeUS: [30e6, 60e6, 100e6, 150e6], Mode: [17, 5, 18, 20] } }))
+    assert.deepEqual([info.flight.start, info.flight.end, info.flight.modes], [102, 168, [18, 20]])
+    assert.deepEqual(info.flight.segments, [{ start: 32, end: 53, duration_s: 21, modes: [17] }])
+    // Единственный VTOL-участок начинается позже газа
+    const only = quadplane_info(quadplane_log({ mode: { TimeUS: [30e6], Mode: [17] }, throttle_at: (t) => (t >= 15 && t < 55) ? 0.45 : 0 }))
+    assert.deepEqual([only.flight.start, only.flight.end, only.flight.modes, only.flight.segments], [32, 53, [17], []])
+})
+
+test('log_info QuadPlane: VTOL сменился самолётным режимом при продолжающемся газе — окно кончается на смене режима', () => {
+    // Газ 0.45 на 15–55 с без перерыва, QSTABILIZE → FBWA на 40 с (у tailsitter QTUN и RATE пишутся и в FBWA): окно
+    // 17–38, газ FBWA и следующие участки FBWA с газом — не VTOL
+    const info = quadplane_info(quadplane_log({ mode: { TimeUS: [10e6, 40e6], Mode: [17, 5] } }))
+    assert.deepEqual([info.flight.start, info.flight.end, info.flight.duration_s, info.flight.modes, info.flight.segments], [17, 38, 21, [17], []])
+    assert.ok(Math.abs(info.flight.mean_throttle - 0.45) < 1e-9, String(info.flight.mean_throttle))
+})
+
+test('log_info Copter с MODE: окно — весь полёт с газом, как без MODE; полей окна VTOL нет', () => {
+    const n = 61
+    const TimeUS = Array.from({ length: n }, (_, i) => i * 1e6)
+    const messages = {
+        ATT: { TimeUS, Roll: new Array(n).fill(0), Pitch: new Array(n).fill(0) },
+        CTUN: { TimeUS, ThO: TimeUS.map((_, i) => (i >= 5 && i <= 55) ? 0.35 : 0) },
+    }
+    const without = core_log.log_info(fake_log({ messages }), copter_version, copter)
+    // STABILIZE → ACRO → ALT_HOLD → LAND внутри полёта: режимы окно Copter не делят
+    const with_mode = core_log.log_info(fake_log({ messages: { ...messages, MODE: { TimeUS: [2e6, 20e6, 30e6, 50e6], Mode: [0, 1, 2, 9] } } }), copter_version, copter)
+    assert.equal(with_mode.messages.mode, true)
+    assert.deepEqual(with_mode.flight, without.flight)
+    assert.deepEqual(Object.keys(with_mode.flight), ['start', 'end', 'duration_s', 'mean_throttle'])
+    assert.deepEqual([with_mode.flight.start, with_mode.flight.end], [6, 54])
+})
+
 test('log_info: Plane без Q_ENABLE (0 и без параметра) — вид не поддержан, сведения как до этапа 9', () => {
     for (const Q_ENABLE of [0, null]) {
         const info = quadplane_info(quadplane_log({ params: { Q_ENABLE } }))
@@ -783,6 +817,14 @@ test('run_checks QuadPlane: полёт — короткий, без MODE, без
     assert.equal(no_mode.status, 'warn')
     assert.equal(no_mode.text, 'Висение VTOL 151 с (17–168 с), средний газ 0.39: в логе нет MODE — окно взято по газу, в него мог попасть самолётный полёт')
     assert.match(no_mode.fix, /интервал вручную/)
+    // Без MODE и висение короче 30 с — «мало» и та же оговорка о самолётном полёте (газ 15–35 с → окно 17–33)
+    const short_no_mode = by_id(quadplane_checks({ mode: null, throttle_at: (t) => (t >= 15 && t < 35) ? 0.45 : 0 }), 'flight')
+    assert.equal(short_no_mode.status, 'warn')
+    assert.equal(short_no_mode.text, 'Висение VTOL 16 с (17–33 с): мало для усреднения спектра; в логе нет MODE — в окно мог попасть самолётный полёт; ' +
+        'проверьте интервал по графику')
+    assert.equal(short_no_mode.fix, 'Висение не меньше 30 с без ввода')
+    // С MODE короткое окно оговорки не получает
+    assert.doesNotMatch(short.text, /MODE/)
     // MODE без VTOL-участков с газом — СТОП
     const fbwa = by_id(quadplane_checks({ mode: { TimeUS: [1e6], Mode: [5] } }), 'flight')
     assert.equal(fbwa.status, 'fail')

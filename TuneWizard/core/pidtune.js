@@ -37,7 +37,7 @@
 // (тестовый полёт) — до 0.2 пункта и 0.6°, при редких манёврах и сильной турбулентности — до 2.9 пункта и 3°.
 //
 // Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/fft.js (hanning), Libraries/Array_Math.js (exp_jw,
-// complex_inverse, complex_square), US2S (core/log.js), find_start_index и find_end_index (core/gyro.js), load_filters
+// complex_inverse, complex_square), log_mode_segments (core/log.js), find_start_index и find_end_index (core/gyro.js), load_filters
 // и filter_transfer (core/filters.js), candidate_key (core/candidates.js), pid_lowpass_response (core/lowpass.js),
 // PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN (core/pid.js).
 

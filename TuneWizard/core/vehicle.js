@@ -11,7 +11,8 @@
 // Профили по виду. Поля:
 //   kind, title — ключ вида и имя для пользователя; build_type — VER.BU (как в Libraries/LogHelpers.js);
 //   enable_param — параметр, без которого вид не поднимается (null — не нужен); param_marker — признак вида в файле .param;
-//   steps — доступные шаги мастера;
+//   steps — доступные шаги мастера; closed_steps — почему шаг мастера, которого нет в steps, закрыт: { номер: текст }
+//          (подсказка кнопки шага в полосе шагов, строка сводки);
 //   atc, mot — префиксы параметров регулятора положения (AC_AttitudeControl_Multi) и моторов (AP_MotorsMulticopter):
 //          суффиксы у Copter и QuadPlane одни (RAT_RLL_FLTD, ACCEL_R_MAX / ACC_R_MAX, THST_HOVER…);
 //   pid_messages, pid_title — сообщения PID контура скорости (первое — для частоты лога PID) и заголовок проверки шага 0;
@@ -38,6 +39,7 @@ const vehicle_profiles = {
         enable_param: null,
         param_marker: "ATC_RAT_RLL_P",          // контур скорости крена Copter (дизайн этапа 7) [наше]
         steps: [0, 1, 2, 3, 4, 5],
+        closed_steps: {},
         atc: "ATC_",
         mot: "MOT_",
         pid_messages: ["PIDR", "PIDP", "PIDY"], // [код] ArduCopter/Log.cpp:88 (Log_Write_PIDS)
@@ -82,6 +84,12 @@ const vehicle_profiles = {
         enable_param: "Q_ENABLE",
         param_marker: "Q_A_RAT_RLL_P",          // виден только при Q_ENABLE ≠ 0 [код] quadplane.cpp:15, Parameters.cpp:817–821
         steps: [0, 1, 2, 3, 5],                 // шаг 4 — следующим этапом [решение пользователя 30.10.2026]
+        // Текст — дизайн этапа 9, раздел 7: по логу пользователя (PIQx 24 Гц, полёт в QSTABILIZE) контур скорости не измерить
+        closed_steps: {
+            4: "Шаг 4 (PID) для QuadPlane пока недоступен: по логу с PIQR/PIQP/PIQY 25 Гц и полётом в QSTABILIZE контур скорости " +
+               "не измерить. Нужен лог QACRO — подготовьте его в «Подготовке к следующему полёту» (цель «PID»); шаг 4 появится " +
+               "следующим этапом.",
+        },
         // Q_A_ — тот же AC_AttitudeControl_Multi, Q_M_ — тот же AP_MotorsMulticopter [код] Parameters.cpp:817–821,
         // quadplane.cpp:17–19, 768
         atc: "Q_A_",

@@ -13,6 +13,10 @@ const state = {
     log: null,
     version: null,
     params: null,
+    // Вид аппарата лога (vehicle_kind: "copter" | "quadplane") и его профиль (core/vehicle.js); null — вид не поддержан
+    // или лога нет. Те же значения — в info.kind и info.profile
+    kind: null,
+    profile: null,
     info: null,
     vibe: null,
     checks: null,
@@ -161,8 +165,9 @@ function check_status(id) {
     return check ? check.status : null
 }
 
-// Шаг 0 доступен всегда; 1–3 — лог Copter с пригодными данными гироскопа; 4 — лог Copter с PID или RATE;
-// 5 (сводка) — любой загруженный лог
+// Шаг 0 доступен всегда; 5 (сводка) — любой загруженный лог; остальные — только шаги профиля аппарата (profile.steps:
+// у QuadPlane без шага 4 — дизайн этапа 9, раздел 7; вид не поддержан — ни одного): 1–3 — с пригодными данными
+// гироскопа, 4 — с PID или RATE
 function step_available(n) {
     if (n == 0) {
         return true
@@ -173,13 +178,18 @@ function step_available(n) {
     if (n == 5) {
         return true
     }
-    if (state.info.vehicle !== "Copter") {
+    if ((state.profile == null) || !state.profile.steps.includes(n)) {
         return false
     }
     if (n <= 3) {
         return check_status("gyro_log") !== "fail"
     }
     return check_status("pid_log") !== "fail"
+}
+
+// Почему шаг n закрыт для аппарата лога (profile.closed_steps: у QuadPlane — шаг 4) → текст подсказки кнопки или null
+function step_closed_text(n) {
+    return state.profile?.closed_steps[n] ?? null
 }
 
 // Окно FFT шага 0 действует только на raw-лог (GYR). Тип — выбор шага 1, а до него — как выберет load_gyro:
@@ -232,6 +242,13 @@ function update_wizbar() {
     const buttons = document.querySelectorAll("#wizbar button")
     for (let i = 0; i < buttons.length; i++) {
         buttons[i].disabled = !step_available(i)
+        // Шаг, закрытый для аппарата лога, — с подсказкой почему (дизайн этапа 9, раздел 7)
+        const closed = step_closed_text(i)
+        if (closed != null) {
+            buttons[i].title = closed
+        } else {
+            buttons[i].removeAttribute("title")
+        }
         if (i === state.step) {
             buttons[i].setAttribute("aria-current", "step")
         } else {
@@ -324,6 +341,8 @@ function reset() {
     state.log = null
     state.version = null
     state.params = null
+    state.kind = null
+    state.profile = null
     state.info = null
     state.vibe = null
     state.checks = null
@@ -379,6 +398,7 @@ function reset() {
     document.getElementById("log_verdict").hidden = true
     document.getElementById("log_info").hidden = true
     document.getElementById("log_checks").hidden = true
+    document.getElementById("interval_vtol_note").hidden = true
     for (const trace of flight_data.data) {
         trace.x = []
         trace.y = []
@@ -409,8 +429,10 @@ async function load(buffer, file = null) {
     state.version = get_version_and_board(log)
     state.params = log_params(log)
     // Вид аппарата (core/vehicle.js) — до сведений о логе: от профиля зависят газ, окно полёта, сообщения PID и проверки
-    // (run_checks берёт его из state.info.profile; null — вид не поддержан)
-    state.info = log_info(log, state.version, vehicle_profile(vehicle_kind(state.version.build_type, state.params)))
+    // (run_checks берёт его из state.info.profile), доступные шаги, плитки и график полёта; null — вид не поддержан
+    state.kind = vehicle_kind(state.version.build_type, state.params)
+    state.profile = vehicle_profile(state.kind)
+    state.info = log_info(log, state.version, state.profile)
     state.vibe = vibe_summary(log)
     state.checks = run_checks(state.info, state.params, state.vibe)
     // Окружение ядра. Версия фильтра из VER.FV, как в FilterReview: без неё — 1 (FilterReview оставляет 1.0 из reset),
@@ -472,17 +494,21 @@ function format_seconds(s) {
     return (m > 0) ? m + " мин " + sec + " с" : sec + " с"
 }
 
+// Плитки шага 0. «Аппарат» — вид (у tailsitter — «QuadPlane · tailsitter»), подсвечен, если вид поддержан; окно полёта
+// и газ — подписями профиля: у QuadPlane — «Висение VTOL» и «Средний газ VTOL» (окно VTOL-режимов, дизайн этапа 9, раздел 2)
 function render_info() {
     const info = state.info
     const params = state.params
     const flight = info.flight
+    const profile = state.profile
+    const vtol = profile?.vtol_modes != null
     const html = [
-        stat_tile("Аппарат", info.vehicle ?? "—", info.vehicle === "Copter"),
+        stat_tile("Аппарат", (info.vehicle ?? "—") + (info.tailsitter ? " · tailsitter" : ""), profile != null),
         stat_tile("Прошивка", info.fw_string ?? "—"),
         stat_tile("Плата", info.board ?? "—"),
         stat_tile("Длительность лога", format_seconds(info.duration_s)),
-        stat_tile("Полёт с газом", flight ? format_seconds(flight.duration_s) : "нет"),
-        stat_tile("Средний газ", (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
+        stat_tile(profile?.flight_title ?? "Полёт с газом", flight ? format_seconds(flight.duration_s) : "нет"),
+        stat_tile(vtol ? "Средний газ VTOL" : "Средний газ", (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
         stat_tile("INS_GYRO_FILTER", params.get("INS_GYRO_FILTER") ?? "—"),
         stat_tile("SCHED_LOOP_RATE", params.get("SCHED_LOOP_RATE") ?? "—"),
         stat_tile("Версия фильтра", info.filter_version ?? "—"),
@@ -533,11 +559,18 @@ function plot_flight() {
             flight_data.data[1].y = Pitch
         }
     }
-    const throttle = throttle_series(log)
+    // Газ — ряды профиля (у QuadPlane — газ VTOL-моторов QTUN.ThO → RATE.AOut: CTUN.ThO у Plane — самолётный мотор, в
+    // VTOL ≈ 0), тот же, по которому log_info взял окно полёта; без профиля — CTUN.ThO → RATE.AOut, как до этапа 9
+    const vtol = state.profile?.vtol_modes != null
+    const throttle = throttle_series(log, state.profile?.throttle ?? LOG_DEFAULT_PROFILE.throttle)
     if ((throttle != null) && (throttle.time != null) && (throttle.throttle != null)) {
         flight_data.data[2].x = throttle.time
         flight_data.data[2].y = throttle.throttle
     }
+    const throttle_name = vtol ? "Газ VTOL" : "Газ"
+    flight_data.data[2].name = throttle_name
+    flight_data.data[2].meta = throttle_name
+    flight_data.layout.yaxis3.title.text = throttle_name
     if ("POS" in log.messageTypes) {
         const TimeUS = log.get("POS", "TimeUS")
         const RelHomeAlt = log.get("POS", "RelHomeAlt")
@@ -566,9 +599,12 @@ function plot_flight() {
     }
     state.settings.min = Math.floor(min)
     state.settings.max = Math.ceil(max)
-    // Интервал по умолчанию: полёт с газом, иначе весь лог
+    // Интервал по умолчанию: окно полёта log_info (у QuadPlane — самый длинный участок VTOL-режимов с газом), иначе весь
+    // лог. Подпись под полями о VTOL-режимах — когда окно взято по участкам режимов (flight.modes; без MODE окно по газу —
+    // оговорка в проверке «Полёт», VTOL-участков с газом нет — интервал на весь лог)
     const flight = state.info.flight
     set_interval(flight ? flight.start : min, flight ? flight.end : max)
+    document.getElementById("interval_vtol_note").hidden = !(vtol && (flight?.modes != null))
     for (const id of ["TimeStart", "TimeEnd"]) {
         document.getElementById(id).min = state.settings.min
         document.getElementById(id).max = state.settings.max

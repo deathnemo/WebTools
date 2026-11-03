@@ -24,11 +24,13 @@ function load_page_scripts(files) {
     }
 }
 
-// Нужное ядру подготовки в порядке страницы: param_to_string и get_param_download_text (Param_Helpers.js), log_params
-// (log.js), check_rules (checks.js), notch_param_names (filters.js), pidtune_rules и pidtune_mode_names (pidtune.js; ему —
-// константы pid.js), param_file_text и parse_param_file (params.js), summary_period и summary_lower_first (summary.js)
+// Нужное ядру подготовки в порядке страницы: param_to_string и get_param_download_text (Param_Helpers.js), vehicle_profile
+// (vehicle.js; профиль Copter для run_checks), log_params (log.js), check_rules (checks.js), notch_param_names
+// (filters.js), pidtune_rules и pidtune_mode_names (pidtune.js; ему — константы pid.js), param_file_text и
+// parse_param_file (params.js), summary_period и summary_lower_first (summary.js)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/log.js',
     'TuneWizard/core/checks.js',
     'TuneWizard/core/filters.js',
@@ -299,7 +301,8 @@ test('gyro_data: старая прошивка без INS_RAW_LOG_OPT — под
 })
 
 test('gyro_data: подсказка raw — тот же текст, что в совете шага 0 (gyro_log, core/checks.js), с INS_RAW_LOG_OPT и без', () => {
-    const info = { vehicle: 'Copter', messages: { pid: true, gyro_raw: false, gyro_batch: false }, flight: null, throttle_source: null }
+    // С профилем Copter, как на странице: без профиля run_checks считает вид неподдержанным
+    const info = { vehicle: 'Copter', kind: 'copter', profile: vehicle_profile('copter'), messages: { pid: true, gyro_raw: false, gyro_batch: false }, flight: null, throttle_source: null }
     for (const changes of [{ INS_RAW_LOG_OPT: 0, INS_LOG_BAT_MASK: 0 }, { INS_RAW_LOG_OPT: undefined, INS_LOG_BAT_MASK: 0 }]) {
         const values = with_values(changes)
         const prep_hint = item_of(check(values, 'filters'), 'gyro_data').fix.split('можно вместо него raw: ')[1]

@@ -71,7 +71,9 @@ function run_checks(info, params, vibe) {
     const slow = (hz != null) && (hz < r.pid_log_min_rate_hz * r.pid_log_rate_margin)
     // Частота словами — с отбрасыванием до десятых, без округления вверх: 98.97 — «98.9», а не «99»
     const hz_text = (hz == null) ? "" : String(Math.floor(hz * 10) / 10)
-    if ((profile != null) && (profile.fullrate_bit == null)) {
+    // Ветка — по виду, а не по признаку профиля (fullrate_bit == null): тексты ниже — про биты и сообщения Copter, и новый
+    // вид без fullrate_bit не должен получить их молча (ревью задачи 1 этапа 9)
+    if ((profile != null) && (profile.kind === "copter")) {
         // Copter: PID с частотой цикла — биты PID и ATTITUDE_FAST; без PID и RATE шаг 4 недоступен
         const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
         const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
@@ -207,9 +209,13 @@ function run_checks(info, params, vibe) {
                 ? "; ещё VTOL: " + flight.segments.map((s) => span(s) + " (" + mode_names(s.modes) + ")").join(", ") : ""
             const text = profile.flight_title + " " + Math.round(flight.duration_s) + " с" + where
             const mean_text = (flight.mean_throttle != null) ? ", средний газ " + flight.mean_throttle.toFixed(2) : ""
+            // Окно VTOL без MODE взято по газу: оговорка — и у короткого окна (ревью задачи 1 этапа 9)
+            const no_mode = vtol && (flight.modes == null)
             if (flight.duration_s < r.hover_min_s) {
-                add("flight", "warn", "Полёт", text + ": мало для усреднения спектра" + others, "Висение не меньше " + r.hover_min_s + " с без ввода")
-            } else if (vtol && (flight.modes == null)) {
+                add("flight", "warn", "Полёт", text + ": мало для усреднения спектра" + others +
+                    (no_mode ? "; в логе нет MODE — в окно мог попасть самолётный полёт; проверьте интервал по графику" : ""),
+                    "Висение не меньше " + r.hover_min_s + " с без ввода")
+            } else if (no_mode) {
                 add("flight", "warn", "Полёт", text + mean_text + ": в логе нет MODE — окно взято по газу, в него мог попасть самолётный полёт",
                     "Проверьте окно по графику полёта и при необходимости задайте интервал вручную")
             } else {
