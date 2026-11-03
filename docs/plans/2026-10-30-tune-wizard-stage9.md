@@ -45,7 +45,7 @@
 **Файлы:** `TuneWizard/core/lowpass.js`, `TuneWizard/steps/step3.js`, `TuneWizard/steps/common.js` (`step_find_metadata`: `Q_A_<X>` → `ATC_<X>`), тесты `tests/tunewizard-lowpass.test.cjs`, `tests/tunewizard-step3.test.cjs`, вставка в `tests/tunewizard-browser-log3.cjs`.
 
 - Раздел 6 дизайна: ≈25 сборок `"ATC_RAT_" + …` — через префикс профиля; заводские и оси — из профиля (`vehicle_accel_defaults`, `vehicle_gyro_axes`); пределы `Q_A_ACCEL_*_MAX` (сантиградусы/с²) / `Q_A_ACC_*_MAX` (°/с²); у QuadPlane — без поля размера винта и варианта «По размеру винта», варианты «Как в логе», «Лог + правило /2», «Свой», без рекомендации; шум D крена tailsitter — ось Z, подпись и цвет; предупреждения NEF; Copter — без изменений.
-- Третий лог: «Как в логе» — `Q_A_RAT_*_FLTD` 25.5, `INS_GYRO_FILTER` 40, пределы 70000/70000/28800; «Лог + правило /2» — FLTT и FLTD 20.
+- Третий лог: «Как в логе» — FLTD крена и тангажа 25.5 (рыскания 0), `INS_GYRO_FILTER` 40, пределы 70000/70000/28800; «Лог + правило /2» — FLTT трёх осей и FLTD крена и тангажа 20.
 
 **Коммит:** `TuneWizard: шаг 3 для QuadPlane`, push.
 
