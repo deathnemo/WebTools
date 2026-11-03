@@ -131,6 +131,13 @@ CHROME_PATH="<путь к chrome.exe>" npm run test:tunewizard-pid-compare
 ## 4. Состояние сейчас
 
 - **Ветка:** `tune-wizard-next5` (от `main` = `04346d3`) — этап 9 «QuadPlane (VTOL)»: дизайн утверждён (`docs/plans/2026-10-30-tune-wizard-stage9-design.md`; исследование — карта привязки мастера к Copter и факты ArduPlane 4.8.0-dev / тег `Plane-4.6.3`), план из шести задач — `docs/plans/2026-10-30-tune-wizard-stage9.md`; до этапа в ветке — запись журнала о слиянии PR #12.
+- **Этап 9:**
+
+| Задача | Коммиты |
+|---|---|
+| 1. `TuneWizard/core/vehicle.js` (профили Copter и QuadPlane с источниками, `vehicle_kind`, `vehicle_kind_of_params`, `vehicle_profile`, оси tailsitter, заводские пределы при `Q_FRAME_CLASS = 10`; двойной скрипт — в `DUAL_SCRIPTS` `eslint.config.mjs`), `log_info(log, version, profile)` (газ `QTUN.ThO` → `RATE.AOut`, окно VTOL-режимов 17–23 со склейкой и самым длинным участком — `log_vtol_windows`, `log_flight`; `log_mode_segments` перенесена из `pidtune.js`; рама «QuadPlane Frame»; PID профиля), `run_checks` по `info.profile` (`vehicle`, `pid_log` с битом 20, `flight`, `hover_throttle` по `Q_M_*`); 15 новых тестов. Исполнитель остановился 30.10 на недельном лимите API и продолжил 03.11 со своего места | `874ea91` |
+
+- **Проверки после задачи 1** (03.11.2026): lint, `npm test` 579 из 579, `test:tunewizard` (141 с), `-log2`, `-prep`; третий лог — окно 317–382 с, газ 0.47, проверки как в разделе 4 дизайна; Copter до/после на обоих логах — совпадают (два независимых сравнения ревьюеров). Мелкие находки ревью (оговорка «нет MODE» в короткой ветке «Полёт», контракт `log_info` без профиля, заголовок `pidtune.js`, тесты окна) — первым пунктом задачи 2; QRTL с самолётным заходом — ограничение в дизайне. Страница для лога QuadPlane до задачи 2 — промежуточная (шаги 1–3 закрыты): ветку не сливать до задачи 2. В корне был неотслеживаемый `AGENTS.md` (копия `CLAUDE.md` для Codex) — удалён по решению пользователя: Codex в проекте не используется.
 - **Этап 8 слит** ([PR #12](https://github.com/deathnemo/WebTools/pull/12), ветка `tune-wizard-next4` от `810a5ff`): дизайн `docs/plans/2026-10-30-tune-wizard-stage8-design.md` (с разделом 9а «Уточнено при реализации»), план из трёх задач — `docs/plans/2026-10-30-tune-wizard-stage8.md`; до этапа в ветке — записи журнала о слиянии PR #11, о QuadPlane и третьем логе.
 - **Этап 8:**
 
