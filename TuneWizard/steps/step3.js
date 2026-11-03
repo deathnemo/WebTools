@@ -12,7 +12,7 @@
 // Нужны глобалы страницы: core/lowpass.js (lowpass_*, prop_*, LOWPASS_AXES), core/vehicle.js (vehicle_atc,
 // vehicle_profiles), core/candidates.js (candidate_key), Libraries/Param_Helpers.js (param_to_string), plots.js
 // (register_plot, render_plot, plot, plot_palette), wizard.js (state,
-// set_step, html_escape), steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict,
+// set_step, step_next, html_escape), steps/common.js (step_signed, step_value_text, step_tile, step_cell, step_verdict,
 // step_gyro_sensor, step_ensure_step1, step_try, step_run, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, plot_axis, plot_trace_visibility, plot_clear), steps/step1.js (step1, step1_ready,
 // values_from_log, radio_value, SPEC_AXES) и steps/memory.js (memory_show — строка сравнения с прошлым проходом).
@@ -206,8 +206,9 @@ function step3_metrics_summary(e) {
 function step3_init() {
     step3_setup_plots()
 
-    // Пороги во вступлении и частоты задержки в подписи бодэ — из lowpass_rules, чтобы текст не расходился с ядром.
-    // Свой атрибут data-rule3: шаг 2 перебирает все [data-rule] документа
+    // Пороги во вступлении, нижняя граница правила /2 в заметке аппарата без формулы и частоты задержки в подписи бодэ —
+    // из lowpass_rules, чтобы текст не расходился с ядром. Свой атрибут data-rule3: шаг 2 перебирает все [data-rule]
+    // документа
     const rules = lowpass_rules
     const rule_texts = {
         band: rules.band_hz[0] + "–" + rules.band_hz[1] + " Гц",
@@ -216,6 +217,7 @@ function step3_init() {
         lag: rules.max_lag_increase_ms + " мс",
         lag_freqs: rules.lag_freqs_hz.join(" и ") + " Гц",
         band_top: rules.band_hz[1] + " Гц",
+        pid_min: String(rules.pid_filter_min_hz),
     }
     for (const span of document.querySelectorAll("[data-rule3]")) {
         span.textContent = rule_texts[span.dataset.rule3]
@@ -328,11 +330,15 @@ function step3_prop_save(text) {
 
 // Блок размера винта: у аппарата без формулы (prop_formula профиля, QuadPlane) скрыт целиком, вместо него — заметка
 // #step3_vehicle_note; иначе предупреждение у поля (prop_size_warning) и подсказка по INS_GYRO_FILTER лога (обратная
-// формула Mission Planner)
+// формула Mission Planner). Части текстов шага о размере винта и правилах для пределов ускорения (заголовок,
+// вступление, заметка под формой): data-prop3="on" — видны только при формуле, data-prop3="off" — только без неё
 function step3_render_prop() {
     const formula = step3_profile().prop_formula
     document.getElementById("prop_lab").hidden = !formula
     document.getElementById("step3_vehicle_note").hidden = formula
+    for (const part of document.querySelectorAll("[data-prop3]")) {
+        part.hidden = (part.dataset.prop3 === "on") !== formula
+    }
     const warn = document.getElementById("prop_warn")
     const warning = prop_size_warning(step3_prop_value())
     warn.textContent = warning ?? ""
@@ -892,7 +898,8 @@ function step3_accept() {
             evaluated_at: Date.now(),
         }
         step3_redraw_all()
-        set_step(4)
+        // Дальше — следующий шаг аппарата: у Copter шаг 4, у QuadPlane (шаг 4 закрыт) — сводка
+        set_step(step_next(3))
     }, "verdict3", "шага 3")
 }
 
@@ -1294,8 +1301,13 @@ function step3_render_verdict_choice(log, compare_note, base_note) {
     } else {
         status = "warn"
     }
-    const action = (step3_form_row()?.id === half.id) ? "Его значения уже в форме — нажмите «Принять»."
-        : "Чтобы взять его, выберите его в таблице и нажмите «Применить вариант», затем «Принять»; чтобы оставить лог — «Принять» со значениями «Как в логе»."
+    // Оставить лог: значения лога в форме — «Принять»; форма ушла от лога («Свой») — сначала вернуть их, как в ветке
+    // «совпадают с «Лог + правило /2»» выше
+    const form_id = step3_form_row()?.id
+    const keep_log = (form_id === "log") ? "«Принять» со значениями «Как в логе»"
+        : "выберите «Как в логе» и нажмите «Применить вариант», затем «Принять» (в форме сейчас другие значения)"
+    const action = (form_id === half.id) ? "Его значения уже в форме — нажмите «Принять»."
+        : "Чтобы взять его, выберите его в таблице и нажмите «Применить вариант», затем «Принять»; чтобы оставить лог — " + keep_log + "."
     step_verdict("verdict3", status, intro + " «" + half.title + "» против лога" + worse + ". Меняется: " + step3_changes_text(half.values) + "." + numbers + " " + action + base_note)
 }
 

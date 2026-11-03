@@ -209,6 +209,13 @@ function step_closed_text(n) {
     return state.profile?.closed_steps[n] ?? null
 }
 
+// Шаг после n для перехода после «Принять»: следующий шаг профиля аппарата (profile.steps: у QuadPlane после шага 3 —
+// шаг 5, шаг 4 закрыт), профиля нет — n + 1. Доступность по данным лога (step_available) проверяет set_step: у Copter
+// без PID и RATE «Принять» шага 3 оставляет на шаге 3, как до этапа 9
+function step_next(n) {
+    return state.profile?.steps.find((m) => m > n) ?? (n + 1)
+}
+
 // Окно FFT шага 0 действует только на raw-лог (GYR). Тип — выбор шага 1, а до него — как выберет load_gyro:
 // raw, если он есть, иначе batch
 function raw_window_used() {

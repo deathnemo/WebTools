@@ -4,10 +4,12 @@
 // Источники: [решение пользователя 25.10.2026]; [наше] — решение мастера; [код] — исходники ArduPilot и шагов мастера.
 //
 // Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
-// (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()) и имён, от которых
-// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short), подготовка к полёту
-// (prep0_summary: пункты, имя файла исправлений, имена с перезагрузкой) и поиск записи в метаданных параметров
-// (step_find_metadata).
+// (страница собирает их step2_param_names(), lowpass_param_names(state.params, state.profile) — у QuadPlane имена
+// Q_A_*, step4_param_names()) и имён, от которых зависит шаг 4 (step_depends4_names), совет тестового полёта
+// (step4_test_flight_short), доступные аппарату шаги (state.profile.steps — пункт «повторить проход»), подготовка к
+// полёту (prep0_summary: пункты, имя файла исправлений, имена с перезагрузкой) и поиск записи в метаданных параметров
+// (step_find_metadata: у Q_A_<X> — запись ATC_<X>). Дизайн QuadPlane — docs/plans/2026-10-30-tune-wizard-stage9-design.md,
+// раздел 8.
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, escmsk_present, mask_unsigned, mask_signed;
 // ему — Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
@@ -260,7 +262,9 @@ function summary_lower_first(text) {
 // - unreliable_axes — ключи осей шага 4 без надёжного измерения (roll | pitch | yaw; [] или null — таких нет). Страница
 //   берёт их из принятого шага 4 или из посчитанного: совет нужен и тогда, когда менять нечего и «Принять» на шаге 4
 //   не нажимали [наше];
-// - test_flight — совет тестового полёта (step4_test_flight_short).
+// - test_flight — совет тестового полёта (step4_test_flight_short);
+// - available — шаги мастера, доступные аппарату (profile.steps: у QuadPlane без шага 4); нет (null, undefined) — все,
+//   как у Copter.
 // Пункты:
 // 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия), fix — продолжение
 //    фразы: первая буква обычного слова строчная (summary_lower_first). Проверки, о которых есть пункт подготовки warn
@@ -276,8 +280,9 @@ function summary_lower_first(text) {
 //    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
 // 6. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
 //    в порядке pidtune_axes, первая с заглавной;
-// 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
-//    изменений проверять нечего, и список может быть пустым [наше]
+// 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог; шаги, которые
+//    покажут, сбылся ли прогноз, — те из 2–4, что доступны аппарату (summary_steps_text: у Copter «шаги 2–4», у
+//    QuadPlane «шаги 2–3» — дизайн этапа 9, раздел 8). Без изменений проверять нечего, и список может быть пустым [наше]
 function summary_refly(ctx) {
     const items = []
     const add = (source, text) => items.push({ source: source, text: summary_period(text) })
@@ -335,10 +340,20 @@ function summary_refly(ctx) {
     }
 
     if (changed.length > 0) {
-        add("repeat", "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–4 — " +
-            "сбылся ли прогноз")
+        const compared = [2, 3, 4].filter((n) => (ctx.available == null) || ctx.available.includes(n))
+        add("repeat", "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, " +
+            summary_steps_text(compared) + " — сбылся ли прогноз")
     }
     return items
+}
+
+// Шаги словами: один — «шаг 2»; подряд — «шаги 2–4»; иначе — «шаги 2, 4»
+function summary_steps_text(steps) {
+    if (steps.length == 1) {
+        return "шаг " + steps[0]
+    }
+    const in_row = steps.every((n, i) => (i == 0) || (n === steps[i - 1] + 1))
+    return "шаги " + (in_row ? steps[0] + "–" + steps[steps.length - 1] : steps.join(", "))
 }
 
 // Имена из names, которым после записи нужна перезагрузка: в метаданных параметров (FilterReview/params.json —

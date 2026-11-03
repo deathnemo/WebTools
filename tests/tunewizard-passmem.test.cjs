@@ -5,7 +5,8 @@
 // аппаратов, «забыть» и список, «применено / другое значение / нет в логе» (маска HMNCS — по большему размеру), «лог
 // прошлого прохода», имена, от которых зависит шаг 4, статус шага (накопительно по шагам 2–n; у шага 4 — только его
 // зависимости) и условия строки сравнения (всё применено, частично, ось ненадёжна), совместимость с записанным
-// форматом v1.
+// форматом v1; вид аппарата (этап 9): ключ QuadPlane с префиксом «quadplane·», ключ Copter прежний, поле kind записи
+// (нет — Copter), список проходов только того же вида.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-summary.test.cjs).
 const test = require('node:test')
@@ -73,6 +74,10 @@ function fake_params(values) {
 const BOARD = 'StellarH7V2 0034002E 35335104 39363630'
 const LOG_NAME = '2026-06-18 18-54-42_anon.bin'
 const INFO = { board: BOARD, frame: 'QUAD/X_REV', fw_string: 'ArduCopter V4.6.3 (3fc7011a)' }
+// QuadPlane (этап 9): вид аппарата из log_info, рама — из «QuadPlane Frame: QUAD/X»; строка контроллера — подставная
+const BOARD_QP = 'DEFD-H7 00200031 33345101 30353934'
+const LOG3_NAME = '1 01.01.1980 2-00-00.bin'
+const INFO_QP = { kind: 'quadplane', board: BOARD_QP, frame: 'QUAD/X', fw_string: 'ArduPlane V4.6.3 (3fc7011a)' }
 
 // Строки итога (summary_rows(…).rows): изменённые и нет. ATC_RAT_RLL_FLTD — шаг 3, но с префиксом оси крена шага 4
 const ROWS = [
@@ -265,6 +270,9 @@ test('passmem_read: битые записи отбрасываются, оста
         estimates2_number: { ...base, estimates: { ...base.estimates, 2: 5 } },
         estimates3_string: { ...base, estimates: { ...base.estimates, 3: 'x' } },
         estimates4_array: { ...base, estimates: { ...base.estimates, 4: [] } },
+        // Вид аппарата — строка или нет
+        kind_number: { ...base, kind: 3 },
+        kind_object: { ...base, kind: {} },
     }
     for (const [what, record] of Object.entries(broken)) {
         assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ c: good, x: record }) })),
@@ -277,9 +285,13 @@ test('passmem_read: битые записи отбрасываются, оста
     const no_estimates = { ...base, estimates: { 2: null, 3: null, 4: null } }
     assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ x: no_estimates }) })), { passes: { x: no_estimates }, error: null, dropped: false })
 
-    // Без saved_at, estimates и bits, с пустым changed — запись годна
+    // Без saved_at, estimates, bits и kind (запись до этапа 9), с пустым changed — запись годна; kind null или строка — тоже
     const minimal = { key: 'm', changed: [] }
     assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ m: minimal }) })), { passes: { m: minimal }, error: null, dropped: false })
+    for (const kind of [null, 'copter', 'quadplane']) {
+        const record = { ...base, kind: kind }
+        assert.deepEqual(passmem_read(fake_storage({ [PASSMEM_KEY]: text({ x: record }) })), { passes: { x: record }, error: null, dropped: false }, String(kind))
+    }
 })
 
 test('passmem_write: setItem бросает (квота) или хранилища нет — "unavailable"', () => {
@@ -320,6 +332,19 @@ test('passmem_aircraft_key: плата в запасном ключе — ном
     assert.equal(passmem_aircraft_key({ ...INFO, board_id: 1503 }, LOG_NAME), 'fc:' + BOARD)
 })
 
+test('passmem_aircraft_key: вид аппарата — у Copter ключ прежний, у QuadPlane — «quadplane·» перед тем же ключом (и запасным)', () => {
+    // Copter (info.kind из log_info) и info без вида (до этапа 9) — один ключ: проходы, сохранённые раньше, находятся
+    assert.equal(passmem_aircraft_key({ ...INFO, kind: 'copter' }, LOG_NAME), 'fc:' + BOARD)
+    assert.equal(passmem_aircraft_key({ ...INFO, kind: null }, LOG_NAME), 'fc:' + BOARD)
+    assert.equal(passmem_aircraft_key({ ...INFO, board: null, board_id: 1503, kind: 'copter' }, LOG_NAME), 'log:1503·QUAD/X_REV·' + LOG_NAME)
+    // QuadPlane: та же плата — другой аппарат; запасной ключ — с рамой из «QuadPlane Frame: …» (info.frame, log_frame)
+    assert.equal(passmem_aircraft_key(INFO_QP, LOG3_NAME), 'quadplane·fc:' + BOARD_QP)
+    assert.equal(passmem_aircraft_key({ ...INFO_QP, board: BOARD }, LOG3_NAME), 'quadplane·fc:' + BOARD)
+    assert.notEqual(passmem_aircraft_key({ ...INFO_QP, board: BOARD }, LOG_NAME), passmem_aircraft_key({ ...INFO, kind: 'copter' }, LOG_NAME))
+    assert.equal(passmem_aircraft_key({ ...INFO_QP, board: null, board_id: 1150 }, LOG3_NAME), 'quadplane·log:1150·QUAD/X·' + LOG3_NAME)
+    assert.equal(passmem_aircraft_key({ kind: 'quadplane', board: '' }, null), 'quadplane·log:—·—·—')
+})
+
 // ---------------------------------------------------------------- запись прохода
 
 test('passmem_record: подпись прохода и изменённые — только строки с changed, поля { name, log, value, step }', () => {
@@ -346,6 +371,33 @@ test('passmem_record: подпись прохода и изменённые — 
     const closed = fake_pass({ rows: ROWS.filter((row) => !row.changed) })
     assert.deepEqual(closed.changed, [])
     assert.notEqual(closed.estimates[2], null)
+})
+
+test('passmem_record и passmem_kind: вид аппарата — поле kind из info.kind; нет (запись до этапа 9, info без вида) — Copter', () => {
+    // INFO — без вида: kind null, читается как Copter
+    const old = fake_pass()
+    assert.equal(old.kind, null)
+    assert.equal(passmem_kind(old), 'copter')
+    assert.equal(passmem_kind({ key: 'k', changed: [] }), 'copter', 'поля нет вовсе — Copter')
+    assert.equal(passmem_kind(null), 'copter')
+    const copter = passmem_record({ key: 'fc:' + BOARD, info: { ...INFO, kind: 'copter' }, file_name: LOG_NAME, rows: ROWS, steps: fake_steps(), saved_at: 1 })
+    assert.equal(copter.kind, 'copter')
+    // QuadPlane: шаг 4 закрыт — его в state.steps нет; имена шага 3 — Q_A_*
+    const steps = fake_steps()
+    delete steps[4]
+    const rows = [
+        { name: 'Q_A_RAT_RLL_FLTD', log: 25.5, value: 20, step: 3, changed: true, note: null },
+        { name: 'Q_A_ACCEL_R_MAX', log: 70000, value: 70000, step: 3, changed: false, note: null },
+    ]
+    const qp = passmem_record({ key: passmem_aircraft_key(INFO_QP, LOG3_NAME), info: INFO_QP, file_name: LOG3_NAME, rows: rows, steps: steps, saved_at: 2 })
+    assert.deepEqual([qp.key, qp.kind, passmem_kind(qp), qp.frame, qp.fw], ['quadplane·fc:' + BOARD_QP, 'quadplane', 'quadplane', 'QUAD/X', 'ArduPlane V4.6.3 (3fc7011a)'])
+    assert.deepEqual(qp.changed, [{ name: 'Q_A_RAT_RLL_FLTD', log: 25.5, value: 20, step: 3 }])
+    assert.equal(qp.estimates[4], null, 'шага 4 нет — оценок нет')
+    assert.notEqual(qp.estimates[3], null)
+    // Запись уходит в JSON и читается обратно с видом
+    const storage = fake_storage()
+    passmem_write(storage, passmem_put({}, qp))
+    assert.deepEqual(passmem_read(storage).passes[qp.key], qp)
 })
 
 test('passmem_record: оценки шага 2 — полоса и задержка на 30 Гц лога и принятого', () => {
@@ -597,8 +649,21 @@ test('passmem_forget: новый объект без ключа; нет тако
 
 test('passmem_list: проходы по убыванию даты сохранения', () => {
     const passes = { a: pass_at('a', 20), b: pass_at('b', 30), c: pass_at('c', 10) }
-    assert.deepEqual(passmem_list(passes).map((pass) => pass.key), ['b', 'a', 'c'])
-    assert.deepEqual(passmem_list({}), [])
+    assert.deepEqual(passmem_list(passes, 'copter').map((pass) => pass.key), ['b', 'a', 'c'])
+    assert.deepEqual(passmem_list({}, 'copter'), [])
+})
+
+test('passmem_list: только проходы того же вида; записи без kind — Copter; вид не поддержан (null) — ни одного', () => {
+    const qp = (key, saved_at) => ({ ...pass_at(key, saved_at), kind: 'quadplane' })
+    const passes = {
+        old: pass_at('old', 10),                                // до этапа 9: без вида (kind null)
+        copter: { ...pass_at('copter', 40), kind: 'copter' },
+        'quadplane·a': qp('quadplane·a', 30),
+        'quadplane·b': qp('quadplane·b', 50),
+    }
+    assert.deepEqual(passmem_list(passes, 'copter').map((pass) => pass.key), ['copter', 'old'])
+    assert.deepEqual(passmem_list(passes, 'quadplane').map((pass) => pass.key), ['quadplane·b', 'quadplane·a'])
+    assert.deepEqual(passmem_list(passes, null), [])
 })
 
 // ---------------------------------------------------------------- применено
@@ -891,7 +956,11 @@ test('совместимость: записанная руками JSON-стр�
     assert.equal(error, null)
     const pass = passes[passmem_aircraft_key(INFO, 'другой лог.bin')]
     assert.equal(pass.file_name, LOG_NAME)
-    assert.deepEqual(passmem_list(passes).map((p) => p.key), ['fc:' + BOARD])
+    // Запись v1 до этапа 9 — без вида: Copter; ключ лога Copter (info.kind из log_info) — тот же, проход находится
+    assert.equal(passmem_kind(pass), 'copter')
+    assert.equal(passes[passmem_aircraft_key({ ...INFO, kind: 'copter' }, 'другой лог.bin')], pass)
+    assert.deepEqual(passmem_list(passes, 'copter').map((p) => p.key), ['fc:' + BOARD])
+    assert.deepEqual(passmem_list(passes, 'quadplane'), [])
 
     // Новый лог: всё применено (float32 и маска со знаком)
     const applied = passmem_applied(pass, fake_params({ INS_HNTCH_FREQ: 75, INS_HNTCH_HMNCS: -128, ATC_RAT_RLL_P: 0.699999988 }), 8)

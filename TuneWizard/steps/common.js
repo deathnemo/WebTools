@@ -202,8 +202,9 @@ const step_metadata_state = { promise: null, data: null, failed: false }
 // Описание параметра name в метаданных obj — тем же префиксным обходом, что recursive_search в
 // Libraries/ParameterMetadata.js; null — описания нет. Метаданные FilterReview — Copter: у регулятора другого вида
 // (Q_A_<X> QuadPlane — префикс atc профиля, core/vehicle.js) своего описания нет, и берётся описание ATC_<X>: тот же
-// класс AC_AttitudeControl_Multi, суффиксы те же (дизайн этапа 9, раздел 6). Одно место для формы шага 3 и
-// перезагрузки в сводке (summary_reboot_names)
+// класс AC_AttitudeControl_Multi, суффиксы те же (дизайн этапа 9, раздел 6). Одно место для формы шага 3
+// (step3_param_metadata), формы шага 4 (step4_apply_metadata, описания PID) и перезагрузки в сводке (summary_reboot_names,
+// дизайн этапа 9, раздел 8)
 function step_find_metadata(obj, name) {
     const found = step_find_metadata_in(obj, name)
     if (found != null) {

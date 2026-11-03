@@ -4,8 +4,12 @@
 // сводка перестраивается при каждом показе шага. Дизайн — docs/plans/2026-10-25-tune-wizard-stage5-design.md, раздел 3.
 // Источники: [решение пользователя 25.10.2026]; [наше] — решение мастера.
 //
+// Аппарат — state.profile (core/vehicle.js; дизайн этапа 9, раздел 8): имена шага 3 с его префиксом приходят в
+// контексте итога (step_summary_context), закрытый для аппарата шаг (у QuadPlane — 4) — строкой «недоступен», пункт
+// «повторить проход» — по доступным шагам; без профиля (вид не поддержан) — «менять нечего».
+//
 // Нужны глобалы страницы: core/summary.js (summary_*), core/candidates.js (candidate_rules), core/pidtune.js
-// (pidtune_axes), Libraries/FileSaver.js (saveAs), wizard.js (state, set_step, STEP_TITLES, html_escape),
+// (pidtune_axes), Libraries/FileSaver.js (saveAs), wizard.js (state, set_step, step_closed_text, STEP_TITLES, html_escape),
 // steps/common.js (step_summary_context, step_accepted_stale, step_tile, step_verdict, step_value_text, step_signed,
 // step_plural, step_try, step_metadata, step_metadata_failed, step_load_metadata, step_find_metadata), steps/step2.js
 // (step2_flagged, step2_accepted_flags_text), steps/step3.js (step3_summary_text, step3_flagged, step3_flags_text),
@@ -324,14 +328,21 @@ function step5_render_tiles(changed, accepted, stale) {
     box.hidden = false
 }
 
-// Вердикт: ничего не принято (или лог не Copter) — «менять нечего» (и тестовый полёт, если оси шага 4 без надёжного
-// измерения уже известны); есть устаревшее, расхождение шагов (step5_conflict_issue), изменённые PID, менявшиеся
-// после интервала анализа (summary.moved), отметки шагов или оси шага 4 без надёжного измерения — предупреждение с
-// перечнем; иначе — готово или «совпадает с логом». summary — summary_rows(…), bits — размер маски HMNCS контекста
+// Шаги сводки (step5_steps), доступные аппарату лога (profile.steps: у QuadPlane без шага 4); вид не поддержан — все
+function step5_available_steps() {
+    return step5_steps.filter((n) => (state.profile == null) || state.profile.steps.includes(n))
+}
+
+// Вердикт: ничего не принято (или вид аппарата не поддержан — профиля нет, дизайн этапа 9, раздел 8) — «менять
+// нечего» по шагам сводки, доступным аппарату (и тестовый полёт, если оси шага 4 без надёжного измерения уже
+// известны); есть устаревшее, расхождение шагов (step5_conflict_issue), изменённые PID, менявшиеся после интервала
+// анализа (summary.moved), отметки шагов или оси шага 4 без надёжного измерения — предупреждение с перечнем; иначе —
+// готово или «совпадает с логом». summary — summary_rows(…), bits — размер маски HMNCS контекста
 function step5_render_verdict(summary, bits, changed, accepted, stale, unreliable) {
-    if ((accepted.length == 0) || (state.info.vehicle !== "Copter")) {
+    if ((accepted.length == 0) || (state.profile == null)) {
         const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable)) + " (ниже)." : ""
-        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов 2–4 не принят." + tail)
+        const available = step5_available_steps()
+        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов " + available[0] + "–" + available[available.length - 1] + " не принят." + tail)
         return
     }
     const issues = []
@@ -374,12 +385,17 @@ function step5_render_verdict(summary, bits, changed, accepted, stale, unreliabl
     }
 }
 
-// Таблица шагов 2–4: принят (итог и отметки), не принят (параметры шага — как в логе) или устарело (кнопка «К шагу N»,
-// принятое и отметки — мелкими строками). stale — устаревшие шаги
+// Таблица шагов 2–4: принят (итог и отметки), не принят (параметры шага — как в логе), устарело (кнопка «К шагу N»,
+// принятое и отметки — мелкими строками) или недоступен — шаг закрыт для аппарата лога (step_closed_text: у QuadPlane
+// шаг 4, текст — как у подсказки кнопки шага; дизайн этапа 9, раздел 7). stale — устаревшие шаги
 function step5_render_steps(stale) {
     const html = step5_steps.map((n) => {
         const accepted = state.steps[n]
         const title = '<td>Шаг ' + n + '<small>' + html_escape(STEP_TITLES[n]) + '</small></td>'
+        const closed = step_closed_text(n)
+        if ((accepted == null) && (closed != null)) {
+            return '<tr>' + title + '<td class="step5-state step5-state--off">недоступен</td><td>' + html_escape(closed) + '</td><td></td></tr>'
+        }
         if (accepted == null) {
             return '<tr>' + title + '<td class="step5-state step5-state--off">не принят</td><td>Параметры шага остаются как в логе.</td><td></td></tr>'
         }
@@ -435,6 +451,8 @@ function step5_render_refly(rows, unreliable) {
         reboot_names: step5_reboot_names(rows),
         unreliable_axes: unreliable,
         test_flight: step4_test_flight_short,
+        // Шаги, доступные аппарату (у QuadPlane без шага 4): пункт «повторить проход»; вид не поддержан — все
+        available: state.profile?.steps ?? null,
     })
     const list = document.getElementById("refly5")
     list.innerHTML = items.map((item) => '<li>' + html_escape(item.text) + '</li>').join("")

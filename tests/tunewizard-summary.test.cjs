@@ -5,7 +5,8 @@
 // файла, отпечаток входов принятого шага (по действующим отличиям от лога, у шага 4 — только по его фильтрам) и
 // «устарело», «что перелететь» (проверки шага 0 с fix продолжением фразы — без повторов пунктов подготовки, пункты
 // подготовки к полёту — и от prep_check, файл исправлений подготовки, включаемый notch, перезагрузка, тестовый полёт,
-// повтор) и имена с перезагрузкой по метаданным.
+// повтор — по шагам, доступным аппарату) и имена с перезагрузкой по метаданным; QuadPlane (этап 9): строки и .param с
+// именами Q_A_*, повтор без шага 4, перезагрузка Q_A_<X> по записи ATC_<X>.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-pidtune.test.cjs).
 const test = require('node:test')
@@ -27,7 +28,8 @@ function load_page_scripts(files) {
 // Нужное итогу и тестам в порядке страницы: param_file_text (Param_Helpers.js, params.js), notch_param_names
 // (filters.js), lowpass_param_names (lowpass.js; ему при загрузке нужен candidate_rules из candidates.js),
 // pidtune_axes (pidtune.js; ему — константы core/pid.js), prep_check, prep_changes, prep_file_name, prep_reboot_names
-// (prep.js — подготовка для summary_refly, как её собирает страница; ему — check_rules из checks.js)
+// (prep.js — подготовка для summary_refly, как её собирает страница; ему — check_rules из checks.js), step_find_metadata
+// (steps/common.js — поиск записи метаданных для summary_reboot_names, как у страницы; при загрузке DOM не нужен)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
     'TuneWizard/core/vehicle.js',
@@ -40,6 +42,7 @@ load_page_scripts([
     'TuneWizard/core/params.js',
     'TuneWizard/core/summary.js',
     'TuneWizard/core/prep.js',
+    'TuneWizard/steps/common.js',
 ])
 
 // ---------------------------------------------------------------- поддельные данные
@@ -1050,6 +1053,59 @@ test('summary_refly: «repeat» — последним и только при и
     }
     // Принято без изменений — повторять нечего
     assert.deepEqual(of_source(summary_refly(refly_ctx({ steps: steps_with2({}) })), 'repeat'), [])
+})
+
+test('summary_refly: «repeat» — шаги сравнения из доступных аппарату (available): у Copter и без списка 2–4, у QuadPlane 2–3', () => {
+    const ctx = refly_ctx({ steps: steps_with2({ INS_HNTCH_FREQ: 75 }) })
+    const repeat = (available) => of_source(summary_refly({ ...ctx, available: available }), 'repeat').map((item) => item.text)
+    const text = (steps) => 'Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, ' + steps + ' — сбылся ли прогноз.'
+    assert.deepEqual(repeat(undefined), [text('шаги 2–4')])
+    assert.deepEqual(repeat(null), [text('шаги 2–4')])
+    assert.deepEqual(repeat(vehicle_profiles.copter.steps), [text('шаги 2–4')])
+    assert.deepEqual(repeat(vehicle_profiles.quadplane.steps), [text('шаги 2–3')])
+    // Шаги словами: один, подряд, с пропуском
+    assert.deepEqual([summary_steps_text([2]), summary_steps_text([2, 3, 4]), summary_steps_text([2, 4])], ['шаг 2', 'шаги 2–4', 'шаги 2, 4'])
+})
+
+// ---------------------------------------------------------------- QuadPlane (этап 9)
+
+// Лог QuadPlane (третий лог, дизайн этапа 9, раздел 6 [лог]): фильтры Q_A_RAT_*, пределы 4.6 Q_A_ACCEL_*_MAX в
+// сантиградусах/с², INS_* — общие
+const QP_LOG = {
+    ...Object.fromEntries(Object.entries(BASE_LOG).filter(([name]) => !name.startsWith('ATC_'))),
+    Q_A_RAT_RLL_FLTT: 25.5, Q_A_RAT_RLL_FLTE: 0, Q_A_RAT_RLL_FLTD: 25.5,
+    Q_A_RAT_PIT_FLTT: 25.5, Q_A_RAT_PIT_FLTE: 0, Q_A_RAT_PIT_FLTD: 25.5,
+    Q_A_RAT_YAW_FLTT: 25.5, Q_A_RAT_YAW_FLTE: 2, Q_A_RAT_YAW_FLTD: 20,
+    Q_A_ACCEL_R_MAX: 70000, Q_A_ACCEL_P_MAX: 70000, Q_A_ACCEL_Y_MAX: 28800,
+}
+
+test('QuadPlane: строки шага 3 и .param — с именами Q_A_* (lowpass_param_names с профилем); шага 4 нет', () => {
+    const names3 = lowpass_param_names(fake_params(QP_LOG), vehicle_profiles.quadplane)
+    assert.equal(names3.some((name) => name.startsWith('ATC_')), false, names3.join(', '))
+    const steps = []
+    steps[3] = { accepted: accepted_values(names3, QP_LOG, { Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20, Q_A_RAT_YAW_FLTT: 20, Q_A_ACCEL_R_MAX: 60000 }) }
+    const result = summary_rows({ params: fake_params(QP_LOG), steps: steps, names: { ...NAMES, 3: names3 }, filter_version: 2, bits: 8 })
+    assert.deepEqual(result.accepted, { 2: false, 3: true, 4: false })
+    assert.deepEqual(result.rows.filter((row) => row.changed).map((row) => [row.name, row.log, row.value, row.step]), [
+        ['Q_A_RAT_RLL_FLTT', 25.5, 20, 3], ['Q_A_RAT_RLL_FLTD', 25.5, 20, 3], ['Q_A_RAT_YAW_FLTT', 25.5, 20, 3], ['Q_A_ACCEL_R_MAX', 70000, 60000, 3],
+    ])
+    assert.equal(summary_param_text(result.rows, 8), 'Q_A_ACCEL_R_MAX,60000\nQ_A_RAT_RLL_FLTD,20\nQ_A_RAT_RLL_FLTT,20\nQ_A_RAT_YAW_FLTT,20\n')
+    // «Что перелететь»: повтор — шаги 2–3
+    const items = summary_refly({ checks: [], prep: null, rows: result.rows, reboot_names: [], unreliable_axes: [], test_flight: TEST_FLIGHT,
+                                  available: vehicle_profiles.quadplane.steps })
+    assert.deepEqual(sources_of(items), ['repeat'])
+    assert.match(items[0].text, /, шаги 2–3 — сбылся ли прогноз\.$/)
+})
+
+test('summary_reboot_names: Q_A_<X> — по записи ATC_<X> (step_find_metadata, одно место с формой шага 3)', () => {
+    // Описания Copter: Q_A_* своих нет. RebootRequired у ATC_RAT_RLL_FLTD — подставной, для проверки поиска
+    const metadata = {
+        ATC_: { ATC_RAT_RLL_FLTD: { DisplayName: 'Roll axis rate controller derivative frequency', RebootRequired: 'True' },
+                ATC_RAT_PIT_FLTD: { DisplayName: 'Pitch axis rate controller derivative frequency' } },
+        SCHED_: { SCHED_LOOP_RATE: { RebootRequired: 'True' } },
+    }
+    assert.deepEqual(summary_reboot_names(['Q_A_RAT_PIT_FLTD', 'Q_A_RAT_RLL_FLTD', 'SCHED_LOOP_RATE', 'Q_A_ACCEL_R_MAX'], metadata, step_find_metadata),
+        ['Q_A_RAT_RLL_FLTD', 'SCHED_LOOP_RATE'])
 })
 
 // Метаданные в форме FilterReview/params.json: группы по префиксу, внутри — записи по полному имени

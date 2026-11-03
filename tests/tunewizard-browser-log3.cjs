@@ -3,10 +3,12 @@
 // (CTUN.ThO — самолётный мотор, нули), PIQR/PIQP/PIQY 24 Гц, batch гироскопа ICM45686 с INS_LOG_BAT_OPT = 5, ESC-телеметрия.
 // Этап 9 (docs/plans/2026-10-30-tune-wizard-stage9-design.md, разделы 2, 4, 5, 7): шаг 0 — вид и плитки, интервал по
 // умолчанию — VTOL-окно, проверки; шаг 1 — спектр, заметка об осях tailsitter, «до» и «после» batch; шаг 2 — варианты
-// notch; шаг 3 (раздел 6) — имена Q_A_*, значения лога, без размера винта и рекомендации, «Лог + правило /2», шум D
-// крена по оси Z, «Принять»; шаг 4 — выключен с подсказкой. Шаг 5 добавит задача 4 этапа. В конце — лог Copter (второй
-// лог, если есть): всё, что показано только для QuadPlane, сбрасывается. Отдельный скрипт, как прогон второго лога
-// (tests/tunewizard-browser-log2.cjs).
+// notch; шаг 3 (раздел 6) — имена Q_A_*, значения лога, без размера винта и рекомендации (и в текстах шага), «Лог +
+// правило /2», шум D крена по оси Z, «Принять» — переход к шагу 5; шаг 4 — выключен с подсказкой; шаг 5 (раздел 8) —
+// сводка с Q_A_*, строка шага 4 «недоступен», повтор — шаги 2–3, _tune.param, «Запомнить проход» (ключ с видом
+// аппарата), повторная загрузка лога — прошлый проход на шаге 0. В конце — лог Copter (второй лог, если есть): всё, что
+// показано только для QuadPlane, сбрасывается, прошлый проход QuadPlane не показан. Отдельный скрипт, как прогон второго
+// лога (tests/tunewizard-browser-log2.cjs).
 // Запуск: npm run test:tunewizard-log3
 // Нужны: третий лог (TUNEWIZARD_LOG3 или TuneWizard/logs/1 01.01.1980 2-00-00.bin), браузер (CHROME_PATH — путь к
 // chrome.exe; без него Playwright берёт свой Chromium, если он установлен) и python для http.server. Без лога тест
@@ -242,7 +244,13 @@ async function main() {
             const dterm = document.getElementById('DTerm3')
             const units = Object.fromEntries([...document.querySelectorAll('#lpf_form p.param')].map((p) => [p.dataset.name, p.querySelector('.units').textContent]))
             const e = step3.evaluations?.log ?? null
+            const section = document.querySelector('section[data-step="3"]')
             return {
+                // Тексты шага без размера винта: заголовок, вступление, заметка под формой (части data-prop3), порог правила /2
+                title: section.querySelector('h2').innerText, lede: section.querySelector('.lede').innerText,
+                form_note: document.getElementById('lpf_form').nextElementSibling.innerText,
+                vehicle_text: document.getElementById('step3_vehicle_note').innerText,
+                pid_min: [document.querySelector('[data-rule3="pid_min"]').textContent, String(lowpass_rules.pid_filter_min_hz)],
                 prop_lab: document.getElementById('prop_lab').checkVisibility(), vehicle_note: document.getElementById('step3_vehicle_note').checkVisibility(),
                 names: step3.form_names, units: units, groups: [...document.querySelectorAll('#lpf_form h3')].map((h) => h.textContent),
                 ids: step3.candidates.map((c) => c.id), recommended: step3_recommended_id(), selected: step3.selected_id,
@@ -256,6 +264,14 @@ async function main() {
             }
         })
         assert.deepEqual([s3.prop_lab, s3.vehicle_note], [false, true], 'блока размера винта нет, заметка QuadPlane видна')
+        // Тексты шага — без размера винта и формул Mission Planner; рыскание и пределы — не «по правилам»
+        assert.equal(s3.title, 'Фильтры гироскопа и ПИД')
+        assert.match(s3.lede, /^Мастер сравнивает варианты частот фильтра гироскопа и фильтров ПИД по данным лога: шум гироскопа после фильтров/, s3.lede)
+        assert.doesNotMatch(s3.lede, /размеру винта|Mission Planner/)
+        assert.match(s3.form_note, / FLTT фильтрует только цель и в метрики не входит; рыскание \(FLTT — по правилу \/2\) и пределы ускорения \(из лога\) — без метрик\. Файла/, s3.form_note)
+        assert.doesNotMatch(s3.form_note, /по правилам/)
+        assert.equal(s3.pid_min[0], s3.pid_min[1], 'порог правила /2 в заметке — из lowpass_rules')
+        assert.match(s3.vehicle_text, /= max\(10, INS_GYRO_FILTER \/ 2\)/)
         assert.equal(s3.names.some((name) => name.startsWith('ATC_')), false, 'имена шага — без ATC_*: ' + s3.names.join(', '))
         assert.deepEqual(s3.names.slice(-3), ['Q_A_ACCEL_R_MAX', 'Q_A_ACCEL_P_MAX', 'Q_A_ACCEL_Y_MAX'], 'пределы 4.6 — Q_A_ACCEL_*')
         assert.deepEqual([s3.units.Q_A_ACCEL_R_MAX, s3.units.Q_A_RAT_RLL_FLTD], ['cdeg/s/s', 'Hz'], 'описания Q_A_* — по ATC_*, пределы — сантиградусы/с²')
@@ -279,7 +295,8 @@ async function main() {
         assert.deepEqual(s3.dterm_colors, [s3.palette.z, s3.palette.z, s3.palette.y, s3.palette.y])
         assert.equal(s3.dterm_drawn, 4, 'трассы D обеих осей нарисованы')
 
-        // «Лог + правило /2» → «Применить вариант» → «Принять»: принято с именами Q_A_*, шаг 4 закрыт — остаёмся на шаге 3
+        // «Лог + правило /2» → «Применить вариант» → «Принять»: принято с именами Q_A_*, шаг 4 закрыт — переход к сводке
+        // (шаг 5; дизайн этапа 9, раздел 8, решение координатора 03.11.2026)
         await page.check('#cand3_half')
         await page.click('#cand3_apply')
         await page.waitForFunction(() => (step3.edit_timer == null) && (step3_form_row()?.id === 'half'), null, { timeout: 60000 })
@@ -287,9 +304,71 @@ async function main() {
         await wait_overlay(page)
         const a3 = await page.evaluate(() => ({ step: state.step, id: state.steps[3]?.candidate_id, names: Object.keys(state.steps[3]?.accepted ?? {}),
                                                  verdict: document.getElementById('verdict3').textContent }))
-        assert.deepEqual([a3.step, a3.id], [3, 'half'])
+        assert.deepEqual([a3.step, a3.id], [5, 'half'], 'после «Принять» шага 3 — сводка: шаг 4 закрыт')
+        assert.deepEqual(await visible_steps(page), ['5'])
         assert.deepEqual(a3.names, s3.names, 'принятые — под именами формы (Q_A_*)')
         assert.match(a3.verdict, /^Принято: «Лог \+ правило \/2» — шум гироскопа /, a3.verdict)
+
+        // ---------- Шаг 5: сводка с именами Q_A_*, строка шага 4 «недоступен», повтор — шаги 2–3, .param, память прохода
+        await page.waitForFunction(() => !document.getElementById('verdict5').hidden && (step_metadata() != null), null, { timeout: 60000 })
+        const s5 = await page.evaluate(() => {
+            const rows = (selector) => [...document.querySelectorAll(selector + ' tbody tr')].map((tr) => [...tr.cells].map((td) => td.textContent))
+            const ctx = step_summary_context()
+            const summary = summary_rows(ctx)
+            return {
+                verdict: document.getElementById('verdict5').textContent, verdict_class: document.getElementById('verdict5').className,
+                steps: rows('#steps5'), changes: rows('#changes5'), unchanged: rows('#unchanged5').map((row) => row[0]),
+                refly: [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent),
+                buttons: ['step5_download', 'step5_remember'].map((id) => document.getElementById(id).disabled),
+                names3: ctx.names[3], param: summary_param_text(summary.rows, ctx.bits),
+                changed: summary.rows.filter((row) => row.changed).length,
+            }
+        })
+        assert.deepEqual(s5.names3, s3.names, 'имена шага 3 в контексте итога — с префиксом профиля (Q_A_*)')
+        assert.doesNotMatch(s5.verdict, /^Менять нечего/, 'принят шаг 3 с изменениями — не «менять нечего»: ' + s5.verdict)
+        assert.match(s5.verdict, new RegExp('^(Готово: изменено|Изменено) ' + s5.changed + ' параметр'), s5.verdict)
+        assert.ok(s5.changed > 0)
+        assert.deepEqual(s5.steps.map((row) => row[1]), ['не принят', 'принят', 'недоступен'], JSON.stringify(s5.steps))
+        assert.equal(s5.steps[2][2], s0.closed4, 'строка шага 4 — текст подсказки закрытого шага')
+        assert.ok(s5.changes.length === s5.changed, JSON.stringify(s5.changes))
+        assert.ok(s5.changes.every((row) => row[0].startsWith('Q_A_RAT_') && (row[3] === '3')), 'изменены только Q_A_* шага 3: ' + JSON.stringify(s5.changes))
+        assert.ok([...s5.changes.map((row) => row[0]), ...s5.unchanged].every((name) => !name.startsWith('ATC_')), 'в сводке нет ATC_*')
+        assert.ok(s5.unchanged.includes('Q_A_ACCEL_R_MAX') && s5.unchanged.includes('INS_GYRO_FILTER'), s5.unchanged.join(', '))
+        assert.match(s5.refly.at(-1), /^Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–3 — сбылся ли прогноз\.$/, s5.refly.at(-1))
+        assert.deepEqual(s5.buttons, [false, false], '«Скачать .param» и «Запомнить проход» доступны')
+        // «Скачать .param»: файл <лог>_tune.param — только изменённые Q_A_* (тот же текст, что у ядра)
+        const [download5] = await Promise.all([page.waitForEvent('download'), page.click('#step5_download')])
+        assert.equal(download5.suggestedFilename(), path.basename(log_path).replace(/\.[^.]*$/, '') + '_tune.param')
+        const param5 = fs.readFileSync(await download5.path(), 'utf8')
+        assert.equal(param5, s5.param)
+        assert.ok(param5.trim().split('\n').every((line) => /^Q_A_RAT_[A-Z]{3}_FLT[TD],20$/.test(line)), param5)
+        // «Запомнить проход»: ключ — с видом аппарата, в записи kind и имена Q_A_*
+        await page.click('#step5_remember')
+        const m5 = await page.evaluate(() => {
+            const data = JSON.parse(localStorage.getItem('tunewizard_v1'))
+            const key = passmem_aircraft_key(state.info, state.file_name)
+            return { note: document.getElementById('step5_note').textContent, keys: Object.keys(data.passes), key: key, record: data.passes[key] }
+        })
+        assert.equal(m5.note, 'Память прохода сохранена.')
+        assert.match(m5.key, /^quadplane·(fc|log):/, m5.key)
+        assert.deepEqual(m5.keys, [m5.key])
+        assert.equal(m5.record.kind, 'quadplane')
+        assert.deepEqual(m5.record.changed.map((change) => change.name), s5.changes.map((row) => row[0]))
+        assert.equal(m5.record.estimates[4], null, 'шага 4 нет — оценок нет')
+
+        // ---------- Тот же лог снова: шаг 0 показывает прошлый проход — «это лог прошлого прохода»
+        await page.setInputFiles('#fileItem', log_path)
+        await page.waitForFunction(() => (state.info != null) && (state.step === 0) && (memory_state.key != null), null, { timeout: 180000 })
+        await wait_overlay(page)
+        const m0 = await page.evaluate(() => ({
+            visible: document.getElementById('memory0').checkVisibility(), key: memory_state.key, pass: memory_state.pass?.key ?? null,
+            head: document.getElementById('memory0_head').textContent, verdict: document.getElementById('memory0_verdict').textContent,
+            rows: [...document.querySelectorAll('#memory0_table tbody tr')].map((tr) => [...tr.cells].map((td) => td.textContent)),
+        }))
+        assert.deepEqual([m0.visible, m0.key, m0.pass], [true, m5.key, m5.key], 'проход QuadPlane найден по ключу с видом')
+        assert.match(m0.head, new RegExp('^Сохранён .+, лог ' + path.basename(log_path).replace(/\./g, '\\.') + ', прошивка ArduPlane V4\\.6\\.3'), m0.head)
+        assert.equal(m0.verdict, 'Это лог прошлого прохода — значения ещё не применялись.')
+        assert.deepEqual(m0.rows.map((row) => [row[0], row[3], row[4]]), s5.changes.map((row) => [row[0], '3', 'другое значение']))
 
         // ---------- Шаг 4: кнопка выключена и с подсказкой и после шагов 1–3
         const b4 = await page.evaluate(() => { const b = document.querySelector('#wizbar button:nth-child(5)'); return [b.disabled, b.getAttribute('title')] })
@@ -323,6 +402,9 @@ async function main() {
                     throttle: [flight.data[2].name, flight.layout.yaxis3.title.text],
                     tiles: [...document.querySelectorAll('#log_info .stat__k')].map((k) => k.textContent),
                     prop_lab: document.getElementById('prop_lab').hidden, vehicle_note3: document.getElementById('step3_vehicle_note').hidden,
+                    prop3: [...document.querySelectorAll('[data-prop3]')].map((part) => [part.dataset.prop3, part.hidden]),
+                    memory0: document.getElementById('memory0').checkVisibility(), memory_key: memory_state.key, memory_pass: memory_state.pass,
+                    memory_list: memory_step0.list.map((pass) => pass.key),
                 }
             })
             assert.equal(reset.kind, 'copter')
@@ -331,16 +413,21 @@ async function main() {
             assert.deepEqual(reset.throttle, ['Газ', 'Газ'], 'ряд и ось газа — «Газ»')
             assert.ok(reset.tiles.includes('Средний газ') && !reset.tiles.includes('Средний газ VTOL'), reset.tiles.join('; '))
             assert.deepEqual([reset.prop_lab, reset.vehicle_note3], [false, true], 'шаг 3: блок размера винта виден, заметки QuadPlane нет')
+            assert.deepEqual(reset.prop3, [['on', false], ['on', false], ['off', true], ['on', false], ['off', true]], 'тексты шага 3 — снова про размер винта')
+            // Прошлый проход QuadPlane лог Copter не показывает и не предлагает в списке (другой вид аппарата)
+            assert.match(reset.memory_key, /^(fc|log):/, reset.memory_key)
+            assert.deepEqual([reset.memory0, reset.memory_pass, reset.memory_list], [false, null, []], 'блок «Прошлый проход» скрыт')
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
         const band_text = (band) => ['x', 'y', 'z'].map((axis) => axis.toUpperCase() + ' ' + s1.bands[band][axis].toFixed(1)).join(', ')
-        console.log('tunewizard-browser-log3: шаги 0–3 и закрытый шаг 4 пройдены на ' + path.basename(log_path) + ' (' + s0.board + ', ' + s0.fw + ')')
+        console.log('tunewizard-browser-log3: шаги 0–3, 5 и закрытый шаг 4 пройдены на ' + path.basename(log_path) + ' (' + s0.board + ', ' + s0.fw + ')')
         console.log('  шаг 0: интервал ' + s0.interval.join('–') + ' с, «' + s0.checks.flight.text + '»; проверки ' + JSON.stringify(statuses))
         console.log('  шаг 1: трасс с данными ' + s1.with_data + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; «после − до», дБ: 5–30 Гц ' + band_text('low') +
             '; 100–200 Гц ' + band_text('high'))
         console.log('  шаг 2: варианты ' + s2.titles.join('; ') + '; вердикт «' + s2.verdict + '»')
         console.log('  шаг 3: варианты ' + s3.ids.join(', ') + ', шум D крена (Z) / тангажа (Y) ' + s3.dterm_dB.map((v) => v.toFixed(1)).join(' / ') + ' дБ; вердикт «' + s3.verdict + '»')
+        console.log('  шаг 5: «' + s5.verdict + '»; .param: ' + param5.trim().split('\n').join(', ') + '; память — ' + m5.key)
         console.log('  лог Copter после QuadPlane: ' + ((reset != null) ? 'сброс проверен на ' + path.basename(copter_log) : 'второго лога нет — не проверялся'))
     } catch (e) {
         if (problems.length) {

@@ -378,6 +378,12 @@ test('QuadPlane: вердикт без рекомендации — «Лог + �
     step3_set_form_values(step3.candidates[1].values)
     step3_render_verdict()
     assert.match(verdict().textContent, / Его значения уже в форме — нажмите «Принять»\. Notch — из лога/)
+    // В форме «Свой» (не лог и не вариант): оставить лог — вернуть его значения «Применить вариант», как в ветке «совпадают»
+    step3_set_form_values({ ...step3.candidates[0].values, Q_A_ACCEL_R_MAX: 60000 })
+    step3_update_custom()
+    assert.equal(step3_form_row()?.id, 'custom')
+    step3_render_verdict()
+    assert.match(verdict().textContent, /; чтобы оставить лог — выберите «Как в логе» и нажмите «Применить вариант», затем «Принять» \(в форме сейчас другие значения\)\. Notch — из лога/)
 
     // Правило /2 совпало с логом — менять нечего
     reset_page({ params: { ...qp_log, Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20, Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTD: 20, Q_A_RAT_YAW_FLTT: 20 }, profile: quadplane() })
