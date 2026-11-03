@@ -19,9 +19,9 @@ const check_rules = {
                                     // и RATE с 10 Гц [код, ArduCopter/Copter.cpp ten_hz_logging_loop, rate_thread.cpp medium_logging_rate]
     // ArduPlane (QuadPlane): PIQR/PIQP/PIQY пишутся вместе с ATT, пока работал регулятор VTOL; с частотой цикла — только при
     // бите ATTITUDE_FULLRATE (номер — fullrate_bit профиля, core/vehicle.js), при ATTITUDE_FAST без него — 25 Гц, при одном
-    // ATTITUDE_MED — 10 Гц; бита PID нет, бит 12 у Plane — CAMERA [код] ArduPlane/defines.h:102–121, Plane.cpp:269–312,
-    // Log.cpp:30–34, 59–65; [4.6.3] defines.h:109–126. RATE у QuadPlane пишется с частотой цикла без LOG_BITMASK
-    // [код] ArduPlane/quadplane.cpp:1812–1826
+    // ATTITUDE_MED — 10 Гц, без всех трёх не пишутся (фраза — check_plane_pid_rate_text); бита PID нет, бит 12 у Plane —
+    // CAMERA [код] ArduPlane/defines.h:102–121, Plane.cpp:269–312, Log.cpp:30–34, 59–65; [4.6.3] defines.h:109–126. RATE у
+    // QuadPlane пишется с частотой цикла без LOG_BITMASK [код] ArduPlane/quadplane.cpp:1812–1826
     plane_log_bitmask_attitude_fast: 0,
     plane_attitude_fast_hz: 25,
     plane_log_bitmask_attitude_med: 1,
@@ -61,12 +61,16 @@ function check_gyro_id_param(i) {
 
 // Гироскопы batch и выборка на частоте датчика (бит 0 INS_LOG_BAT_OPT, check_rules.gyro_sensor_rate_*) →
 // { sensor_rate, other, unknown } — подписи гироскопов «ИМЯ (параметр)»: sensor_rate — драйвер включает выборку на
-// частоте датчика (Invensense v1/v2 по SPI), other — не включает, unknown — тип не определить (параметра типа нет или он
-// 0, decode_devid недоступен). Гироскопы — экземпляры из INS_LOG_BAT_MASK (нет параметра — все пять, у которых есть
-// параметр типа); тип — по INS_GYR*_ID через decode_devid (Libraries/DecodeDevID.js, глобал страницы; под Node без него —
-// unknown), как подпись датчика шага 1. Тип вне таблицы decode_devid («Unknown») — не Invensense v1/v2: их типы в таблице
-// есть. На Invensense v1/v2 выборку на частоте датчика выключает ещё INS_FAST_SAMPLE без бита экземпляра — не
-// учитывается (бит — по номеру акселерометра, AP_InertialSensor_Backend.h:333–335): предупреждение тогда лишнее, но
+// частоте датчика (Invensense v1/v2 по SPI), other — не включает, unknown — тип не определить (параметра типа нет, он не
+// число больше 0 или decode_devid недоступен). Гироскопы — экземпляры из INS_LOG_BAT_MASK (нет параметра — все пять, у
+// которых есть параметр типа); INS_GYR*_ID = 0 — гироскопа нет, экземпляр пропускается: ID каждого найденного гироскопа
+// прошивка записывает при запуске [код] AP_InertialSensor/AP_InertialSensor.cpp:747–779 (register_gyro), и маска 7 при
+// двух IMU не должна давать «тип не определить» (ревью задачи 5 этапа 9). Тип — по INS_GYR*_ID через decode_devid
+// (Libraries/DecodeDevID.js, глобал страницы; под Node без него — unknown), как подпись датчика шага 1. Тип вне таблицы
+// decode_devid («Unknown») — не Invensense v1/v2: их типы в таблице есть. У DroneCAN (шина 3) decode_devid кладёт в
+// devtype номер датчика (sensor_id), и имя по таблице типов ложное (например, «GYR_MPU6000») — подпись «DroneCAN», драйвер
+// не Invensense по SPI. На Invensense v1/v2 выборку на частоте датчика выключает ещё INS_FAST_SAMPLE без бита экземпляра —
+// не учитывается (бит — по номеру акселерометра, AP_InertialSensor_Backend.h:333–335): предупреждение тогда лишнее, но
 // безвредное [наше]
 function check_gyro_sensor_rate(params) {
     const r = check_rules
@@ -76,7 +80,7 @@ function check_gyro_sensor_rate(params) {
     for (let i = 0; i < 5; i++) {
         const name = check_gyro_id_param(i)
         const id = params.get(name)
-        if ((mask != null) ? ((mask & (1 << i)) === 0) : (id == null)) {
+        if (((mask != null) ? ((mask & (1 << i)) === 0) : (id == null)) || (id === 0)) {
             continue
         }
         if (!decoder || (id == null) || !(id > 0)) {
@@ -85,11 +89,35 @@ function check_gyro_sensor_rate(params) {
         }
         const decoded = decode_devid(id, DEVICE_TYPE_IMU)
         const sensor_rate = (decoded.bus_type === r.gyro_sensor_rate_bus) && r.gyro_sensor_rate_names.includes(decoded.name)
-        // Тип вне таблицы — номером из ID (у DroneCAN decode_devid вместо devtype отдаёт sensor_id)
-        const label = ((decoded.name !== "Unknown") ? decoded.name : "тип 0x" + (id >> 16).toString(16)) + " (" + name + ")"
-        result[sensor_rate ? "sensor_rate" : "other"].push(label)
+        // DroneCAN — без имени типа (оно ложное); тип вне таблицы — номером из ID
+        const type = (decoded.bus_type === "DRONECAN") ? "DroneCAN" : (decoded.name !== "Unknown") ? decoded.name : "тип 0x" + (id >> 16).toString(16)
+        result[sensor_rate ? "sensor_rate" : "other"].push(type + " (" + name + ")")
     }
     return result
+}
+
+// Частота PIQR/PIQP/PIQY (names — pid_messages профиля QuadPlane) без бита ATTITUDE_FULLRATE по LOG_BITMASK bitmask —
+// одна фраза для проверки шага 0 pid_log и правила подготовки log_fast (core/prep.js): при бите ATTITUDE_FAST — «… пишутся
+// с частотой 25 Гц (бит ATTITUDE_FAST, 0)», при одном ATTITUDE_MED — «… 10 Гц (только бит ATTITUDE_MED, 1)», без обоих —
+// «… не пишутся вовсе: в LOG_BITMASK нет ни ATTITUDE_FAST (0), ни ATTITUDE_MED (1)»; bitmask null или не число — все три
+// случая. PIQx пишет Log_Write_Attitude, а его зовут только update_logging25 (ATTITUDE_FAST без FULLRATE), update_logging10
+// (ATTITUDE_MED без более быстрых) и Log_Write_FullRate (FULLRATE) [код] ArduPlane/Plane.cpp:269–312, Log.cpp:30–34, 59–65
+function check_plane_pid_rate_text(names, bitmask) {
+    const r = check_rules
+    const fast = "с частотой " + r.plane_attitude_fast_hz + " Гц (бит ATTITUDE_FAST, " + r.plane_log_bitmask_attitude_fast + ")"
+    const med = r.plane_attitude_med_hz + " Гц (только бит ATTITUDE_MED, " + r.plane_log_bitmask_attitude_med + ")"
+    const none = "ни ATTITUDE_FAST (" + r.plane_log_bitmask_attitude_fast + "), ни ATTITUDE_MED (" + r.plane_log_bitmask_attitude_med + ")"
+    const head = names.join("/") + " "
+    if (!Number.isFinite(bitmask)) {
+        return head + "пишутся " + fast + " или " + med + ", а без обоих не пишутся вовсе"
+    }
+    if ((bitmask & (1 << r.plane_log_bitmask_attitude_fast)) !== 0) {
+        return head + "пишутся " + fast
+    }
+    if ((bitmask & (1 << r.plane_log_bitmask_attitude_med)) !== 0) {
+        return head + "пишутся с частотой " + med
+    }
+    return head + "не пишутся вовсе: в LOG_BITMASK нет " + none
 }
 
 // Batch с битами 0 (Sensor-Rate) и 2 (до и после) без бита 1 → { status: "ok" | "warn", reason } по гироскопам batch
@@ -168,8 +196,7 @@ function run_checks(info, params, vibe) {
         const step4_note = step4 ? "" : "; шаг 4 для " + profile.title + " пока недоступен"
         const bit = profile.fullrate_bit
         const fullrate_fix = "Включите бит ATTITUDE_FULLRATE (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ") — " + (step4 ? "для шага 4" : "для будущего шага 4") +
-            ": без него " + pid_names.join("/") + " пишутся с частотой " + r.plane_attitude_fast_hz + " Гц (бит ATTITUDE_FAST, " + r.plane_log_bitmask_attitude_fast +
-            ") или " + r.plane_attitude_med_hz + " Гц (только бит ATTITUDE_MED, " + r.plane_log_bitmask_attitude_med + ")"
+            ": без него " + check_plane_pid_rate_text(pid_names, params.get("LOG_BITMASK"))
         if (m.pid && slow) {
             add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + rate_message + " пишется с частотой " + hz_text + " Гц — ниже " +
                 r.pid_log_min_rate_hz + " Гц отклик на ступеньку не считается" + step4_note, fullrate_fix)
@@ -376,5 +403,5 @@ function checks_summary(checks) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { check_rules, check_gyro_id_param, check_gyro_sensor_rate, check_sensor_rate_prepost, run_checks, checks_summary }
+    module.exports = { check_rules, check_gyro_id_param, check_gyro_sensor_rate, check_plane_pid_rate_text, check_sensor_rate_prepost, run_checks, checks_summary }
 }

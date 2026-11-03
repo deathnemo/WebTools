@@ -348,17 +348,22 @@ function summary_refly(ctx) {
     return items
 }
 
-// Шаги словами: один — «шаг 2»; подряд — «шаги 2–4»; иначе — «шаги 2, 4»; пустой список — пустая строка (у
-// summary_refly до неё не дойти: «repeat» — только у вида с шагами 2–4, ревью задачи 4 этапа 9)
+// Номера шагов steps (по возрастанию) — одно правило диапазона для всех надписей «шаги N–M»: подряд — «2–4», иначе —
+// «2, 4», один — «2», пустой список — пустая строка. Его берут summary_steps_text, вступление и заголовок таблицы шагов
+// сводки и её «менять нечего» (steps/step5.js, step5_steps_range): у Copter «2–4», у QuadPlane «2–3» (ревью качества
+// задачи 4 этапа 9)
+function summary_steps_range(steps) {
+    const in_row = steps.every((n, i) => (i == 0) || (n === steps[i - 1] + 1))
+    return (in_row && (steps.length > 1)) ? steps[0] + "–" + steps[steps.length - 1] : steps.join(", ")
+}
+
+// Шаги словами: один — «шаг 2»; несколько — «шаги » + summary_steps_range («шаги 2–4», «шаги 2, 4»); пустой список —
+// пустая строка (у summary_refly до неё не дойти: «repeat» — только у вида с шагами 2–4, ревью задачи 4 этапа 9)
 function summary_steps_text(steps) {
     if (steps.length == 0) {
         return ""
     }
-    if (steps.length == 1) {
-        return "шаг " + steps[0]
-    }
-    const in_row = steps.every((n, i) => (i == 0) || (n === steps[i - 1] + 1))
-    return "шаги " + (in_row ? steps[0] + "–" + steps[steps.length - 1] : steps.join(", "))
+    return ((steps.length == 1) ? "шаг " : "шаги ") + summary_steps_range(steps)
 }
 
 // Имена из names, которым после записи нужна перезагрузка: в метаданных параметров (FilterReview/params.json —

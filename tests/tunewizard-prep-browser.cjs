@@ -4,13 +4,16 @@
 // положения 6 для ACRO и выбор другого, таблица положений, файл исправлений _prep.param (скачивание) и заметка о
 // перезагрузке, план полёта, печать плана, цель «Фильтры» (без пунктов Acro и PID и без таблицы), цель после перезагрузки
 // страницы; QuadPlane (этап 9, дизайн — раздел 9) по синтетической tests/fixtures/prep_quadplane.param — вид по файлу,
-// правила без log_pid, тренера и быстрого потока, QACRO и режимы Plane в таблице с каналом FLTMODE_CH, файл исправлений и
-// план, затем снова Copter — без следов QuadPlane; отказы (файл Plane без Q_A_RAT_RLL_P, двоичный файл), «Убрать файл»,
-// ошибок консоли нет. Отказ для файла другого вида, чем лог, — в tests/tunewizard-browser-log3.cjs (здесь лога нет).
+// правила без log_pid, тренера и быстрого потока, QACRO и режимы Plane в таблице с каналом FLTMODE_CH (и без него — канал
+// по умолчанию 8), файл исправлений и план, затем снова Copter — без следов QuadPlane; отказы (файл Plane без
+// Q_A_RAT_RLL_P, двоичный файл, файл Copter при логе неподдержанного вида — подменой состояния страницы), «Убрать файл»,
+// ошибок консоли нет. Отказ для файла другого вида, чем лог, на настоящих логах — в tests/tunewizard-browser-log3.cjs
+// (здесь лога нет).
 // Ожидаемое по фикстурам проверено ядром core/prep.js под Node.
 // Запуск: npm run test:tunewizard-prep
 // Нужны: браузер (CHROME_PATH — путь к chrome.exe; без него Playwright берёт свой Chromium, если он установлен) и python
-// для http.server. Файлы отказов (Plane без Q_A_RAT_RLL_P и двоичный) тест пишет во временную папку ОС и удаляет в конце
+// для http.server. Файлы отказов (Plane без Q_A_RAT_RLL_P и двоичный) и QuadPlane без FLTMODE_CH тест пишет во временную
+// папку ОС и удаляет в конце
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -154,6 +157,9 @@ async function main() {
         fs.writeFileSync(plane, fs.readFileSync(qp_fixture, 'utf8').split('\n').filter((line) => !line.startsWith('Q_A_RAT_RLL_P,')).join('\n'))
         const binary = path.join(tmp, 'binary.bin')
         fs.writeFileSync(binary, Buffer.from([0xA3, 0x95, 0x80, 0x80, 0x59, 0x46, 0x4D, 0x54, 0x00, 0xFF, 0x0A, 0x01, 0x02]))
+        // Фикстура QuadPlane без FLTMODE_CH — подпись таблицы с каналом по умолчанию
+        const qp_no_channel = path.join(tmp, 'quadplane_no_channel.param')
+        fs.writeFileSync(qp_no_channel, fs.readFileSync(qp_fixture, 'utf8').split('\n').filter((line) => !line.startsWith('FLTMODE_CH,')).join('\n'))
 
         server = spawn(python, ['-m', 'http.server', '--bind', '127.0.0.1', String(port)], { cwd: repo, stdio: 'ignore' })
         server.on('error', (e) => problems.push('http.server: ' + e.message))
@@ -352,6 +358,11 @@ async function main() {
         assert.deepEqual([qp_filters.goal_text, qp_filters.items.map((item) => item.id), qp_filters.modes_head],
                          ['шаги 1–3: висение в Q-режиме', ['log_backend', 'gyro_data', 'gyro_prepost', 'notch_source', 'hover_learn'], false])
         await page.selectOption('#prep0_goal', 'both')
+        // Нет FLTMODE_CH — в подписи таблицы канал по умолчанию у Plane (8)
+        await pick_param(page, qp_no_channel)
+        const qp_default_channel = await prep0(page)
+        assert.deepEqual([qp_default_channel.kind, qp_default_channel.labels[1]], ['quadplane', 'Положения переключателя режимов · канал FLTMODE_CH (по умолчанию 8)'],
+                         'нет FLTMODE_CH — канал по умолчанию')
         // Снова файл Copter: подписи, режимы и пояснение — Copter, без канала
         await pick_param(page, fixture)
         const back = await prep0(page)
@@ -359,6 +370,25 @@ async function main() {
                          ['copter', 'шаги 1–4: висение и Acro в одном полёте', ['Положение для ACRO', 'Положения переключателя режимов'], 'ALT_HOLD', 'станет ACRO (файл исправлений)'],
                          'после QuadPlane — снова Copter')
         assert.deepEqual([back.verdict, back.note], [both.verdict, both.note], 'Copter — как в начале')
+
+        // Лог неподдержанного вида (подмена состояния страницы: лог Plane без Q_ENABLE — профиля нет) и файл Copter: отказ с
+        // пометкой «(не поддержан)» и тем, как проверить файл («выберите файл этого аппарата» невыполнимо), пояснение цели —
+        // Copter (профиля лога нет); затем состояние возвращается
+        const unsupported = await page.evaluate(() => {
+            const saved = { params: state.params, kind: state.kind, profile: state.profile, info: state.info, file_name: state.file_name }
+            try {
+                Object.assign(state, { params: { get: () => null, has: () => false }, kind: null, profile: null, info: { vehicle: 'Plane' }, file_name: 'plane.bin' })
+                prep0_render()
+                return { verdict: document.getElementById('prep0_verdict').textContent, goal_text: document.getElementById('prep0_goal_text').textContent,
+                         checks: document.getElementById('prep0_checks').checkVisibility() }
+            } finally {
+                Object.assign(state, saved)
+                prep0_render()
+            }
+        })
+        assert.deepEqual(unsupported, { verdict: 'Файл «prep.param» — Copter, лог — Plane (не поддержан): проверить файл можно без лога (перезагрузите страницу и выберите ' +
+            'только файл) или с логом Copter', goal_text: 'шаги 1–4: висение и Acro в одном полёте', checks: false }, 'лог неподдержанного вида и файл Copter — отказ')
+        assert.deepEqual((await prep0(page)).verdict, both.verdict, 'после подмены — снова по файлу без лога')
 
         // Отказ: файл Plane без Q_A_RAT_RLL_P (и без ATC_RAT_RLL_P) — ни Copter, ни QuadPlane: в вердикте причина, списка,
         // таблицы, файла и плана нет; «Убрать файл» видна

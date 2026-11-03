@@ -31,8 +31,8 @@
 //          false — формулы для вида нет: поля, варианта и рекомендации нет);
 //   loop_rate_default — SCHED_LOOP_RATE, если его нет в логе;
 //   flight_title — что за окно полёта (проверка «Полёт», плитка шага 0); hover_throttle_text — средний газ окна в
-//          проверке газа висения; hover_learn_modes, hover_learn_note — где учится газ висения и почему не в других
-//          режимах (null — без пояснения);
+//          проверке газа висения; hover_learn_modes, hover_learn_note — где учится газ висения, почему не в других
+//          режимах и при каких условиях полёта (null — без пояснения);
 //   is_tailsitter(params) — tailsitter ли аппарат по параметрам (params с get, как у log_params; может быть null); null —
 //          у вида tailsitter не бывает (core/log.js тогда не разбирает PARM ради этого)
 const vehicle_profiles = {
@@ -149,10 +149,14 @@ const vehicle_profiles = {
         hover_throttle_text: "средний газ VTOL",
         // Q_M_THST_HOVER учится только при работающем регуляторе высоты: QHOVER, QLOITER, QLAND, QRTL, VTOL в AUTO и
         // GUIDED; в QSTABILIZE и QACRO газ ручной [код] quadplane.cpp:1918–1960 (регулятор Z — 1941–1944), 1101–1116,
-        // mode_qloiter.cpp:177, mode_qland.cpp:27–32, mode_qrtl.cpp:120. Ещё условие — оценка воздушной скорости ниже
-        // 0.3·AIRSPEED_MIN (quadplane.cpp:1951–1953); есть ли она без датчика скорости — не проверено
+        // mode_qloiter.cpp:177, mode_qland.cpp:27–32, mode_qrtl.cpp:120. И в них — только при оценке воздушной скорости
+        // (ahrs.airspeed_EAS) ниже 0.3·AIRSPEED_MIN, вертикальной скорости меньше 0.6 м/с, крене и тангаже меньше 5°
+        // [код] quadplane.cpp:1948–1953 ([4.6.3] 1931–1935, ahrs.airspeed_estimate); оценка — от датчика скорости, без
+        // него — по скорости GPS и оценке ветра, без обоих её нет [код] AP_AHRS/AP_AHRS.cpp:1024–1063,
+        // AP_AHRS_DCM.cpp:1108–1117 (ревью задачи 5 этапа 9; на логе не проверено — на третьем логе есть ARSP)
         hover_learn_modes: "QHOVER или QLOITER",
-        hover_learn_note: "в QSTABILIZE и QACRO газ висения не учится",
+        hover_learn_note: "в QSTABILIZE и QACRO газ висения не учится; учится только при оценке воздушной скорости ниже 0.3·AIRSPEED_MIN " +
+            "(без датчика скорости и GPS её нет), вертикальной скорости меньше 0.6 м/с, крене и тангаже меньше 5°",
         // Q_TAILSIT_ENABLE > 0 (1 — Enable, 2 — Enable Always) [код] tailsitter.cpp:26–33, quadplane.cpp:763
         is_tailsitter: (params) => (params?.get("Q_TAILSIT_ENABLE") ?? 0) > 0,
     },

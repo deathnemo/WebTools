@@ -102,7 +102,9 @@ function prep0_log_vehicle() {
 
 // Почему подготовка не для этого источника → текст для вердикта или null: лог — вид лога не поддержан (нет профиля:
 // Plane без Q_ENABLE, Rover…); файл — в нём нет признака ни одного вида (vehicle_kind_of_params) или загружен лог
-// другого вида [дизайн этапа 9, раздел 9: «файл и лог разных видов — отказ»; без лога — любой поддержанный вид]
+// другого вида [дизайн этапа 9, раздел 9: «файл и лог разных видов — отказ»; без лога — любой поддержанный вид]. Лог
+// неподдержанного вида — «выберите файл этого аппарата» невыполнимо: пометка «(не поддержан)» и как проверить файл —
+// без лога или с логом его вида (ревью задачи 5 этапа 9)
 function prep0_refusal(source) {
     const supported = Object.values(vehicle_profiles)
     const titles = supported.map((p) => p.title).join(" и ")
@@ -116,8 +118,10 @@ function prep0_refusal(source) {
             supported.map((p) => p.param_marker).join(" и ")
     }
     if ((state.params != null) && (kind !== state.kind)) {
-        return "Файл «" + source.name + "» — " + vehicle_profile(kind).title + ", лог — " + prep0_log_vehicle() +
-            ": выберите файл этого аппарата или уберите файл"
+        const file_title = vehicle_profile(kind).title
+        return "Файл «" + source.name + "» — " + file_title + ", лог — " + prep0_log_vehicle() + ((state.profile != null)
+            ? ": выберите файл этого аппарата или уберите файл"
+            : " (не поддержан): проверить файл можно без лога (перезагрузите страницу и выберите только файл) или с логом " + file_title)
     }
     return null
 }
@@ -412,11 +416,11 @@ function prep0_draw_plan(ctx) {
 }
 
 // Блок целиком: нет ни источника, ни ошибки — скрыт; ошибка чтения файла без источника — только она в вердикте;
-// отказ (prep0_refusal: вид не поддержан или файл и лог разных видов) — цель, строка источника и отказ в вердикте; иначе
-// цель с пояснением по виду источника (prep_goal_text), строка источника, вердикт, список, положения переключателя (цель
-// с PID), файл исправлений и план. Ошибка чтения файла показывается, пока
-// источник тот же, что при ошибке; при другом — забывается, иначе вернулась бы, когда источник снова станет прежним
-// (например, без источника после неудачной загрузки лога)
+// отказ (prep0_refusal: вид не поддержан или файл и лог разных видов) — цель с пояснением по виду лога, строка источника
+// и отказ в вердикте; иначе цель с пояснением по виду источника (prep_goal_text), строка источника, вердикт, список,
+// положения переключателя (цель с PID), файл исправлений и план. Ошибка чтения файла показывается, пока источник тот же,
+// что при ошибке; при другом — забывается, иначе вернулась бы, когда источник снова станет прежним (например, без
+// источника после неудачной загрузки лога)
 function prep0_draw() {
     const source = prep0_current_source()
     const id = source?.id ?? null
@@ -442,8 +446,9 @@ function prep0_draw() {
     const goal = prep0_state.goal
     const ctx = prep0_context()
     document.getElementById("prep0_goal").value = goal
-    // При отказе профиля нет — пояснение Copter, как до этапа 9
-    document.getElementById("prep0_goal_text").textContent = prep_goal_text(goal, ctx.profile)
+    // При отказе профиля источника нет — пояснение по профилю лога (лог QuadPlane и файл Copter — цели QuadPlane), а без
+    // него (лога нет или вид не поддержан) — Copter, как до этапа 9 (ревью задачи 5 этапа 9)
+    document.getElementById("prep0_goal_text").textContent = prep_goal_text(goal, ctx.profile ?? state.profile)
     document.getElementById("prep0_source").textContent = prep0_source_text(source, error)
     document.getElementById("prep0_unfile").hidden = (source.kind !== "file")
 

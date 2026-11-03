@@ -29,7 +29,7 @@ function load_page_scripts(files) {
 
 // Нужное ядру подготовки в порядке страницы: decode_devid и DEVICE_TYPE_IMU (DecodeDevID.js; тип гироскопа для бита 0
 // batch), param_to_string и get_param_download_text (Param_Helpers.js), vehicle_profiles и vehicle_profile (vehicle.js),
-// log_params (log.js), check_rules и check_sensor_rate_prepost (checks.js), notch_param_names (filters.js), pidtune_rules
+// log_params (log.js), check_rules, check_sensor_rate_prepost и check_plane_pid_rate_text (checks.js), notch_param_names (filters.js), pidtune_rules
 // и pidtune_mode_names (pidtune.js; ему — константы pid.js), param_file_text и parse_param_file (params.js),
 // summary_period и summary_lower_first (summary.js)
 load_page_scripts([
@@ -126,6 +126,22 @@ test('константы: ACRO и Rate Loop Only — из профиля Copter 
     // Значения совета записи гироскопа — те же, что у шага 0 (check_rules), не копия
     assert.equal(prep_rules.batch_fix, check_rules.gyro_batch_fix)
     assert.equal(prep_rules.raw_hint, check_rules.gyro_raw_hint)
+})
+
+test('prep_vehicles и профиль: выход QuadPlane — level_modes профиля, «где висеть» — те же режимы, что у проверки шага 0 (ревью задачи 5 этапа 9)', () => {
+    // QuadPlane: совет выхода из QACRO — все режимы с самовыравниванием профиля, не копия
+    assert.equal(prep_vehicles.quadplane.exit_suggest, vehicle_profiles.quadplane.level_modes)
+    // Copter: совет выхода — STABILIZE и ALT_HOLD (часть level_modes), как до этапа 9
+    assert.deepEqual(prep_vehicles.copter.exit_suggest.map((m) => vehicle_profiles.copter.modes[m]), ['STABILIZE', 'ALT_HOLD'])
+    assert.ok(prep_vehicles.copter.exit_suggest.every((m) => vehicle_profiles.copter.level_modes.includes(m)))
+    // Copter: «ALT_HOLD» подготовки и «AltHold» проверки шага 0 (hover_learn_modes) — один режим 2; написание разное ради
+    // прежних текстов обоих мест
+    assert.equal(prep_vehicles.copter.hover_where, 'ALT_HOLD')
+    assert.equal(vehicle_profiles.copter.modes[2], prep_vehicles.copter.hover_where)
+    assert.equal(vehicle_profiles.copter.hover_learn_modes, 'AltHold')
+    assert.equal(vehicle_profiles.copter.hover_learn_modes.toUpperCase(), prep_vehicles.copter.hover_where.replace('_', ''))
+    // QuadPlane: «где висеть» — режимы и пояснение проверки шага 0
+    assert.equal(prep_vehicles.quadplane.hover_where, vehicle_profiles.quadplane.hover_learn_modes + ': ' + vehicle_profiles.quadplane.hover_learn_note)
 })
 
 test('prep_goals: подписи и части целей, пояснения по виду аппарата; неизвестная цель — ошибка', () => {
@@ -411,10 +427,10 @@ test('check_gyro_sensor_rate: Invensense v1/v2 по SPI — с выборкой 
     for (const t of SENSOR_RATE_TYPES) {
         const name = decode_devid(devid(t), DEVICE_TYPE_IMU).name
         assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t) }), { sensor_rate: [name + ' (INS_GYR_ID)'], other: [], unknown: [] }, name)
-        // Не по SPI (I2C, DroneCAN) драйвер быструю выборку не включает
-        for (const bus of [1, 3]) {
-            assert.equal(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t, bus) }).other.length, 1, name + ', шина ' + bus)
-        }
+        // Не по SPI (I2C, DroneCAN) драйвер быструю выборку не включает; у DroneCAN в devtype — номер датчика, имя типа по
+        // таблице ложное — подпись «DroneCAN»
+        assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t, 1) }), { sensor_rate: [], other: [name + ' (INS_GYR_ID)'], unknown: [] }, name + ', I2C')
+        assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(t, 3) }), { sensor_rate: [], other: ['DroneCAN (INS_GYR_ID)'], unknown: [] }, name + ', DroneCAN')
     }
     for (const t of OTHER_TYPES) {
         const name = decode_devid(devid(t), DEVICE_TYPE_IMU).name
@@ -422,9 +438,14 @@ test('check_gyro_sensor_rate: Invensense v1/v2 по SPI — с выборкой 
     }
     // Тип вне таблицы decode_devid — не Invensense v1/v2 (их типы в таблице есть): подпись — номер типа
     assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: devid(0x41) }).other, ['тип 0x41 (INS_GYR_ID)'])
-    // Тип не определить: параметра нет или 0
+    // Тип не определить: параметра нет или он не число больше 0
     assert.deepEqual(of({ INS_LOG_BAT_MASK: 1 }), { sensor_rate: [], other: [], unknown: ['INS_GYR_ID'] })
-    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: 0 }).unknown, ['INS_GYR_ID'])
+    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: -5 }).unknown, ['INS_GYR_ID'])
+    // ID 0 — гироскопа нет (ID найденного пишет register_gyro): экземпляр пропускается — маска 7 при двух IMU не даёт
+    // «тип не определить»; маски нет — тоже
+    assert.deepEqual(of({ INS_LOG_BAT_MASK: 1, INS_GYR_ID: 0 }), { sensor_rate: [], other: [], unknown: [] })
+    assert.deepEqual(of({ ...LOG3_GYROS, INS_LOG_BAT_MASK: 7 }), { sensor_rate: [], other: ['ICM45686 (INS_GYR_ID)', 'ICM45686 (INS_GYR2_ID)'], unknown: [] })
+    assert.deepEqual(of(LOG3_GYROS), { sensor_rate: [], other: ['ICM45686 (INS_GYR_ID)', 'ICM45686 (INS_GYR2_ID)'], unknown: [] })
     // Гироскопы — экземпляры INS_LOG_BAT_MASK; маски нет — все с параметром типа; имена INS4_/INS5_
     const mixed = { INS_GYR_ID: devid(0x3B), INS_GYR2_ID: devid(0x2F), INS4_GYR_ID: devid(0x2C) }
     assert.deepEqual(of({ ...mixed, INS_LOG_BAT_MASK: 1 }), { sensor_rate: [], other: ['ICM45686 (INS_GYR_ID)'], unknown: [] })
@@ -448,8 +469,12 @@ test('бит 0 с битом 2 batch — по типу гироскопа: Inven
         ...SENSOR_RATE_TYPES.map((t) => ({ values: { INS_GYR_ID: devid(t) }, status: 'warn' })),
         ...OTHER_TYPES.map((t) => ({ values: { INS_GYR_ID: devid(t) }, status: 'ok' })),
         { values: { INS_GYR_ID: devid(0x2F, 1) }, status: 'ok' },
+        { values: { INS_GYR_ID: devid(0x21, 3) }, status: 'ok' },
         { values: {}, status: 'warn' },
         { values: LOG3_GYROS, status: 'ok' },
+        // Маска 7 при двух IMU: третьего гироскопа нет (INS_GYR3_ID = 0) — не «тип не определить» (ревью задачи 5 этапа 9)
+        { values: { ...LOG3_GYROS, INS_LOG_BAT_MASK: 7 }, status: 'ok' },
+        { values: { ...LOG3_GYROS, INS_GYR2_ID: devid(0x2F), INS_LOG_BAT_MASK: 7 }, status: 'warn' },
     ]
     for (const c of cases) {
         const label = JSON.stringify(c.values)
@@ -475,6 +500,8 @@ test('бит 0 с битом 2 batch — по типу гироскопа: Inven
     assert.deepEqual([step0(LOG3_GYROS, 'quadplane').text, step0(LOG3_GYROS, 'quadplane').fix],
         ['Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными; бит 0 (Sensor-Rate) в INS_LOG_BAT_OPT = 5 — ICM45686 (INS_GYR_ID): ' +
          'драйвер не включает выборку на частоте датчика — бит 0 не действует', null])
+    // DroneCAN: подпись без ложного имени типа (devtype 0x21 у DroneCAN — номер датчика, а не GYR_MPU6000)
+    assert.match(prepost({ INS_GYR_ID: devid(0x21, 3) }).text, /; бит 0 \(Sensor-Rate\) — DroneCAN \(INS_GYR_ID\): драйвер не включает выборку на частоте датчика/)
     // Тип не определить — оговорка «если датчик Invensense v1/v2»
     assert.match(prepost({}).text, /— тип гироскопа не определить \(INS_GYR_ID\): если датчик Invensense v1\/v2 \(по SPI с быстрой выборкой\), обе половины batch — сырые/)
     assert.match(step0({}, 'quadplane').text, /— тип гироскопа не определить \(INS_GYR_ID\): если датчик Invensense v1\/v2/)
@@ -849,9 +876,22 @@ test('QuadPlane: правила по профилю — без log_pid, acro_tra
 test('QuadPlane: log_fast — бит 20 ATTITUDE_FULLRATE (65535 → 1114111), бит 12 не советуется', () => {
     const item = item_of(qp_check({ ...QP_GOOD, LOG_BITMASK: 65535 }, 'pid'), 'log_fast')
     assert.equal(item.status, 'fail')
-    assert.equal(item.text, 'LOG_BITMASK = 65535: бит 20 (ATTITUDE_FULLRATE) выключен — PIQR/PIQP/PIQY пишутся с частотой 25 Гц (бит ATTITUDE_FAST) или 10 Гц ' +
-        '(только ATTITUDE_MED) — для будущего шага 4 нужна частота цикла')
+    assert.equal(item.text, 'LOG_BITMASK = 65535: бит 20 (ATTITUDE_FULLRATE) выключен — PIQR/PIQP/PIQY пишутся с частотой 25 Гц (бит ATTITUDE_FAST, 0) — ' +
+        'для будущего шага 4 нужна частота цикла')
     assert.equal(item.fix, 'Включите бит ATTITUDE_FULLRATE (20) в LOG_BITMASK (+1048576)')
+    // Частота без бита 20 — по битам ATTITUDE_FAST и ATTITUDE_MED; фраза — та же, что у проверки шага 0 pid_log
+    // (check_plane_pid_rate_text), без обоих — PIQx не пишутся вовсе
+    const text_of = (bitmask) => item_of(qp_check({ ...QP_GOOD, LOG_BITMASK: bitmask }, 'pid'), 'log_fast').text
+    assert.equal(text_of(65535 & ~1), 'LOG_BITMASK = 65534: бит 20 (ATTITUDE_FULLRATE) выключен — PIQR/PIQP/PIQY пишутся с частотой 10 Гц (только бит ATTITUDE_MED, 1) — ' +
+        'для будущего шага 4 нужна частота цикла')
+    assert.equal(text_of(65535 & ~3), 'LOG_BITMASK = 65532: бит 20 (ATTITUDE_FULLRATE) выключен — PIQR/PIQP/PIQY не пишутся вовсе: в LOG_BITMASK нет ни ATTITUDE_FAST (0), ' +
+        'ни ATTITUDE_MED (1) — для будущего шага 4 нужна частота цикла')
+    for (const bitmask of [65535, 65534, 65532, 1]) {
+        assert.ok(text_of(bitmask).includes(' выключен — ' + check_plane_pid_rate_text(QP.pid_messages, bitmask) + ' — '), String(bitmask))
+    }
+    assert.equal(check_plane_pid_rate_text(QP.pid_messages, null), 'PIQR/PIQP/PIQY пишутся с частотой 25 Гц (бит ATTITUDE_FAST, 0) или 10 Гц (только бит ATTITUDE_MED, 1), ' +
+        'а без обоих не пишутся вовсе')
+    assert.equal(check_plane_pid_rate_text(QP.pid_messages, NaN), check_plane_pid_rate_text(QP.pid_messages, null))
     assert.deepEqual(item.changes, [{ name: 'LOG_BITMASK', set: 1 << QP.fullrate_bit, clear: 0 }])
     assert.deepEqual(prep_changes(fake_params({ LOG_BITMASK: 65535 }), [item]), { LOG_BITMASK: 1114111 })
     // Бит 12 у Plane — CAMERA: без него пункта нет, совета нет
@@ -905,7 +945,10 @@ test('QuadPlane: hover_learn — Q_M_HOVER_LEARN, совет висеть в QHO
     const warn = item_of(qp_check({ ...QP_GOOD, Q_M_HOVER_LEARN: 0 }, 'filters', { hover_check: HOVER_WARN }), 'hover_learn')
     assert.equal(warn.status, 'warn')
     assert.equal(warn.text, 'Q_M_HOVER_LEARN = 0: обучение газа висения выключено, а по логу газ висения расходится с Q_M_THST_HOVER (проверка шага 0 «Газ висения»)')
-    assert.equal(warn.fix, 'Q_M_HOVER_LEARN = 2 и не меньше 30 с висения в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится')
+    // Условия обучения — режим с регулятором высоты и полёт: оценка воздушной скорости, вертикальная скорость, крен и тангаж
+    // [код] ArduPlane/quadplane.cpp:1948–1953 (ревью задачи 5 этапа 9)
+    assert.equal(warn.fix, 'Q_M_HOVER_LEARN = 2 и не меньше 30 с висения в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится; учится только при оценке ' +
+        'воздушной скорости ниже 0.3·AIRSPEED_MIN (без датчика скорости и GPS её нет), вертикальной скорости меньше 0.6 м/с, крене и тангаже меньше 5°')
     assert.deepEqual(warn.changes, [{ name: 'Q_M_HOVER_LEARN', value: 2 }])
     const ok = item_of(qp_check({ ...QP_GOOD, Q_M_HOVER_LEARN: 1 }, 'filters'), 'hover_learn')
     assert.equal(ok.status, 'ok')

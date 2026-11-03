@@ -1065,6 +1065,11 @@ test('summary_refly: «repeat» — шаги сравнения из досту�
     assert.deepEqual(repeat(vehicle_profiles.quadplane.steps), [text('шаги 2–3')])
     // Шаги словами: один, подряд, с пропуском; пустой список — пустая строка (не «шаги undefined–undefined», ревью задачи 4)
     assert.deepEqual([summary_steps_text([2]), summary_steps_text([2, 3, 4]), summary_steps_text([2, 4]), summary_steps_text([])], ['шаг 2', 'шаги 2–4', 'шаги 2, 4', ''])
+    // Одно правило диапазона для всех надписей «шаги N–M» (summary_steps_text, надписи и «менять нечего» шага 5)
+    assert.deepEqual([[2], [2, 3], [2, 3, 4], [2, 4], [2, 3, 5], []].map(summary_steps_range), ['2', '2–3', '2–4', '2, 4', '2, 3, 5', ''])
+    // Шаги сводки 2–4, доступные виду: у Copter — «2–4» (надписи шага 5 — прежние слово в слово), у QuadPlane — «2–3»
+    const range_of = (profile) => summary_steps_range([2, 3, 4].filter((n) => profile.steps.includes(n)))
+    assert.deepEqual([range_of(vehicle_profiles.copter), range_of(vehicle_profiles.quadplane)], ['2–4', '2–3'])
 })
 
 // ---------------------------------------------------------------- QuadPlane (этап 9)

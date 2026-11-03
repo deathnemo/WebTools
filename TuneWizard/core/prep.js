@@ -18,8 +18,8 @@
 // обёртка страницы над parse_param_file), профиль, выбранное положение ACRO и проверки шага 0 страница передаёт аргументами.
 //
 // Нужны глобалы страницы: Libraries/Param_Helpers.js (param_to_string), core/vehicle.js (vehicle_profiles), core/checks.js
-// (check_rules, check_sensor_rate_prepost), core/filters.js (notch_param_names), core/pidtune.js (pidtune_rules; ему —
-// константы core/pid.js), core/summary.js (summary_period, summary_lower_first).
+// (check_rules, check_sensor_rate_prepost, check_plane_pid_rate_text), core/filters.js (notch_param_names), core/pidtune.js
+// (pidtune_rules; ему — константы core/pid.js), core/summary.js (summary_period, summary_lower_first).
 
 const prep_rules = {
     // Номера битов LOG_BITMASK Copter: ATTITUDE_FAST, PID, IMU_RAW [код] ArduCopter/defines.h:87, 99, 105 (MASK_LOG_*) — из
@@ -134,8 +134,9 @@ const prep_goals = {
 // (fullrate_bit), сообщения PID и шаги — из профиля; здесь — только нужное подготовке. Поля:
 //   goal_texts — пояснения целей (ключи prep_goals);
 //   log_pid_bit — бит PID в LOG_BITMASK (null — правила log_pid нет);
-//   log_fast — правило частоты PID: bit, name — номер и имя бита LOG_BITMASK; title — заголовок пункта; on, off — что
-//       будет при включённом и выключенном бите (продолжение «бит N (имя) включён — …»);
+//   log_fast — правило частоты PID: bit, name — номер и имя бита LOG_BITMASK; title — заголовок пункта; on — что будет
+//       при включённом бите (продолжение «бит N (имя) включён — …»), off(bitmask) — при выключенном, по LOG_BITMASK
+//       источника (у QuadPlane частота PIQx без бита 20 зависит от битов ATTITUDE_FAST и ATTITUDE_MED);
 //   acro_flight — что за полёт в ACRO (текст пункта acro_slot); acro_word — режим ACRO в «в … аппарат сам не
 //       выравнивается»;
 //   exit_suggest — режимы выхода из ACRO, которые советуют пункт acro_exit и план; takeoff — режимы взлёта в плане;
@@ -158,7 +159,7 @@ const prep_vehicles = {
         log_pid_bit: prep_rules.log_bitmask_pid,
         log_fast: {
             bit: prep_rules.log_bitmask_attitude_fast, name: "ATTITUDE_FAST", title: "Частота PID и RATE",
-            on: "PID и RATE пишутся с полной частотой", off: "PID и RATE пишутся с частотой 10 Гц, отклик на ступеньку на шаге 4 не считается",
+            on: "PID и RATE пишутся с полной частотой", off: () => "PID и RATE пишутся с частотой 10 Гц, отклик на ступеньку на шаге 4 не считается",
         },
         acro_flight: "тестовый полёт Acro «Rate Loop Only»",
         acro_word: "Acro",
@@ -183,20 +184,20 @@ const prep_vehicles = {
         // Бита PID у Plane нет (PIQR/PIQP/PIQY пишутся вместе с ATT, бит 12 — CAMERA): правила log_pid нет
         // [код] ArduPlane/Log.cpp:30–39, defines.h:102–121
         log_pid_bit: null,
-        // Бит 20 ATTITUDE_FULLRATE (fullrate_bit профиля): без него PIQx — 25 Гц при ATTITUDE_FAST или 10 Гц при одном
-        // ATTITUDE_MED; с ним Log_Write_Attitude — на частоте цикла [код] ArduPlane/Plane.cpp:269–312, Log.cpp:58–65; бит 0
+        // Бит 20 ATTITUDE_FULLRATE (fullrate_bit профиля): без него PIQx — 25 Гц при ATTITUDE_FAST, 10 Гц при одном
+        // ATTITUDE_MED, без обоих не пишутся (фраза — check_plane_pid_rate_text, core/checks.js, одна с проверкой шага 0
+        // pid_log); с ним Log_Write_Attitude — на частоте цикла [код] ArduPlane/Plane.cpp:269–312, Log.cpp:58–65; бит 0
         // для этого не нужен (Log_Write_FullRate — только по биту 20), на логе не проверено
         log_fast: {
             bit: vehicle_profiles.quadplane.fullrate_bit, name: "ATTITUDE_FULLRATE", title: "Частота PID VTOL",
             on: vehicle_profiles.quadplane.pid_messages.join("/") + " пишутся с частотой цикла",
-            off: vehicle_profiles.quadplane.pid_messages.join("/") + " пишутся с частотой " + check_rules.plane_attitude_fast_hz +
-                 " Гц (бит ATTITUDE_FAST) или " + check_rules.plane_attitude_med_hz + " Гц (только ATTITUDE_MED) — для будущего шага 4 нужна частота цикла",
+            off: (bitmask) => check_plane_pid_rate_text(vehicle_profiles.quadplane.pid_messages, bitmask) + " — для будущего шага 4 нужна частота цикла",
         },
         acro_flight: "тестовый полёт QACRO для будущего шага 4",
         acro_word: "QACRO",
-        // Выход — QSTABILIZE, QHOVER, QLOITER (все level_modes профиля); взлёт — QSTABILIZE или QHOVER
+        // Выход — все level_modes профиля (QSTABILIZE, QHOVER, QLOITER); взлёт — QSTABILIZE или QHOVER
         // [решение пользователя 30.10.2026; дизайн этапа 9, раздел 9]
-        exit_suggest: [17, 18, 19],
+        exit_suggest: vehicle_profiles.quadplane.level_modes,
         takeoff: [17, 18],
         // ACRO_LOCKING: 0 — в QACRO только контур скорости (input_rate_bf_roll_pitch_yaw_2, как Rate Loop Only у Copter),
         // 1 и 2 — удержание угла (input_rate_bf_roll_pitch_yaw_3, поправка углового контура) [код] ArduPlane/mode_qacro.cpp:
@@ -452,7 +453,7 @@ function prep_check(params, goal, ctx) {
         } else if (prep_bit(bitmask, bit)) {
             add("log_fast", "ok", title, prep_eq("LOG_BITMASK", bitmask) + ": " + flag + " включён — " + fast.on)
         } else {
-            add("log_fast", "fail", title, prep_eq("LOG_BITMASK", bitmask) + ": " + flag + " выключен — " + fast.off,
+            add("log_fast", "fail", title, prep_eq("LOG_BITMASK", bitmask) + ": " + flag + " выключен — " + fast.off(bitmask),
                 "Включите бит " + fast.name + " (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ")",
                 [{ name: "LOG_BITMASK", set: 1 << bit, clear: 0 }])
         }

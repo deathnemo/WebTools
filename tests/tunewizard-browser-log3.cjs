@@ -8,14 +8,15 @@
 // «менять нечего» по шагам 2–3; шаг 3 (раздел 6) — имена Q_A_*, значения лога, без размера винта и рекомендации (и в
 // текстах шага), «Лог + правило /2», шум D крена по оси Z, «Принять» — переход к шагу 5; шаг 4 — выключен с подсказкой;
 // шаг 5 (раздел 8) — сводка с Q_A_*, строка шага 4 «недоступен», повтор — шаги 2–3, _tune.param, «Запомнить проход»
-// (ключ с видом аппарата), повторная загрузка лога — прошлый проход на шаге 0. В конце — лог Copter (второй лог, если
-// есть): всё, что показано только для QuadPlane, сбрасывается, прошлый проход QuadPlane не показан, файл QuadPlane при
-// логе Copter — отказ подготовки. Отдельный скрипт, как прогон второго лога (tests/tunewizard-browser-log2.cjs).
+// (ключ с видом аппарата), повторная загрузка лога — прошлый проход на шаге 0; постоянные надписи шага 5 — «шагах 2–3».
+// В конце — лог Copter (второй лог, без него — тестовый): всё, что показано только для QuadPlane, сбрасывается, прошлый
+// проход QuadPlane не показан, файл QuadPlane при логе Copter — отказ подготовки с пояснением цели Copter, надписи шага
+// 5 — «2–4». Отдельный скрипт, как прогон второго лога (tests/tunewizard-browser-log2.cjs).
 // Запуск: npm run test:tunewizard-log3
 // Нужны: третий лог (TUNEWIZARD_LOG3 или TuneWizard/logs/1 01.01.1980 2-00-00.bin), браузер (CHROME_PATH — путь к
 // chrome.exe; без него Playwright берёт свой Chromium, если он установлен) и python для http.server. Без лога тест
-// пропускается с сообщением; без второго лога (TUNEWIZARD_LOG2 или TuneWizard/logs/1 01.01.1970 2-00-00.bin) — только
-// проверка сброса на лог Copter
+// пропускается с сообщением; без лога Copter — второго (TUNEWIZARD_LOG2 или TuneWizard/logs/1 01.01.1970 2-00-00.bin) и
+// тестового (TUNEWIZARD_LOG или TuneWizard/logs/2026-06-18 18-54-42_anon.bin) — пропускается только проверка на логе Copter
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -27,6 +28,7 @@ const logs_dir = path.join(repo, 'TuneWizard', 'logs')
 const port = 8798
 const log3_name = '1 01.01.1980 2-00-00.bin'
 const log2_name = '1 01.01.1970 2-00-00.bin'
+const test_log_name = '2026-06-18 18-54-42_anon.bin'
 
 function find_log() {
     if (process.env.TUNEWIZARD_LOG3) {
@@ -36,13 +38,20 @@ function find_log() {
     return fs.existsSync(full) ? full : null
 }
 
-// Лог Copter для проверки сброса после QuadPlane — второй лог (как в tests/tunewizard-browser-log2.cjs); null — нет
+// Лог Copter для проверки сброса после QuadPlane: второй лог (как в tests/tunewizard-browser-log2.cjs), а без него — тестовый
+// (TUNEWIZARD_LOG или test_log_name, как в tests/tunewizard-browser.cjs): отказ подготовки «файл QuadPlane при логе Copter»
+// проверяется и без второго лога (ревью задачи 5 этапа 9); null — нет ни того ни другого
 function find_copter_log() {
-    if (process.env.TUNEWIZARD_LOG2) {
-        return process.env.TUNEWIZARD_LOG2
+    for (const [env, name] of [['TUNEWIZARD_LOG2', log2_name], ['TUNEWIZARD_LOG', test_log_name]]) {
+        if (process.env[env]) {
+            return process.env[env]
+        }
+        const full = path.join(logs_dir, name)
+        if (fs.existsSync(full)) {
+            return full
+        }
     }
-    const full = path.join(logs_dir, log2_name)
-    return fs.existsSync(full) ? full : null
+    return null
 }
 
 function visible_steps(page) {
@@ -180,7 +189,8 @@ async function main() {
         assert.match(s0.checks.flight.text, /^Висение VTOL 6\d с \(31\d–38\d с, QSTABILIZE\), средний газ 0\.47$/, s0.checks.flight.text)
         assert.match(s0.checks.vibe.text, /71\.6 м\/с²/, s0.checks.vibe.text)
         assert.equal(s0.checks.hover_throttle.text, 'Q_M_THST_HOVER 0.35, средний газ VTOL 0.47: расхождение 0.12')
-        assert.match(s0.checks.hover_throttle.fix, /^Q_M_HOVER_LEARN = 2 .* в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится$/, s0.checks.hover_throttle.fix)
+        assert.match(s0.checks.hover_throttle.fix, /^Q_M_HOVER_LEARN = 2 .* в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится; учится только при оценке воздушной скорости ниже 0\.3·AIRSPEED_MIN .*, крене и тангаже меньше 5°$/,
+                     s0.checks.hover_throttle.fix)
         // Полоса шагов: шаг 4 выключен с подсказкой (дизайн, раздел 7), у остальных подсказки нет; set_step(4) шаг не меняет
         assert.deepEqual(s0.wizbar.map((b) => b.disabled), [false, false, false, false, true, false], 'шаг 4 выключен, шаги 1–3 и 5 доступны')
         assert.match(s0.closed4, /^Шаг 4 \(PID\) для QuadPlane пока недоступен: метод ещё не проверен на логе QuadPlane, .+ лог полёта в QACRO с PID на частоте цикла\./, s0.closed4)
@@ -224,11 +234,13 @@ async function main() {
             'Посадка; загрузите лог в мастер и сохраните лог: шаг 4 для QuadPlane — следующим этапом.',
         ], p0.plan.join(' | '))
         assert.ok(p0.plan.slice(0, -5).every((text) => text.startsWith('До полёта: ')), 'перед планом — только «До полёта» по проверкам шага 0: ' + p0.plan.join(' | '))
-        // Файл другого вида, чем лог, — отказ; файл QuadPlane — по файлу, газ висения — по логу того же вида
+        // Файл другого вида, чем лог, — отказ, пояснение цели — по виду лога (QuadPlane); файл QuadPlane — по файлу, газ
+        // висения — по логу того же вида
         await pick_param(page, path.join(repo, 'tests', 'fixtures', 'prep.param'))
         const p0_copter_file = await prep0(page)
-        assert.deepEqual([p0_copter_file.verdict, p0_copter_file.kind, p0_copter_file.checks, p0_copter_file.plan],
-                         ['Файл «prep.param» — Copter, лог — QuadPlane: выберите файл этого аппарата или уберите файл', null, null, null], 'файл Copter при логе QuadPlane — отказ')
+        assert.deepEqual([p0_copter_file.verdict, p0_copter_file.kind, p0_copter_file.checks, p0_copter_file.plan, p0_copter_file.goal_text],
+                         ['Файл «prep.param» — Copter, лог — QuadPlane: выберите файл этого аппарата или уберите файл', null, null, null, 'висение и QACRO в одном полёте'],
+                         'файл Copter при логе QuadPlane — отказ, пояснение цели QuadPlane')
         await pick_param(page, path.join(repo, 'tests', 'fixtures', 'prep_quadplane.param'))
         const p0_qp_file = await prep0(page)
         assert.deepEqual([p0_qp_file.kind, p0_qp_file.statuses.hover_learn], ['quadplane', 'warn'], 'файл QuadPlane при логе QuadPlane — газ висения из лога')
@@ -323,8 +335,11 @@ async function main() {
         await page.waitForFunction(() => !document.getElementById('verdict5').hidden, null, { timeout: 60000 })
         const n5 = await page.evaluate(() => ({ verdict: document.getElementById('verdict5').textContent,
                                                  refly: [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent),
-                                                 buttons: ['step5_download', 'step5_remember'].map((id) => document.getElementById(id).disabled) }))
+                                                 buttons: ['step5_download', 'step5_remember'].map((id) => document.getElementById(id).disabled),
+                                                 heads: [document.querySelector('section[data-step="5"] .lede').textContent.split(':')[0],
+                                                         document.getElementById('steps5').previousElementSibling.querySelector('h2').textContent] }))
         assert.match(n5.verdict, /^Менять нечего: ни один из шагов 2–3 не принят\./, n5.verdict)
+        assert.deepEqual(n5.heads, ['Что принято на шагах 2–3 и что изменится на аппарате', 'Принятое на шагах 2–3'], 'постоянные надписи шага 5 — по шагам QuadPlane')
         assert.deepEqual(n5.buttons, [true, true], 'без изменений — ни .param, ни памяти прохода')
         assert.ok(!n5.refly.some((text) => /До\/после фильтров|INS_LOG_BAT_OPT/.test(text)), 'нет пункта batch: ' + n5.refly.join(' | '))
         for (const start of ['Частота PID VTOL — включите бит ATTITUDE_FULLRATE (20)', 'QACRO на переключателе — запишите FLTMODE6 = 23', 'Обучение газа висения — q_m_hover_learn = 2',
@@ -527,9 +542,17 @@ async function main() {
             assert.ok(('log_pid' in copter_prep.statuses) && ('acro_trainer' in copter_prep.statuses), JSON.stringify(copter_prep.statuses))
             await pick_param(page, path.join(repo, 'tests', 'fixtures', 'prep_quadplane.param'))
             const refused = await prep0(page)
-            assert.deepEqual([refused.verdict, refused.kind, refused.checks, refused.plan],
-                             ['Файл «prep_quadplane.param» — QuadPlane, лог — Copter: выберите файл этого аппарата или уберите файл', null, null, null], 'файл QuadPlane при логе Copter — отказ')
+            assert.deepEqual([refused.verdict, refused.kind, refused.checks, refused.plan, refused.goal_text],
+                             ['Файл «prep_quadplane.param» — QuadPlane, лог — Copter: выберите файл этого аппарата или уберите файл', null, null, null,
+                              'шаги 1–4: висение и Acro в одном полёте'], 'файл QuadPlane при логе Copter — отказ, пояснение цели Copter')
             assert.equal(await page.evaluate(() => prep0_summary()), null, 'отказ — в сводку шага 5 подготовки нет')
+            await page.click('#prep0_unfile')
+            // Шаг 5 лога Copter: постоянные надписи — снова «2–4»
+            await page.click('#wizbar button:nth-child(6)')
+            await page.waitForFunction(() => !document.getElementById('verdict5').hidden, null, { timeout: 60000 })
+            reset.heads5 = await page.evaluate(() => [document.querySelector('section[data-step="5"] .lede').textContent.split(':')[0],
+                                                      document.getElementById('steps5').previousElementSibling.querySelector('h2').textContent])
+            assert.deepEqual(reset.heads5, ['Что принято на шагах 2–4 и что изменится на аппарате', 'Принятое на шагах 2–4'], 'надписи шага 5 у Copter — прежние')
         }
 
         assert.deepEqual(problems, [], 'ошибки консоли')
@@ -543,7 +566,8 @@ async function main() {
         console.log('  шаг 2: варианты ' + s2.titles.join('; ') + '; вердикт «' + s2.verdict + '»')
         console.log('  шаг 3: варианты ' + s3.ids.join(', ') + ', шум D крена (Z) / тангажа (Y) ' + s3.dterm_dB.map((v) => v.toFixed(1)).join(' / ') + ' дБ; вердикт «' + s3.verdict + '»')
         console.log('  шаг 5: «' + s5.verdict + '»; .param: ' + param5.trim().split('\n').join(', ') + '; память — ' + m5.key)
-        console.log('  лог Copter после QuadPlane: ' + ((reset != null) ? 'сброс проверен на ' + path.basename(copter_log) : 'второго лога нет — не проверялся'))
+        console.log('  лог Copter после QuadPlane: ' + ((reset != null) ? 'сброс и отказ подготовки проверены на ' + path.basename(copter_log)
+            : 'нет ни второго, ни тестового лога — не проверялся'))
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения консоли:', problems)

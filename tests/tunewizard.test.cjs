@@ -775,8 +775,10 @@ test('run_checks QuadPlane: аппарат, сообщения PID VTOL (без 
     assert.equal(pid.title, 'Сообщения PID VTOL')
     assert.equal(pid.text, 'PIQR/PIQP/PIQY есть, но PIQR пишется с частотой 25 Гц — ниже 100 Гц отклик на ступеньку не считается; ' +
         'шаг 4 для QuadPlane пока недоступен')
+    // Частота без бита 20 — по битам лога (LOG_BITMASK 65535 — с ATTITUDE_FAST): фраза check_plane_pid_rate_text, одна с
+    // правилом подготовки log_fast (core/prep.js)
     assert.equal(pid.fix, 'Включите бит ATTITUDE_FULLRATE (20) в LOG_BITMASK (+1048576) — для будущего шага 4: без него PIQR/PIQP/PIQY ' +
-        'пишутся с частотой 25 Гц (бит ATTITUDE_FAST, 0) или 10 Гц (только бит ATTITUDE_MED, 1)')
+        'пишутся с частотой 25 Гц (бит ATTITUDE_FAST, 0)')
     assert.doesNotMatch(pid.fix, /PID \(12\)|бит 12/)
     // С частотой цикла — ok; PIQx нет — ВНИМ (не СТОП: шагу 4 QuadPlane эта проверка пока не нужна)
     const fast = by_id(quadplane_checks({ piq_hz: 400 }), 'pid_log')
@@ -787,6 +789,11 @@ test('run_checks QuadPlane: аппарат, сообщения PID VTOL (без 
     assert.equal(none.status, 'warn')
     assert.equal(none.text, 'Сообщений PIQR/PIQP/PIQY нет; шаг 4 для QuadPlane пока недоступен')
     assert.match(none.fix, /^Включите бит ATTITUDE_FULLRATE \(20\)/)
+    // Без ATTITUDE_FAST и ATTITUDE_MED PIQx не пишутся вовсе; с одним ATTITUDE_MED — 10 Гц; LOG_BITMASK нет — все случаи
+    assert.match(by_id(quadplane_checks({ piq_hz: null, params: { LOG_BITMASK: 65532 } }), 'pid_log').fix,
+        /: без него PIQR\/PIQP\/PIQY не пишутся вовсе: в LOG_BITMASK нет ни ATTITUDE_FAST \(0\), ни ATTITUDE_MED \(1\)$/)
+    assert.match(by_id(quadplane_checks({ piq_hz: 10, params: { LOG_BITMASK: 65534 } }), 'pid_log').fix, /: без него PIQR\/PIQP\/PIQY пишутся с частотой 10 Гц \(только бит ATTITUDE_MED, 1\)$/)
+    assert.match(by_id(quadplane_checks({ params: { LOG_BITMASK: null } }), 'pid_log').fix, /25 Гц \(бит ATTITUDE_FAST, 0\) или 10 Гц \(только бит ATTITUDE_MED, 1\), а без обоих не пишутся вовсе$/)
 
     // Полёт — самый длинный VTOL-участок, остальные названы
     const flight = by_id(list, 'flight')
@@ -797,13 +804,15 @@ test('run_checks QuadPlane: аппарат, сообщения PID VTOL (без 
     const hover = by_id(list, 'hover_throttle')
     assert.equal(hover.status, 'warn')
     assert.equal(hover.text, 'Q_M_THST_HOVER 0.35, средний газ VTOL 0.47: расхождение 0.12')
-    assert.equal(hover.fix, 'Q_M_HOVER_LEARN = 2 (обучение с сохранением) и висение не меньше 30 с в QHOVER или QLOITER: ' +
-        'в QSTABILIZE и QACRO газ висения не учится')
+    // Условия обучения — и полёт: оценка воздушной скорости, вертикальная скорость, крен и тангаж [код] quadplane.cpp:1948–1953
+    const learn_note = 'в QSTABILIZE и QACRO газ висения не учится; учится только при оценке воздушной скорости ниже 0.3·AIRSPEED_MIN (без датчика скорости ' +
+        'и GPS её нет), вертикальной скорости меньше 0.6 м/с, крене и тангаже меньше 5°'
+    assert.equal(hover.fix, 'Q_M_HOVER_LEARN = 2 (обучение с сохранением) и висение не меньше 30 с в QHOVER или QLOITER: ' + learn_note)
     // Обучение включено — повисеть в QHOVER или QLOITER
     const learning = by_id(quadplane_checks({ params: { Q_M_HOVER_LEARN: 2 } }), 'hover_throttle')
     assert.equal(learning.text, 'Q_M_THST_HOVER 0.35, средний газ VTOL 0.47: расхождение 0.12 (обучение включено: большое расхождение значит, ' +
         'что висения в QHOVER или QLOITER было мало)')
-    assert.equal(learning.fix, 'Повисите не меньше 30 с в QHOVER или QLOITER, чтобы значение обучилось: в QSTABILIZE и QACRO газ висения не учится')
+    assert.equal(learning.fix, 'Повисите не меньше 30 с в QHOVER или QLOITER, чтобы значение обучилось: ' + learn_note)
     assert.equal(by_id(quadplane_checks({ params: { Q_M_THST_HOVER: 0.46 } }), 'hover_throttle').status, 'ok')
     // MOT_THST_HOVER у QuadPlane не читается
     assert.equal(quadplane_checks({ params: { Q_M_THST_HOVER: null, MOT_THST_HOVER: 0.3 } }).find((c) => c.id === 'hover_throttle'), undefined)

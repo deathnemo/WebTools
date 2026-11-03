@@ -272,8 +272,10 @@ function step5_print() {
 
 // Сводка целиком: итог прохода (summary_rows), устаревшее принятое (step_accepted_stale), оси шага 4 без надёжного
 // измерения; «Скачать .param» — только при изменённых строках (файла без них нет), «Запомнить проход» — если принят
-// хотя бы один шаг (без изменений закрывает прошлый проход аппарата)
+// хотя бы один шаг (без изменений закрывает прошлый проход аппарата). Надписи с диапазоном шагов — первыми: сбой итога
+// не оставит на них диапазон прошлого лога
 function step5_render() {
+    step5_render_heads()
     const ctx = step_summary_context()
     const summary = summary_rows(ctx)
     const rows = summary.rows
@@ -333,6 +335,20 @@ function step5_available_steps() {
     return step5_steps.filter((n) => (state.profile == null) || state.profile.steps.includes(n))
 }
 
+// Доступные шаги сводки диапазоном (summary_steps_range): у Copter и неподдержанного вида «2–4», у QuadPlane «2–3»
+function step5_steps_range() {
+    return summary_steps_range(step5_available_steps())
+}
+
+// Постоянные надписи шага — вступление «Что принято на шагах N–M…» и заголовок «Принятое на шагах N–M» (span
+// data-steps5 в index.html; в разметке — «2–4», как у Copter): диапазон по шагам аппарата лога (дизайн этапа 9, раздел 8)
+function step5_render_heads() {
+    const range = step5_steps_range()
+    for (const span of document.querySelectorAll("[data-steps5]")) {
+        span.textContent = range
+    }
+}
+
 // Вердикт: ничего не принято (или вид аппарата не поддержан — профиля нет, дизайн этапа 9, раздел 8) — «менять
 // нечего» по шагам сводки, доступным аппарату (и тестовый полёт, если оси шага 4 без надёжного измерения уже
 // известны); есть устаревшее, расхождение шагов (step5_conflict_issue), изменённые PID, менявшиеся после интервала
@@ -341,8 +357,7 @@ function step5_available_steps() {
 function step5_render_verdict(summary, bits, changed, accepted, stale, unreliable) {
     if ((accepted.length == 0) || (state.profile == null)) {
         const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable)) + " (ниже)." : ""
-        const available = step5_available_steps()
-        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов " + available[0] + "–" + available[available.length - 1] + " не принят." + tail)
+        step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов " + step5_steps_range() + " не принят." + tail)
         return
     }
     const issues = []
