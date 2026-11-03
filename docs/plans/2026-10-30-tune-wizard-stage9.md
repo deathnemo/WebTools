@@ -53,9 +53,10 @@
 
 ### Задача 4: шаг 5 и память прохода
 
-**Файлы:** `TuneWizard/core/summary.js`, `TuneWizard/core/passmem.js`, `TuneWizard/steps/step5.js`, `TuneWizard/steps/memory.js`, тесты `tests/tunewizard-summary.test.cjs`, `tests/tunewizard-passmem.test.cjs`, вставка в `tests/tunewizard-browser-log3.cjs`.
+**Файлы:** `TuneWizard/core/summary.js`, `TuneWizard/core/passmem.js`, `TuneWizard/steps/step5.js`, `TuneWizard/steps/memory.js`; по находкам ревью задачи 3 — `TuneWizard/index.html`, `TuneWizard/steps/step3.js`, `TuneWizard/steps/common.js`; тесты `tests/tunewizard-summary.test.cjs`, `tests/tunewizard-passmem.test.cjs`, вставка в `tests/tunewizard-browser-log3.cjs`.
 
-- Раздел 8 дизайна: имена шага 3 с префиксом профиля, строка шага 4 «для QuadPlane пока недоступен», `repeat` без шага 4, «менять нечего» для неподдержанного вида; метаданные `Q_A_<X>` для перезагрузки; память — вид в ключе (`quadplane·…`, ключ Copter прежний — старые проходы находятся), поле `kind`, список проходов того же вида, рама запасного ключа из «QuadPlane Frame». Версия формата прежняя.
+- Первым пунктом — мелкие находки ревью задачи 3 (03.11.2026): шаг 3 у QuadPlane — заголовок «Фильтры гироскопа и ПИД по размеру винта» и вводный абзац про формулы Mission Planner (`index.html:~673–674`) противоречат заметке `#step3_vehicle_note` — часть про размер винта только при `prop_formula`; порог 10 в заметке (`index.html:~676`, «max(10, INS_GYRO_FILTER / 2)») — из `lowpass_rules` через `data-rule3`, как пороги вступления; постоянная заметка под формой «рыскание и пределы ускорения — по правилам» (`index.html:~707`) — по виду аппарата (у QuadPlane пределы только из лога); вердикт QuadPlane при выбранной строке «Свой» (`steps/step3.js:~1298`) — подсказка «выберите «Как в логе» и нажмите «Применить вариант»», как в ветке «совпал с логом» (`:~1276`); устаревшие комментарии `core/summary.js:7` (`lowpass_param_names(state.params)` → с профилем) и `steps/common.js:~205–206` (`step_find_metadata` зовёт ещё `steps/step4.js:~414`).
+- Раздел 8 дизайна: имена шага 3 с префиксом профиля, строка шага 4 «для QuadPlane пока недоступен», `repeat` без шага 4, «менять нечего» для неподдержанного вида — по отсутствию профиля, а не по имени «Copter» (`steps/step5.js:~332` `state.info.vehicle !== "Copter"`: сейчас на QuadPlane после «Принять» шага 3 вердикт «Менять нечего», хотя в таблице 2 изменения — ревью задачи 3); метаданные `Q_A_<X>` для перезагрузки; память — вид в ключе (`quadplane·…`, ключ Copter прежний — старые проходы находятся), поле `kind`, список проходов того же вида, рама запасного ключа из «QuadPlane Frame». Версия формата прежняя.
 - После «Принять» на шаге 3 — переход к следующему доступному шагу: у QuadPlane шаг 4 закрыт → шаг 5 (сейчас `steps/step3.js:~895` зовёт `set_step(4)`, у QuadPlane остаётся на шаге 3) [решение координатора 03.11.2026, ревью задачи 3]. Имена шага 3 с префиксом профиля в `step_summary_context` уже сделаны в задаче 3 (`2e37c1a`).
 - Третий лог: шаг 3 принят → сводка с `Q_A_*`, `_tune.param`, «Запомнить проход», шаг 0 повторной загрузки показывает прошлый проход.
 
@@ -78,7 +79,7 @@
 
 ### Задача 6: документы и финальный прогон
 
-**Файлы:** `TuneWizard/Readme.md`, `tests/README.md` (раздел 12 дизайна); `TuneWizard/index.html` — надпись в шапке «ArduPilot · Copter» → «ArduPilot · Copter и QuadPlane» (замечание задачи 2); шаг 3 у QuadPlane — заголовок «Фильтры гироскопа и ПИД по размеру винта» и вводный абзац про формулы Mission Planner (`index.html:~673–674`), постоянная заметка под формой «рыскание и пределы ускорения — по правилам» (`index.html:~707`) — по виду аппарата, без размера винта у QuadPlane (ревью задачи 3).
+**Файлы:** `TuneWizard/Readme.md`, `tests/README.md` (раздел 12 дизайна); `TuneWizard/index.html` — надпись в шапке «ArduPilot · Copter» → «ArduPilot · Copter и QuadPlane» (замечание задачи 2). Тексты шага 3 у QuadPlane перенесены в задачу 4 (первый пункт).
 
 **Проверки:** все Copter-прогоны (`test:tunewizard`, `-log2`, `-prep`, `-compare`, `-pid-compare`, `-serve`) — прежние результаты; `test:tunewizard-log3` — шаги 0–3 и 5; сборка переносной папки и `node tests/tunewizard-serve.cjs <папка>` (в папку попал `core/vehicle.js`, ссылки на месте).
 
