@@ -28,10 +28,10 @@ function spec_trace_index(s, t, a) {
 // Значения параметров фильтров из лога; отсутствующих в логе — умолчания формы FilterReview (reset, FR 461–483,
 // и поля INS_GYRO_FILTER = 20, SCHED_LOOP_RATE = 400 в его index.html), кроме SCHED_LOOP_RATE аппарата: его заводское —
 // из профиля (loop_rate_default, core/vehicle.js: у QuadPlane 300; без профиля — 400, как FilterReview). ESCMSK
-// обнуляется, если его нет у аппарата (escmsk_present: не записан в лог и версия фильтра ниже 4) — FilterReview (update_hidden_params) смотрит только на
-// версию, а мастер ещё и на запись в логе: тем же правилом живут форма, файл и варианты шага 2, notch-база шага 3 и
-// память прохода. 8-битная HMNCS (hmncs_bits) — без знака, как её читает parameter_get_value в FilterReview:
-// int8 −128 (гармоника 8) → 128, иначе load_filters включил бы гармоники 8–16
+// обнуляется, если его нет у аппарата (escmsk_present: не записан в лог и версия фильтра ниже 4) — FilterReview
+// (update_hidden_params) смотрит только на версию, а мастер ещё и на запись в логе: тем же правилом живут форма, файл и
+// варианты шага 2, notch-база шага 3 и память прохода. 8-битная HMNCS (hmncs_bits) — без знака, как её читает
+// parameter_get_value в FilterReview: int8 −128 (гармоника 8) → 128, иначе load_filters включил бы гармоники 8–16
 function values_from_log() {
     const values = {
         INS_GYRO_FILTER: state.params.get("INS_GYRO_FILTER") ?? 20,

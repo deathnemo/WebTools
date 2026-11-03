@@ -29,6 +29,7 @@ function load_page_scripts(files) {
 // pidtune_axes (pidtune.js; ему — константы core/pid.js)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/filters.js',
     'TuneWizard/core/candidates.js',
     'TuneWizard/core/lowpass.js',

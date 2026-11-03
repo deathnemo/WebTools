@@ -30,6 +30,7 @@ function load_page_scripts(files) {
 // (prep.js — подготовка для summary_refly, как её собирает страница; ему — check_rules из checks.js)
 load_page_scripts([
     'Libraries/Param_Helpers.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/checks.js',
     'TuneWizard/core/filters.js',
     'TuneWizard/core/candidates.js',

@@ -64,8 +64,8 @@ globalThis.state = {
     step: 4, steps: [], spectrum: { filter_version: null }, gyro: null, tracking: null, env: null, file: null,
 }
 
-for (const file of ['Libraries/Array_Math.js', 'Libraries/fft.js', 'Libraries/Param_Helpers.js', 'TuneWizard/core/log.js', 'TuneWizard/core/gyro.js',
-                    'TuneWizard/core/tracking/Atmosphere_model.js', 'TuneWizard/core/tracking/BaseClass.js', 'TuneWizard/core/tracking/Static.js',
+for (const file of ['Libraries/Array_Math.js', 'Libraries/fft.js', 'Libraries/Param_Helpers.js', 'TuneWizard/core/vehicle.js', 'TuneWizard/core/log.js',
+                    'TuneWizard/core/gyro.js', 'TuneWizard/core/tracking/Atmosphere_model.js', 'TuneWizard/core/tracking/BaseClass.js', 'TuneWizard/core/tracking/Static.js',
                     'TuneWizard/core/tracking/Throttle.js', 'TuneWizard/core/tracking/RPM.js', 'TuneWizard/core/tracking/ESC.js',
                     'TuneWizard/core/tracking/FFT.js', 'TuneWizard/core/tracking/Logged.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/spectrum.js',
                     'TuneWizard/core/metrics.js', 'TuneWizard/core/autofit.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',

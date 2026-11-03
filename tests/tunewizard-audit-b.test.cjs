@@ -24,6 +24,7 @@ function load_page_scripts(files) {
 
 load_page_scripts([
     'Libraries/Param_Helpers.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/params.js',
     'TuneWizard/core/filters.js',
     'TuneWizard/core/candidates.js',

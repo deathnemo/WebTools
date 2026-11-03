@@ -53,6 +53,23 @@ function flight_plot_theme(palette, data, layout) {
     }
 }
 
+// Подпись газа — профиля аппарата (throttle_title: у QuadPlane «Газ VTOL»), без профиля — как у Copter («Газ»)
+function flight_throttle_title() {
+    return state.profile?.throttle_title ?? vehicle_profiles.copter.throttle_title
+}
+
+// Подпись ряда и оси газа графика полёта — flight_throttle_title(); до построения графика (setup_flight_plot) — ничего
+function flight_set_throttle_title() {
+    const trace = flight_data.data[2]
+    if (trace == null) {
+        return
+    }
+    const title = flight_throttle_title()
+    trace.name = title
+    trace.meta = title
+    flight_data.layout.yaxis3.title.text = title
+}
+
 function setup_flight_plot() {
     const names = ["Крен", "Тангаж", "Газ", "Высота"]
     const units = ["°", "°", "", "м"]
@@ -399,10 +416,13 @@ function reset() {
     document.getElementById("log_info").hidden = true
     document.getElementById("log_checks").hidden = true
     document.getElementById("interval_vtol_note").hidden = true
+    document.getElementById("interval_default_note").hidden = false
     for (const trace of flight_data.data) {
         trace.x = []
         trace.y = []
     }
+    // Подпись газа — снова без профиля (после лога QuadPlane и ошибки загрузки оставалась бы «Газ VTOL»)
+    flight_set_throttle_title()
     // Пустой график перерисовать сразу, чтобы прошлый полёт не оставался на экране; диапазон — снова авто
     if (plot("FlightData")) {
         delete flight_data.layout.xaxis.range
@@ -501,14 +521,14 @@ function render_info() {
     const params = state.params
     const flight = info.flight
     const profile = state.profile
-    const vtol = profile?.vtol_modes != null
+    const throttle = flight_throttle_title()
     const html = [
         stat_tile("Аппарат", (info.vehicle ?? "—") + (info.tailsitter ? " · tailsitter" : ""), profile != null),
         stat_tile("Прошивка", info.fw_string ?? "—"),
         stat_tile("Плата", info.board ?? "—"),
         stat_tile("Длительность лога", format_seconds(info.duration_s)),
         stat_tile(profile?.flight_title ?? "Полёт с газом", flight ? format_seconds(flight.duration_s) : "нет"),
-        stat_tile(vtol ? "Средний газ VTOL" : "Средний газ", (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
+        stat_tile("Средний " + throttle.charAt(0).toLowerCase() + throttle.slice(1), (flight && flight.mean_throttle != null) ? flight.mean_throttle.toFixed(2) : "—"),
         stat_tile("INS_GYRO_FILTER", params.get("INS_GYRO_FILTER") ?? "—"),
         stat_tile("SCHED_LOOP_RATE", params.get("SCHED_LOOP_RATE") ?? "—"),
         stat_tile("Версия фильтра", info.filter_version ?? "—"),
@@ -567,10 +587,7 @@ function plot_flight() {
         flight_data.data[2].x = throttle.time
         flight_data.data[2].y = throttle.throttle
     }
-    const throttle_name = vtol ? "Газ VTOL" : "Газ"
-    flight_data.data[2].name = throttle_name
-    flight_data.data[2].meta = throttle_name
-    flight_data.layout.yaxis3.title.text = throttle_name
+    flight_set_throttle_title()
     if ("POS" in log.messageTypes) {
         const TimeUS = log.get("POS", "TimeUS")
         const RelHomeAlt = log.get("POS", "RelHomeAlt")
@@ -604,7 +621,10 @@ function plot_flight() {
     // оговорка в проверке «Полёт», VTOL-участков с газом нет — интервал на весь лог)
     const flight = state.info.flight
     set_interval(flight ? flight.start : min, flight ? flight.end : max)
-    document.getElementById("interval_vtol_note").hidden = !(vtol && (flight?.modes != null))
+    // Подпись VTOL-окна заменяет в общей подписи предложение «по умолчанию — участок с ненулевым газом»
+    const vtol_window = vtol && (flight?.modes != null)
+    document.getElementById("interval_vtol_note").hidden = !vtol_window
+    document.getElementById("interval_default_note").hidden = vtol_window
     for (const id of ["TimeStart", "TimeEnd"]) {
         document.getElementById(id).min = state.settings.min
         document.getElementById(id).max = state.settings.max

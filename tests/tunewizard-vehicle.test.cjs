@@ -1,8 +1,8 @@
 // Тесты профиля аппарата мастера настройки (TuneWizard/core/vehicle.js): вид лога по VER.BU и Q_ENABLE, вид файла .param
 // по признаку, профиль по виду, имена параметров с префиксом, оси гироскопа tailsitter, заводские пределы ускорения рамы
 // Q_FRAME_CLASS = 10; значения профиля Copter — против констант, которые пока живут в других скриптах ядра (pidtune.js,
-// prep.js, lowpass.js, log.js), чтобы они не разошлись. Дизайн — docs/plans/2026-10-30-tune-wizard-stage9-design.md,
-// разделы 3, 10 и 11.
+// prep.js, log.js), чтобы они не разошлись, и шаг 3 без профиля (lowpass.js) — как с профилем Copter. Дизайн —
+// docs/plans/2026-10-30-tune-wizard-stage9-design.md, разделы 3, 10 и 11.
 // vehicle.js — двойной скрипт: здесь он берётся через require (как в tests/tunewizard.test.cjs), а для сверки констант
 // скрипты ядра грузятся как на странице — по порядку через vm.runInThisContext (общая глобальная область: заодно видно,
 // что новые имена не спорят с остальными скриптами).
@@ -21,7 +21,8 @@ const repo = path.resolve(__dirname, '..')
 globalThis.FFTJS = require('../modules/fft.js/lib/fft.js')
 
 // Скрипты ядра в порядке страницы (index.html) — до core/prep.js: pidtune_mode_names и pidtune_rules (pidtune.js),
-// prep_rules (prep.js), lowpass_rules и lowpass_pid_axes (lowpass.js), LOG_DEFAULT_PROFILE (log.js)
+// prep_rules (prep.js), lowpass_log_values, lowpass_param_names и lowpass_vehicle_axes (lowpass.js), LOG_DEFAULT_PROFILE
+// (log.js)
 for (const file of [
     'Libraries/Array_Math.js',
     'Libraries/fft.js',
@@ -120,7 +121,10 @@ test('профиль QuadPlane: шаги без 4, PIQx, газ QTUN.ThO → RAT
             assert.equal(Object.hasOwn(profile.closed_steps, n), !profile.steps.includes(n), profile.kind + ', шаг ' + n)
         }
     }
-    assert.match(quadplane.closed_steps[4], /^Шаг 4 \(PID\) для QuadPlane пока недоступен: .+ Нужен лог QACRO/)
+    // Текст — про любой лог QuadPlane, без частностей третьего лога (ревью задачи 2)
+    assert.equal(quadplane.closed_steps[4], 'Шаг 4 (PID) для QuadPlane пока недоступен: метод ещё не проверен на логе QuadPlane, для него нужен лог ' +
+        'полёта в QACRO с PID на частоте цикла. Подготовьте такой лог в «Подготовке к следующему полёту» (цель «PID»); шаг 4 появится следующим этапом.')
+    assert.doesNotMatch(quadplane.closed_steps[4], /25 Гц|24 Гц|QSTABILIZE/)
     assert.deepEqual(quadplane.pid_messages, ['PIQR', 'PIQP', 'PIQY'])
     assert.deepEqual(quadplane.throttle, [['QTUN', 'ThO'], ['RATE', 'AOut']])
     assert.deepEqual(quadplane.vtol_modes.map((m) => quadplane.modes[m]), ['QSTABILIZE', 'QHOVER', 'QLOITER', 'QLAND', 'QRTL', 'QAUTOTUNE', 'QACRO'])
@@ -135,7 +139,12 @@ test('профиль QuadPlane: шаги без 4, PIQx, газ QTUN.ThO → RAT
     assert.equal(quadplane.frame_prefix, 'QuadPlane Frame: ')
     assert.equal(quadplane.loop_rate_default, 300)
     assert.equal(copter.loop_rate_default, 400)
-    assert.deepEqual(quadplane.filter_defaults, { fltt_hz: 20, fltd_hz: 10, flte_rp_hz: 0, flte_y_hz: 2.5 })
+    // FLTD крена и тангажа — 10 Гц, рыскания — 20, как у Copter [код] quadplane.cpp:581–590
+    assert.deepEqual(quadplane.filter_defaults, { fltt_hz: 20, fltd_rp_hz: 10, fltd_y_hz: 20, flte_rp_hz: 0, flte_y_hz: 2.5 })
+    assert.deepEqual(copter.filter_defaults, { fltt_hz: 20, fltd_rp_hz: 20, fltd_y_hz: 20, flte_rp_hz: 0, flte_y_hz: 2.5 })
+    // Подпись газа и формула по размеру винта (шаг 3)
+    assert.deepEqual([copter.throttle_title, quadplane.throttle_title], ['Газ', 'Газ VTOL'])
+    assert.deepEqual([copter.prop_formula, quadplane.prop_formula], [true, false])
 })
 
 test('vehicle_gyro_axes: Copter и QuadPlane — крен X, тангаж Y; tailsitter (Q_TAILSIT_ENABLE 1 или 2) — крен Z, тангаж Y, рыскание −X', () => {
@@ -173,7 +182,7 @@ test('vehicle_accel_defaults: Copter 1100 / 1100 / 270, QuadPlane 400 / 400 / 10
     assert.deepEqual(quadplane.accel_frame.degss, { r: 300, p: 300 })
 })
 
-test('профиль Copter совпадает с константами ядра: режимы и ACRO (pidtune.js), выход из Acro (prep.js), заводские фильтры, пределы и оси (lowpass.js), без профиля (log.js)', () => {
+test('профиль Copter совпадает с константами ядра: режимы и ACRO (pidtune.js), выход из Acro (prep.js), шаг 3 без профиля (lowpass.js), без профиля (log.js)', () => {
     // Скрипт страницы: глобалы те же, что у require
     assert.deepEqual(vehicle_profiles.copter.modes, copter.modes)
     assert.equal(typeof vehicle_kind, 'function')
@@ -182,13 +191,11 @@ test('профиль Copter совпадает с константами ядр�
     assert.equal(copter.acro_mode, pidtune_rules.acro_mode)
     // prep_rules.level_modes — подготовка Copter (до задачи 5 этапа 9)
     assert.deepEqual(copter.level_modes, prep_rules.level_modes)
-    // lowpass_rules — шаг 3 Copter (до задачи 3 этапа 9)
-    const d = lowpass_rules.defaults
-    assert.deepEqual(copter.filter_defaults, { fltt_hz: d.fltt_hz, fltd_hz: d.fltd_hz, flte_rp_hz: d.flte_rp_hz, flte_y_hz: d.flte_y_hz })
-    const a = lowpass_rules.accel_default_degss
-    assert.deepEqual(copter.accel_defaults_degss, { r: a.rp, p: a.rp, y: a.y })
-    assert.equal(copter.gyro_axes.roll, lowpass_pid_axes.roll.gyro)
-    assert.equal(copter.gyro_axes.pitch, lowpass_pid_axes.pitch.gyro)
+    // lowpass.js с задачи 3 этапа 9 берёт заводские и оси из профиля; без профиля — Copter, как до этапа 9
+    const empty = fake_params({})
+    assert.deepEqual(lowpass_log_values(empty), lowpass_log_values(empty, vehicle_profiles.copter))
+    assert.deepEqual(lowpass_param_names(empty, null), lowpass_param_names(empty, vehicle_profiles.copter))
+    assert.deepEqual(lowpass_vehicle_axes(), { roll: { param: 'RLL', gyro: copter.gyro_axes.roll }, pitch: { param: 'PIT', gyro: copter.gyro_axes.pitch } })
     // LOG_DEFAULT_PROFILE — сведения о логе без профиля, как до этапа 9
     for (const key of Object.keys(LOG_DEFAULT_PROFILE)) {
         assert.deepEqual(copter[key], LOG_DEFAULT_PROFILE[key], key)

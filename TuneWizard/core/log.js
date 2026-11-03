@@ -453,10 +453,11 @@ function log_frame(log, prefix = LOG_DEFAULT_PROFILE.frame_prefix) {
 // профиль аппарата (vehicle_profile из core/vehicle.js; null — вид не поддержан, тогда — LOG_DEFAULT_PROFILE, как до
 // этапа 9). Вид по логу профиль не выбирает: без профиля вид считается неподдержанным даже у лога Copter (kind и
 // profile — null, run_checks даёт «Аппарат» СТОП и только проверки, не зависящие от аппарата) — вызывать с профилем
-// vehicle_profile(vehicle_kind(version.build_type, log_params(log))), как страница (wizard.js, load). vehicle — имя вида (профиля, иначе типа сборки), kind и profile — вид и профиль (null — не поддержан),
-// tailsitter — profile.is_tailsitter по параметрам лога. board — строка полётного контроллера из MSG, board_id — номер
-// платы APJ из VER, frame — рама (log_frame), esc — сводка ESC-телеметрии (esc_summary); нет — null. flight — окно
-// полёта (log_flight; у QuadPlane — по VTOL-режимам)
+// vehicle_profile(vehicle_kind(version.build_type, log_params(log))), как страница (wizard.js, load). vehicle — имя
+// вида (профиля, иначе типа сборки), kind и profile — вид и профиль (null — не поддержан), tailsitter —
+// profile.is_tailsitter по параметрам лога. board — строка полётного контроллера из MSG, board_id — номер платы APJ из
+// VER, frame — рама (log_frame), esc — сводка ESC-телеметрии (esc_summary); нет — null. flight — окно полёта
+// (log_flight; у QuadPlane — по VTOL-режимам)
 function log_info(log, version = {}, profile = null) {
     const used = profile ?? LOG_DEFAULT_PROFILE
     const messages = log_messages(log, used.pid_messages)

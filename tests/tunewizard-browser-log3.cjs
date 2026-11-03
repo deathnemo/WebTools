@@ -3,12 +3,15 @@
 // (CTUN.ThO — самолётный мотор, нули), PIQR/PIQP/PIQY 24 Гц, batch гироскопа ICM45686 с INS_LOG_BAT_OPT = 5, ESC-телеметрия.
 // Этап 9 (docs/plans/2026-10-30-tune-wizard-stage9-design.md, разделы 2, 4, 5, 7): шаг 0 — вид и плитки, интервал по
 // умолчанию — VTOL-окно, проверки; шаг 1 — спектр, заметка об осях tailsitter, «до» и «после» batch; шаг 2 — варианты
-// notch; шаг 4 — выключен с подсказкой. Шаги 3 и 5 добавят задачи 3–4 этапа. Отдельный скрипт, как прогон второго лога
+// notch; шаг 3 (раздел 6) — имена Q_A_*, значения лога, без размера винта и рекомендации, «Лог + правило /2», шум D
+// крена по оси Z, «Принять»; шаг 4 — выключен с подсказкой. Шаг 5 добавит задача 4 этапа. В конце — лог Copter (второй
+// лог, если есть): всё, что показано только для QuadPlane, сбрасывается. Отдельный скрипт, как прогон второго лога
 // (tests/tunewizard-browser-log2.cjs).
 // Запуск: npm run test:tunewizard-log3
 // Нужны: третий лог (TUNEWIZARD_LOG3 или TuneWizard/logs/1 01.01.1980 2-00-00.bin), браузер (CHROME_PATH — путь к
 // chrome.exe; без него Playwright берёт свой Chromium, если он установлен) и python для http.server. Без лога тест
-// пропускается с сообщением
+// пропускается с сообщением; без второго лога (TUNEWIZARD_LOG2 или TuneWizard/logs/1 01.01.1970 2-00-00.bin) — только
+// проверка сброса на лог Copter
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -19,12 +22,22 @@ const repo = path.resolve(__dirname, '..')
 const logs_dir = path.join(repo, 'TuneWizard', 'logs')
 const port = 8798
 const log3_name = '1 01.01.1980 2-00-00.bin'
+const log2_name = '1 01.01.1970 2-00-00.bin'
 
 function find_log() {
     if (process.env.TUNEWIZARD_LOG3) {
         return process.env.TUNEWIZARD_LOG3
     }
     const full = path.join(logs_dir, log3_name)
+    return fs.existsSync(full) ? full : null
+}
+
+// Лог Copter для проверки сброса после QuadPlane — второй лог (как в tests/tunewizard-browser-log2.cjs); null — нет
+function find_copter_log() {
+    if (process.env.TUNEWIZARD_LOG2) {
+        return process.env.TUNEWIZARD_LOG2
+    }
+    const full = path.join(logs_dir, log2_name)
     return fs.existsSync(full) ? full : null
 }
 
@@ -93,6 +106,7 @@ async function main() {
                 tiles: Object.fromEntries([...document.querySelectorAll('#log_info .stat')].map((tile) =>
                     [tile.querySelector('.stat__k').textContent, { value: tile.querySelector('.stat__v').textContent, accent: tile.classList.contains('stat--accent') }])),
                 note: note.checkVisibility() ? note.textContent : null,
+                default_note: document.getElementById('interval_default_note').checkVisibility(),
                 throttle: { name: throttle.name, axis: document.getElementById('FlightData').layout.yaxis3.title.text, count: throttle.y.length, max: throttle_max },
                 checks: Object.fromEntries(state.checks.map((c) => [c.id, { status: c.status, text: c.text, fix: c.fix }])),
                 wizbar: [...document.querySelectorAll('#wizbar button')].map((b) => ({ disabled: b.disabled, title: b.getAttribute('title') })),
@@ -111,6 +125,7 @@ async function main() {
         assert.deepEqual(s0.fields, s0.interval.map(String))
         assert.deepEqual([s0.flight.start, s0.flight.end, s0.flight.modes, s0.flight.segments], [...s0.interval, [17], []], JSON.stringify(s0.flight))
         assert.ok((s0.note != null) && s0.note.includes('у QuadPlane — только VTOL-режимы (Q-режимы)'), 'подпись под полями интервала: ' + s0.note)
+        assert.equal(s0.default_note, false, 'общее «по умолчанию — участок с ненулевым газом» заменено подписью VTOL-окна')
         // График полёта: газ VTOL-моторов (у CTUN.ThO — нули)
         assert.deepEqual([s0.throttle.name, s0.throttle.axis], ['Газ VTOL', 'Газ VTOL'])
         assert.ok((s0.throttle.count > 0) && (s0.throttle.max > 0.3), 'ряд газа VTOL: ' + JSON.stringify(s0.throttle))
@@ -128,7 +143,8 @@ async function main() {
         assert.match(s0.checks.hover_throttle.fix, /^Q_M_HOVER_LEARN = 2 .* в QHOVER или QLOITER: в QSTABILIZE и QACRO газ висения не учится$/, s0.checks.hover_throttle.fix)
         // Полоса шагов: шаг 4 выключен с подсказкой (дизайн, раздел 7), у остальных подсказки нет; set_step(4) шаг не меняет
         assert.deepEqual(s0.wizbar.map((b) => b.disabled), [false, false, false, false, true, false], 'шаг 4 выключен, шаги 1–3 и 5 доступны')
-        assert.match(s0.closed4, /^Шаг 4 \(PID\) для QuadPlane пока недоступен: .+Нужен лог QACRO/, s0.closed4)
+        assert.match(s0.closed4, /^Шаг 4 \(PID\) для QuadPlane пока недоступен: метод ещё не проверен на логе QuadPlane, .+ лог полёта в QACRO с PID на частоте цикла\./, s0.closed4)
+        assert.doesNotMatch(s0.closed4, /25 Гц|QSTABILIZE/, 'без частностей этого лога')
         assert.deepEqual(s0.wizbar.map((b) => b.title), [null, null, null, null, s0.closed4, null], 'подсказка — только у шага 4')
         assert.equal(await page.evaluate(() => { set_step(4); return state.step }), 0, 'на закрытый шаг 4 не перейти')
         assert.deepEqual(await visible_steps(page), ['0'])
@@ -215,17 +231,117 @@ async function main() {
         assert.equal(s2.form_is_log, true, 'форма из лога')
         assert.match(s2.verdict_class, /verdict--(ok|warn)/, s2.verdict)
 
-        // ---------- Шаг 4: кнопка выключена и с подсказкой и после шагов 1–2
+        // ---------- Шаг 3: Q_A_*, значения лога, без размера винта и рекомендации, «Лог + правило /2», ось Z tailsitter
+        // Размер винта Copter в поле (память браузера) у QuadPlane не действует
+        await page.evaluate(() => { document.getElementById('prop_in').value = '10' })
+        await page.click('#wizbar button:nth-child(4)')
+        await wait_overlay(page)
+        await page.waitForFunction(() => (step3.candidates != null) && (step_metadata() != null) && (document.querySelector('#lpf_form p.param .units')?.textContent !== ''),
+                                   null, { timeout: 120000 })
+        const s3 = await page.evaluate(() => {
+            const dterm = document.getElementById('DTerm3')
+            const units = Object.fromEntries([...document.querySelectorAll('#lpf_form p.param')].map((p) => [p.dataset.name, p.querySelector('.units').textContent]))
+            const e = step3.evaluations?.log ?? null
+            return {
+                prop_lab: document.getElementById('prop_lab').checkVisibility(), vehicle_note: document.getElementById('step3_vehicle_note').checkVisibility(),
+                names: step3.form_names, units: units, groups: [...document.querySelectorAll('#lpf_form h3')].map((h) => h.textContent),
+                ids: step3.candidates.map((c) => c.id), recommended: step3_recommended_id(), selected: step3.selected_id,
+                log: step3.candidates[0].values, half: step3.candidates[1]?.values ?? null,
+                axes: step3.ctx?.pid_axes ?? null, loop_rate: step3.ctx?.loop_rate ?? null,
+                dterm_dB: (e != null) ? [e.dterm.roll?.dB, e.dterm.pitch?.dB] : null, flags: step3.flags,
+                verdict: document.getElementById('verdict3').textContent, verdict_class: document.getElementById('verdict3').className,
+                note: document.getElementById('candidates3_note').textContent,
+                dterm_groups: dterm.data.map((t) => t.legendgrouptitle.text), dterm_colors: dterm.data.map((t) => t.line.color),
+                dterm_drawn: dterm.data.filter((t) => t.y.length > 0).length, palette: plot_palette().axis,
+            }
+        })
+        assert.deepEqual([s3.prop_lab, s3.vehicle_note], [false, true], 'блока размера винта нет, заметка QuadPlane видна')
+        assert.equal(s3.names.some((name) => name.startsWith('ATC_')), false, 'имена шага — без ATC_*: ' + s3.names.join(', '))
+        assert.deepEqual(s3.names.slice(-3), ['Q_A_ACCEL_R_MAX', 'Q_A_ACCEL_P_MAX', 'Q_A_ACCEL_Y_MAX'], 'пределы 4.6 — Q_A_ACCEL_*')
+        assert.deepEqual([s3.units.Q_A_ACCEL_R_MAX, s3.units.Q_A_RAT_RLL_FLTD], ['cdeg/s/s', 'Hz'], 'описания Q_A_* — по ATC_*, пределы — сантиградусы/с²')
+        assert.ok(s3.groups.includes('Крен · Q_A_RAT_RLL_*') && s3.groups.includes('Пределы ускорения · Q_A_ACCEL_*_MAX'), s3.groups.join('; '))
+        assert.deepEqual([s3.ids, s3.recommended, s3.selected], [['log', 'half'], null, 'log'], 'варианты без «по размеру винта», рекомендации нет')
+        // «Как в логе» — значения лога (дизайн, раздел 6 [лог]), «Лог + правило /2» — FLTT и FLTD 20
+        assert.deepEqual([s3.log.Q_A_RAT_RLL_FLTD, s3.log.Q_A_RAT_PIT_FLTD, s3.log.INS_GYRO_FILTER], [25.5, 25.5, 40])
+        assert.deepEqual([s3.log.Q_A_ACCEL_R_MAX, s3.log.Q_A_ACCEL_P_MAX, s3.log.Q_A_ACCEL_Y_MAX], [70000, 70000, 28800])
+        assert.deepEqual([s3.half.Q_A_RAT_RLL_FLTT, s3.half.Q_A_RAT_RLL_FLTD, s3.half.Q_A_RAT_PIT_FLTT, s3.half.Q_A_RAT_PIT_FLTD, s3.half.Q_A_RAT_YAW_FLTT],
+                         [20, 20, 20, 20, 20])
+        // Метрики: шум D крена — по оси Z (tailsitter), контур — SCHED_LOOP_RATE лога
+        assert.deepEqual([s3.axes?.roll.gyro, s3.axes?.pitch.gyro, s3.loop_rate], ['z', 'y', 400])
+        assert.ok((s3.dterm_dB != null) && s3.dterm_dB.every(Number.isFinite), 'шум D посчитан: ' + JSON.stringify(s3.dterm_dB))
+        assert.match(s3.verdict, /^Рекомендации нет: формулы по размеру винта для QuadPlane нет — выбор за вами\. «Лог \+ правило \/2» против лога/, s3.verdict)
+        assert.match(s3.verdict, /Меняется: Q_A_RAT_RLL_FLTT 25\.5 → 20, Q_A_RAT_RLL_FLTD 25\.5 → 20, .*Шум гироскопа /, s3.verdict)
+        assert.match(s3.verdict_class, /verdict--(ok|warn)/, s3.verdict)
+        assert.doesNotMatch(s3.note, /Введите размер винта/)
+        assert.match(s3.note, /Шум D крена VTOL — по оси Z гироскопа/)
+        // График D: крен VTOL — подпись и цвет оси Z, тангаж — оси Y
+        assert.deepEqual(s3.dterm_groups, ['Крен VTOL (Z)', 'Крен VTOL (Z)', 'Тангаж', 'Тангаж'])
+        assert.deepEqual(s3.dterm_colors, [s3.palette.z, s3.palette.z, s3.palette.y, s3.palette.y])
+        assert.equal(s3.dterm_drawn, 4, 'трассы D обеих осей нарисованы')
+
+        // «Лог + правило /2» → «Применить вариант» → «Принять»: принято с именами Q_A_*, шаг 4 закрыт — остаёмся на шаге 3
+        await page.check('#cand3_half')
+        await page.click('#cand3_apply')
+        await page.waitForFunction(() => (step3.edit_timer == null) && (step3_form_row()?.id === 'half'), null, { timeout: 60000 })
+        await page.click('#lpf_accept')
+        await wait_overlay(page)
+        const a3 = await page.evaluate(() => ({ step: state.step, id: state.steps[3]?.candidate_id, names: Object.keys(state.steps[3]?.accepted ?? {}),
+                                                 verdict: document.getElementById('verdict3').textContent }))
+        assert.deepEqual([a3.step, a3.id], [3, 'half'])
+        assert.deepEqual(a3.names, s3.names, 'принятые — под именами формы (Q_A_*)')
+        assert.match(a3.verdict, /^Принято: «Лог \+ правило \/2» — шум гироскопа /, a3.verdict)
+
+        // ---------- Шаг 4: кнопка выключена и с подсказкой и после шагов 1–3
         const b4 = await page.evaluate(() => { const b = document.querySelector('#wizbar button:nth-child(5)'); return [b.disabled, b.getAttribute('title')] })
         assert.deepEqual(b4, [true, s0.closed4])
 
+        // ---------- Ошибка загрузки после QuadPlane (файл не лог): подпись газа графика — снова «Газ» (reset)
+        await page.setInputFiles('#fileItem', path.join(repo, 'tests', 'fixtures', 'prep.param'))
+        await page.waitForFunction(() => (state.log == null) && document.getElementById('log_verdict').classList.contains('verdict--fail'), null, { timeout: 60000 })
+        const failed = await page.evaluate(() => {
+            const flight = document.getElementById('FlightData')
+            return { throttle: [flight.data[2].name, flight.layout.yaxis3.title.text], b4: document.querySelector('#wizbar button:nth-child(5)').getAttribute('title'),
+                     prop_lab: document.getElementById('prop_lab').hidden }
+        })
+        assert.deepEqual(failed, { throttle: ['Газ', 'Газ'], b4: null, prop_lab: false }, 'после ошибки загрузки — без следов QuadPlane')
+
+        // ---------- Лог Copter после QuadPlane: подсказка шага 4 снята и шаг доступен, заметки VTOL и tailsitter скрыты,
+        // подпись газа «Газ», блок размера винта шага 3 снова виден
+        const copter_log = find_copter_log()
+        let reset = null
+        if (copter_log != null) {
+            await page.setInputFiles('#fileItem', copter_log)
+            await page.waitForFunction(() => state.kind === 'copter', null, { timeout: 180000 })
+            await wait_overlay(page)
+            reset = await page.evaluate(() => {
+                const b = document.querySelector('#wizbar button:nth-child(5)')
+                const flight = document.getElementById('FlightData')
+                return {
+                    kind: state.kind, b4: [b.disabled, b.getAttribute('title')],
+                    vtol_note: document.getElementById('interval_vtol_note').hidden, default_note: document.getElementById('interval_default_note').hidden,
+                    axes_note: document.getElementById('spec_axes_note').hidden,
+                    throttle: [flight.data[2].name, flight.layout.yaxis3.title.text],
+                    tiles: [...document.querySelectorAll('#log_info .stat__k')].map((k) => k.textContent),
+                    prop_lab: document.getElementById('prop_lab').hidden, vehicle_note3: document.getElementById('step3_vehicle_note').hidden,
+                }
+            })
+            assert.equal(reset.kind, 'copter')
+            assert.deepEqual(reset.b4, [false, null], 'шаг 4 доступен, подсказки нет')
+            assert.deepEqual([reset.vtol_note, reset.default_note, reset.axes_note], [true, false, true], 'подпись VTOL-окна и заметка tailsitter скрыты, общая подпись — полная')
+            assert.deepEqual(reset.throttle, ['Газ', 'Газ'], 'ряд и ось газа — «Газ»')
+            assert.ok(reset.tiles.includes('Средний газ') && !reset.tiles.includes('Средний газ VTOL'), reset.tiles.join('; '))
+            assert.deepEqual([reset.prop_lab, reset.vehicle_note3], [false, true], 'шаг 3: блок размера винта виден, заметки QuadPlane нет')
+        }
+
         assert.deepEqual(problems, [], 'ошибки консоли')
         const band_text = (band) => ['x', 'y', 'z'].map((axis) => axis.toUpperCase() + ' ' + s1.bands[band][axis].toFixed(1)).join(', ')
-        console.log('tunewizard-browser-log3: шаги 0–2 и закрытый шаг 4 пройдены на ' + path.basename(log_path) + ' (' + s0.board + ', ' + s0.fw + ')')
+        console.log('tunewizard-browser-log3: шаги 0–3 и закрытый шаг 4 пройдены на ' + path.basename(log_path) + ' (' + s0.board + ', ' + s0.fw + ')')
         console.log('  шаг 0: интервал ' + s0.interval.join('–') + ' с, «' + s0.checks.flight.text + '»; проверки ' + JSON.stringify(statuses))
         console.log('  шаг 1: трасс с данными ' + s1.with_data + ', пиков ' + s1.peaks + ', вердикт «' + s1.verdict + '»; «после − до», дБ: 5–30 Гц ' + band_text('low') +
             '; 100–200 Гц ' + band_text('high'))
         console.log('  шаг 2: варианты ' + s2.titles.join('; ') + '; вердикт «' + s2.verdict + '»')
+        console.log('  шаг 3: варианты ' + s3.ids.join(', ') + ', шум D крена (Z) / тангажа (Y) ' + s3.dterm_dB.map((v) => v.toFixed(1)).join(' / ') + ' дБ; вердикт «' + s3.verdict + '»')
+        console.log('  лог Copter после QuadPlane: ' + ((reset != null) ? 'сброс проверен на ' + path.basename(copter_log) : 'второго лога нет — не проверялся'))
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения консоли:', problems)

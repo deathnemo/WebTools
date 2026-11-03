@@ -1,12 +1,17 @@
 // Низкочастотные фильтры шага 3: значения по размеру винта (формулы Mission Planner), варианты и их оценка —
 // шум гироскопа после фильтров, шум D-составляющей и задержка путей P и D. Без DOM: работает в браузере и под
-// Node (тесты). Дизайн — docs/plans/2026-10-24-tune-wizard-stage3-design.md.
+// Node (тесты). Дизайн — docs/plans/2026-10-24-tune-wizard-stage3-design.md; QuadPlane — …-stage9-design.md, раздел 6.
 // Источники: [MP] — Mission Planner GCSViews/ConfigurationView/ConfigInitialParams.cs (calc_values);
 // [wiki] — ardupilot.org/copter/docs/setting-up-for-tuning.html; [код] — исходники ArduPilot; [наше] — эвристика мастера.
 //
-// Нужны глобалы страницы: Libraries/Array_Math.js, core/gyro.js (find_start_index, find_end_index),
-// core/filters.js (load_filters, filter_transfer, estimate_post, get_phase), core/spectrum.js
-// (spectrum_amplitude_scale, alias_obj) и core/candidates.js (evaluate_candidate, candidate_key, candidate_rules).
+// Аппарат — профиль core/vehicle.js (аргумент profile; null или без него — Copter, как до этапа 9): префикс имён
+// регулятора (ATC_ / Q_A_), заводские фильтры и пределы ускорения, оси гироскопа (у tailsitter крен — Z), есть ли
+// формула по размеру винта. Суффиксы имён у Copter и QuadPlane одни: тот же AC_AttitudeControl_Multi.
+//
+// Нужны глобалы страницы: Libraries/Array_Math.js, core/vehicle.js (vehicle_profiles, vehicle_atc, vehicle_gyro_axes,
+// vehicle_accel_defaults), core/gyro.js (find_start_index, find_end_index), core/filters.js (load_filters,
+// filter_transfer, estimate_post, get_phase), core/spectrum.js (spectrum_amplitude_scale, alias_obj) и
+// core/candidates.js (evaluate_candidate, candidate_key, candidate_rules).
 
 const lowpass_rules = {
     gyro_filter: { scale: 289.22, power: -0.838, min_hz: 20 },   // INS_GYRO_FILTER по размеру винта [MP]
@@ -16,10 +21,10 @@ const lowpass_rules = {
     // ATC_ACCEL_R/P_MAX [MP]: коэффициенты многочлена при p³, p², p, 1
     accel_rp: { poly: [-2.613267, 343.39216, -15083.7121, 235771], min_cdegss: 10000 },
     accel_y: { slope: -900, offset: 36000, min_cdegss: 8000 },   // ATC_ACCEL_Y_MAX [MP]
-    accel_default_degss: { rp: 1100, y: 270 },   // заводские пределы, AC_AttitudeControl.h [код]
-    // Заводские фильтры Copter: AP_InertialSensor.cpp (DEFAULT_GYRO_FILTER, DEFAULT_ACCEL_FILTER),
-    // AC_AttitudeControl_Multi.h (FLTT, FLTD 20 Гц по всем осям, FLTE крена/тангажа 0, рыскания 2.5 Гц) [код]
-    defaults: { gyro_hz: 20, accel_hz: 20, fltt_hz: 20, fltd_hz: 20, flte_rp_hz: 0, flte_y_hz: 2.5 },
+    // Заводские фильтры гироскопа и акселерометра — у Copter и Plane одни (у Plane — ветка #else):
+    // AP_InertialSensor.cpp:62–73 (DEFAULT_GYRO_FILTER, DEFAULT_ACCEL_FILTER) [код]. Заводские фильтры ПИД и пределы
+    // ускорения — у профиля аппарата (filter_defaults, vehicle_accel_defaults)
+    defaults: { gyro_hz: 20, accel_hz: 20 },
     // Размер винта без предупреждения у поля: ниже ≈ 4″ формулы выходят за диапазоны метаданных ArduPilot
     // (FLTT/FLTD > 50 Гц, ACC_R/P_MAX > 1800 °/с², INS_GYRO_FILTER > 256 на 1″) [наше]
     prop_range_in: [4, 40],
@@ -33,9 +38,27 @@ const lowpass_rules = {
 
 const LOWPASS_AXES = ["RLL", "PIT", "YAW"]
 
-// Оси с метриками D и задержки: имя в параметрах ATC_RAT_<имя>_* и ось гироскопа (крен ↔ X, тангаж ↔ Y).
-// Рыскание — по правилу wiki, без метрик: FLTE 2 Гц даёт задержку, несравнимую с остальными осями (дизайн, раздел 4)
-const lowpass_pid_axes = { roll: { param: "RLL", gyro: "x" }, pitch: { param: "PIT", gyro: "y" } }
+// Оси с метриками D и задержки: имя в параметрах <префикс>RAT_<имя>_*. Ось гироскопа — по профилю аппарата
+// (lowpass_vehicle_axes). Рыскание — по правилу wiki, без метрик: FLTE 2 Гц даёт задержку, несравнимую с остальными
+// осями (дизайн, раздел 4)
+const lowpass_pid_axes = { roll: { param: "RLL" }, pitch: { param: "PIT" } }
+
+// Профиль аппарата для шага 3: profile, а без него (null, undefined) — Copter, как до этапа 9
+function lowpass_profile(profile) {
+    return profile ?? vehicle_profiles.copter
+}
+
+// Оси с метриками и их оси гироскопа по профилю и параметрам лога (params с get; может быть null — без tailsitter):
+// { roll: { param: "RLL", gyro }, pitch: { param: "PIT", gyro } }, gyro — "x" | "y" | "z" из vehicle_gyro_axes
+// (Copter и QuadPlane — крен X, тангаж Y; tailsitter — крен VTOL Z, тангаж Y). Знак оси не нужен: шум D — мощность
+function lowpass_vehicle_axes(profile = null, params = null) {
+    const gyro = vehicle_gyro_axes(lowpass_profile(profile), params)
+    const axes = {}
+    for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
+        axes[axis] = { param: names.param, gyro: gyro[axis] }
+    }
+    return axes
+}
 
 // Math.Round из C# (по умолчанию — к чётному): так округляет Mission Planner
 function mp_round_half_even(value) {
@@ -74,20 +97,22 @@ function lowpass_pid_filter_hz(gyro_hz) {
     return Math.max(lowpass_rules.pid_filter_min_hz, gyro_hz / 2)
 }
 
-// Значения по размеру винта p (дюймы) [MP]: INS_GYRO_FILTER, INS_ACCEL_FILTER, FLTT/FLTE/FLTD трёх осей
-// и пределы ускорения в сантиградусах/с² (accel_cdegss: { r, p, y }) — имена пределов ставит lowpass_candidates.
+// Значения по размеру винта p (дюймы) [MP]: INS_GYRO_FILTER, INS_ACCEL_FILTER, FLTT/FLTE/FLTD трёх осей (имена — с
+// префиксом профиля, lowpass_profile) и пределы ускорения в сантиградусах/с² (accel_cdegss: { r, p, y }) — имена
+// пределов ставит lowpass_candidates. Формулы — Copter: вызывать для профиля с prop_formula.
 // Область определения — prop_valid(p); иначе результат не определён (Infinity/NaN)
-function prop_values(p) {
+function prop_values(p, profile = null) {
     const rules = lowpass_rules
+    const used = lowpass_profile(profile)
     const gyro = Math.max(rules.gyro_filter.min_hz, mp_round_half_even(rules.gyro_filter.scale * p**rules.gyro_filter.power))
     const pid = lowpass_pid_filter_hz(gyro)
 
     const values = { INS_GYRO_FILTER: gyro, INS_ACCEL_FILTER: rules.accel_filter_hz }
     for (const axis of LOWPASS_AXES) {
         const yaw = (axis == "YAW")
-        values["ATC_RAT_" + axis + "_FLTT"] = pid
-        values["ATC_RAT_" + axis + "_FLTE"] = yaw ? rules.yaw_flte_hz : 0   // крен и тангаж без FLTE [MP]
-        values["ATC_RAT_" + axis + "_FLTD"] = yaw ? 0 : pid                 // рыскание без FLTD [MP]
+        values[vehicle_atc(used, "RAT_" + axis + "_FLTT")] = pid
+        values[vehicle_atc(used, "RAT_" + axis + "_FLTE")] = yaw ? rules.yaw_flte_hz : 0   // крен и тангаж без FLTE [MP]
+        values[vehicle_atc(used, "RAT_" + axis + "_FLTD")] = yaw ? 0 : pid                 // рыскание без FLTD [MP]
     }
 
     // В том же порядке действий, что calc_values
@@ -108,57 +133,68 @@ function prop_from_gyro_filter(hz) {
     return (hz / rules.scale)**(1 / rules.power)
 }
 
-// Имена и единицы пределов ускорения по логу: ATC_ACCEL_*_MAX (сантиградусы/с², 4.6 и раньше) или ATC_ACC_*_MAX (°/с²).
-// scale — во сколько раз значение параметра больше значения в °/с²
-function lowpass_accel_names(params) {
-    if (params.has("ATC_ACCEL_R_MAX")) {
-        return { r: "ATC_ACCEL_R_MAX", p: "ATC_ACCEL_P_MAX", y: "ATC_ACCEL_Y_MAX", scale: 100, units: "cdeg/s/s" }
+// Имена, единицы и заводские значения пределов ускорения по логу. Есть <префикс>ACCEL_R_MAX — имена 4.6 и раньше
+// <префикс>ACCEL_*_MAX в сантиградусах/с² (Copter ATC_ACCEL_*, QuadPlane Q_A_ACCEL_*), иначе <префикс>ACC_*_MAX в °/с²
+// [код] [4.6.3] AC_AttitudeControl.cpp:38–73; AC_AttitudeControl.cpp:175–203 (convert_parameters, ×0.01). Префикс —
+// профиля (lowpass_profile). scale — во сколько раз значение параметра больше значения в °/с²; defaults_degss —
+// заводские { r, p, y } в °/с² (vehicle_accel_defaults: у QuadPlane с рамой Q_FRAME_CLASS = 10 — свои)
+function lowpass_accel_names(params, profile = null) {
+    const used = lowpass_profile(profile)
+    const defaults_degss = vehicle_accel_defaults(used, params)
+    const old = vehicle_atc(used, "ACCEL_R_MAX")
+    if (params.has(old)) {
+        return { r: old, p: vehicle_atc(used, "ACCEL_P_MAX"), y: vehicle_atc(used, "ACCEL_Y_MAX"), scale: 100, units: "cdeg/s/s", defaults_degss: defaults_degss }
     }
-    return { r: "ATC_ACC_R_MAX", p: "ATC_ACC_P_MAX", y: "ATC_ACC_Y_MAX", scale: 1, units: "deg/s/s" }
+    return { r: vehicle_atc(used, "ACC_R_MAX"), p: vehicle_atc(used, "ACC_P_MAX"), y: vehicle_atc(used, "ACC_Y_MAX"), scale: 1, units: "deg/s/s", defaults_degss: defaults_degss }
 }
 
-// Параметры шага по порядку: INS_GYRO_FILTER, INS_ACCEL_FILTER, FLTT/FLTE/FLTD крена, тангажа и рыскания,
-// пределы ускорения r, p, y под именами из лога (lowpass_accel_names)
-function lowpass_param_names(params) {
+// Параметры шага по порядку: INS_GYRO_FILTER, INS_ACCEL_FILTER, FLTT/FLTE/FLTD крена, тангажа и рыскания (с префиксом
+// профиля), пределы ускорения r, p, y под именами из лога (lowpass_accel_names)
+function lowpass_param_names(params, profile = null) {
+    const used = lowpass_profile(profile)
     const names = ["INS_GYRO_FILTER", "INS_ACCEL_FILTER"]
     for (const axis of LOWPASS_AXES) {
-        names.push("ATC_RAT_" + axis + "_FLTT", "ATC_RAT_" + axis + "_FLTE", "ATC_RAT_" + axis + "_FLTD")
+        names.push(vehicle_atc(used, "RAT_" + axis + "_FLTT"), vehicle_atc(used, "RAT_" + axis + "_FLTE"), vehicle_atc(used, "RAT_" + axis + "_FLTD"))
     }
-    const accel = lowpass_accel_names(params)
+    const accel = lowpass_accel_names(params, used)
     names.push(accel.r, accel.p, accel.y)
     return names
 }
 
-// Значения параметров шага из лога (объект имя → число в порядке lowpass_param_names); чего в логе нет —
-// заводские Copter (lowpass_rules.defaults, пределы — accel_default_degss × scale). Как float32: так их хранит
-// прошивка, и 0.7 из файла .param совпадает с 0.699999988 из лога
-function lowpass_log_values(params) {
+// Значения параметров шага из лога (объект имя → число в порядке lowpass_param_names); чего в логе нет — заводские
+// (INS_* — lowpass_rules.defaults, фильтры ПИД — filter_defaults профиля, пределы — defaults_degss × scale из
+// lowpass_accel_names). Как float32: так их хранит прошивка, и 0.7 из файла .param совпадает с 0.699999988 из лога
+function lowpass_log_values(params, profile = null) {
     const rules = lowpass_rules
-    const accel = lowpass_accel_names(params)
+    const used = lowpass_profile(profile)
+    const filters = used.filter_defaults
+    const accel = lowpass_accel_names(params, used)
     const defaults = { INS_GYRO_FILTER: rules.defaults.gyro_hz, INS_ACCEL_FILTER: rules.defaults.accel_hz }
     for (const axis of LOWPASS_AXES) {
-        defaults["ATC_RAT_" + axis + "_FLTT"] = rules.defaults.fltt_hz
-        defaults["ATC_RAT_" + axis + "_FLTE"] = (axis == "YAW") ? rules.defaults.flte_y_hz : rules.defaults.flte_rp_hz
-        defaults["ATC_RAT_" + axis + "_FLTD"] = rules.defaults.fltd_hz
+        const yaw = (axis == "YAW")
+        defaults[vehicle_atc(used, "RAT_" + axis + "_FLTT")] = filters.fltt_hz
+        defaults[vehicle_atc(used, "RAT_" + axis + "_FLTE")] = yaw ? filters.flte_y_hz : filters.flte_rp_hz
+        defaults[vehicle_atc(used, "RAT_" + axis + "_FLTD")] = yaw ? filters.fltd_y_hz : filters.fltd_rp_hz
     }
-    defaults[accel.r] = rules.accel_default_degss.rp * accel.scale
-    defaults[accel.p] = rules.accel_default_degss.rp * accel.scale
-    defaults[accel.y] = rules.accel_default_degss.y * accel.scale
+    defaults[accel.r] = accel.defaults_degss.r * accel.scale
+    defaults[accel.p] = accel.defaults_degss.p * accel.scale
+    defaults[accel.y] = accel.defaults_degss.y * accel.scale
 
     const values = {}
-    for (const name of lowpass_param_names(params)) {
+    for (const name of lowpass_param_names(params, used)) {
         values[name] = Math.fround(params.get(name) ?? defaults[name])
     }
     return values
 }
 
-// Пределы ускорения в values (объект имя → число) заводские: 1100 / 1100 / 270 °/с² × names.scale с допуском
-// 0.5·scale по каждой оси. names — lowpass_accel_names; нет значения под этим именем — не заводские
+// Пределы ускорения в values (объект имя → число) заводские: names.defaults_degss (у Copter 1100 / 1100 / 270 °/с²)
+// × names.scale с допуском 0.5·scale по каждой оси. names — lowpass_accel_names; нет значения под этим именем — не
+// заводские
 function lowpass_accel_is_default(values, names) {
-    const defaults = lowpass_rules.accel_default_degss
+    const defaults = names.defaults_degss
     const tolerance = 0.5 * names.scale
     const near = (value, default_degss) => Math.abs(value - default_degss * names.scale) <= tolerance
-    return near(values[names.r], defaults.rp) && near(values[names.p], defaults.rp) && near(values[names.y], defaults.y)
+    return near(values[names.r], defaults.r) && near(values[names.p], defaults.p) && near(values[names.y], defaults.y)
 }
 
 // Предупреждение у поля размера винта: null, если размер не введён (пустое поле вызывающий приводит к null или
@@ -175,20 +211,23 @@ function prop_size_warning(p) {
     return "Размер винта вне диапазона " + min + "–" + max + "″ — проверьте значение"
 }
 
-// Варианты: «как в логе»; «по размеру винта» (только с prop_valid(prop_in); пределы ускорения — по формуле, только
-// если в логе заводские, иначе из лога: их записывает AutoTune, AC_AutoTune_Multi.cpp); «лог + правило /2» (только
-// если фильтр гироскопа в логе включён, INS_GYRO_FILTER > 0). Одинаковые наборы — один раз (первый по порядку).
-// log_values — lowpass_log_values(params), prop_in — размер винта в дюймах, как ввёл пользователь (null, если не
-// введён), names — lowpass_accel_names(params). У всех вариантов ровно ключи log_values; значения — float32, как
-// у лога, чтобы совпадение с логом было честным.
+// Варианты: «как в логе»; «по размеру винта» (только у профиля с prop_formula — у QuadPlane формулы нет, дизайн этапа 9,
+// раздел 6 — и с prop_valid(prop_in); пределы ускорения — по формуле, только если в логе заводские, иначе из лога: их
+// записывает AutoTune, AC_AutoTune_Multi.cpp); «лог + правило /2» (только если фильтр гироскопа в логе включён,
+// INS_GYRO_FILTER > 0; у QuadPlane своего источника нет — правило Copter для того же регулятора [решение пользователя
+// 30.10.2026]). Одинаковые наборы — один раз (первый по порядку).
+// log_values — lowpass_log_values(params, profile), prop_in — размер винта в дюймах, как ввёл пользователь (null, если не
+// введён), names — lowpass_accel_names(params, profile), profile — профиль аппарата (lowpass_profile). У всех вариантов
+// ровно ключи log_values; значения — float32, как у лога, чтобы совпадение с логом было честным.
 // Возвращает [{ id, title, values, same_as }]: same_as — id выброшенных вариантов с тем же набором (пустой массив,
 // если совпадений не было). У варианта «prop» ещё accel_from_log (пределы оставлены из лога) и formula_accel
 // ({ r, p, y } — пределы по формуле в единицах параметров лога, для справки)
-function lowpass_candidates(log_values, prop_in, names) {
+function lowpass_candidates(log_values, prop_in, names, profile = null) {
+    const used = lowpass_profile(profile)
     const candidates = [{ id: "log", title: "Как в логе", values: { ...log_values } }]
 
-    if (prop_valid(prop_in)) {
-        const { accel_cdegss, ...filters } = prop_values(prop_in)
+    if (used.prop_formula && prop_valid(prop_in)) {
+        const { accel_cdegss, ...filters } = prop_values(prop_in, used)
         // Формула [MP] — в сантиградусах/с²; для ATC_ACC_*_MAX Mission Planner делит на 100
         const formula_accel = {
             r: accel_cdegss.r * names.scale / 100,
@@ -215,10 +254,10 @@ function lowpass_candidates(log_values, prop_in, names) {
         const half = lowpass_pid_filter_hz(log_values.INS_GYRO_FILTER)
         const values = { ...log_values }
         for (const axis of ["RLL", "PIT"]) {
-            values["ATC_RAT_" + axis + "_FLTT"] = half
-            values["ATC_RAT_" + axis + "_FLTD"] = half
+            values[vehicle_atc(used, "RAT_" + axis + "_FLTT")] = half
+            values[vehicle_atc(used, "RAT_" + axis + "_FLTD")] = half
         }
-        values.ATC_RAT_YAW_FLTT = half
+        values[vehicle_atc(used, "RAT_YAW_FLTT")] = half
         candidates.push({ id: "half", title: "Лог + правило /2", values: values })
     }
 
@@ -285,10 +324,12 @@ function pid_lowpass_derivative_gain2(f, loop_rate) {
     return (2 * Math.sin(Math.PI * f / loop_rate) * loop_rate)**2
 }
 
-// FLTE и FLTD оси axis ("roll" | "pitch") из значений варианта: { flte, fltd } (undefined, если имени в values нет)
-function lowpass_axis_filters(values, axis) {
+// FLTE и FLTD оси axis ("roll" | "pitch") из значений варианта (имена — с префиксом профиля, lowpass_profile):
+// { flte, fltd } (undefined, если имени в values нет)
+function lowpass_axis_filters(values, axis, profile = null) {
+    const used = lowpass_profile(profile)
     const param = lowpass_pid_axes[axis].param
-    return { flte: values["ATC_RAT_" + param + "_FLTE"], fltd: values["ATC_RAT_" + param + "_FLTD"] }
+    return { flte: values[vehicle_atc(used, "RAT_" + param + "_FLTE")], fltd: values[vehicle_atc(used, "RAT_" + param + "_FLTD")] }
 }
 
 // Старшая из частот задержки rules.lag_freqs_hz (30 Гц): на ней lowpass_flags сравнивают задержку путей с логом
@@ -319,13 +360,16 @@ function lowpass_gyro_cutoff(hz, sample_rate) {
 
 // Контекст оценки: контекст evaluate_candidate (gyro, env, tracking, range, sensor — индекс экземпляра в gyro,
 // как у шага 2) с пустыми пиками и loop_rate = notch.SCHED_LOOP_RATE; notch — значения notch-базы (принятые на шаге 2
-// или из лога: INS_GYRO_FILTER, SCHED_LOOP_RATE, INS_HNTCH_*, INS_HNTC2_*), kd — { roll: ATC_RAT_RLL_D,
-// pitch: ATC_RAT_PIT_D }: null (или не число) — Kd нет в логе, шум D оси не считается, ось неполная; 0 — D выключен,
-// шум D и путь D оси не сравниваются (lowpass_flags, d_off_axes). loop_rate не положительное конечное число —
-// оценки и бодэ нет (evaluate_lowpass и lowpass_bode возвращают null). Один объект на все варианты: по нему
-// evaluate_candidate кэширует спектр «до». base = { gyro, env, tracking, range, sensor }
-function lowpass_ctx(base, notch, kd) {
-    return { ...base, peaks: [], loop_rate: notch.SCHED_LOOP_RATE, notch: notch, kd: kd }
+// или из лога: INS_GYRO_FILTER, SCHED_LOOP_RATE, INS_HNTCH_*, INS_HNTC2_*), kd — { roll: <префикс>RAT_RLL_D,
+// pitch: <префикс>RAT_PIT_D }: null (или не число) — Kd нет в логе, шум D оси не считается, ось неполная; 0 — D
+// выключен, шум D и путь D оси не сравниваются (lowpass_flags, d_off_axes). loop_rate не положительное конечное
+// число — оценки и бодэ нет (evaluate_lowpass и lowpass_bode возвращают null). profile и params (с get; может быть
+// null) — аппарат: в контексте профиль (lowpass_profile — имена FLTE и FLTD) и оси pid_axes (lowpass_vehicle_axes —
+// по какой оси гироскопа считать шум D). Один объект на все варианты: по нему evaluate_candidate кэширует спектр
+// «до». base = { gyro, env, tracking, range, sensor }
+function lowpass_ctx(base, notch, kd, profile = null, params = null) {
+    const used = lowpass_profile(profile)
+    return { ...base, peaks: [], loop_rate: notch.SCHED_LOOP_RATE, notch: notch, kd: kd, profile: used, pid_axes: lowpass_vehicle_axes(used, params) }
 }
 
 // Шум D-составляющей одной оси: psd_dB — PSD гироскопа после фильтров (дБ/Гц), свёрнутая к loop_rate / 2, по бинам
@@ -358,8 +402,8 @@ function lowpass_dterm(bins, psd_dB, kd, flte, fltd, loop_rate) {
 
 // Оценка варианта values (объект имя → число, имена lowpass_param_names) на контексте lowpass_ctx.
 // Гироскопная часть — notch-база с INS_GYRO_FILTER варианта, срез которого ограничен, как в прошивке, 0.4 частоты
-// выборки (lowpass_gyro_cutoff); FLTE и FLTD крена и тангажа — из values (lowpass_axis_filters; нечисловые дают NaN
-// в задержке и шуме D).
+// выборки (lowpass_gyro_cutoff); FLTE и FLTD крена и тангажа — из values (lowpass_axis_filters с профилем контекста;
+// нечисловые дают NaN в задержке и шуме D).
 // Возвращает null, если у экземпляра нет FFT или Z1 (только «после») или контур ctx.loop_rate не положительное
 // конечное число, иначе {
 //   values, warnings (filters.warnings гироскопной части, как в evaluate_candidate; срез ограничен — ещё строка
@@ -369,7 +413,8 @@ function lowpass_dterm(bins, psd_dB, kd, flte, fltd, loop_rate) {
 //   gyro: { band_dB, lag_ms: { 10, 30 }, spectrum, pre_spectrum } — evaluate_candidate({ ...ctx.notch, INS_GYRO_FILTER }):
 //         шум гироскопа после фильтров в band_hz и задержка гироскопной части (filters_lag_ms),
 //   dterm: { bins, roll: { dB, spectrum }, pitch: { dB, spectrum } } — шум D-составляющей (lowpass_dterm): PSD
-//          гироскопа после фильтров варианта (оси X и Y), свёрнутая к loop_rate / 2 (alias_obj, режим "fold");
+//          гироскопа после фильтров варианта по осям ctx.pid_axes (крен X, тангаж Y; у tailsitter крен — Z),
+//          свёрнутая к loop_rate / 2 (alias_obj, режим "fold");
 //          bins — 0…loop_rate / 2; у оси без Kd (null) или с Kd = 0 — null. Kd в сравнении вариантов
 //          сокращается: метрика относительная,
 //   lag_ms: { roll: { P: { 10, 30 }, D: { 10, 30 } }, pitch: { … } } — путь P = гироскопная часть + FLTE,
@@ -404,9 +449,9 @@ function evaluate_lowpass(values, ctx) {
     const kd = {}
     const dterm = { bins: alias.bins }
     const lag_ms = {}
-    for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
+    for (const [axis, names] of Object.entries(ctx.pid_axes)) {
         kd[axis] = ctx.kd?.[axis] ?? null
-        const { flte, fltd } = lowpass_axis_filters(values, axis)
+        const { flte, fltd } = lowpass_axis_filters(values, axis, ctx.profile)
         dterm[axis] = lowpass_dterm(alias.bins, psd[names.gyro], kd[axis], flte, fltd, loop_rate)
 
         const P = {}
@@ -434,8 +479,8 @@ function evaluate_lowpass(values, ctx) {
 // в filters_lag_ms: get_phase считает спад больше 45° за шаг переносом фазы, поэтому сетка плотная и от нуля):
 // filter_transfer на exp_jw(сетка, FFT.average_sample_rate) по окнам до конца интервала, средние по окнам интервала
 // амплитуда (complex_abs) и развёрнутая фаза (get_phase). Путь P оси — она, умноженная на FLTE оси, путь D — ещё
-// и на FLTD (lowpass_axis_filters; в дБ и градусах — сложение; фаза фильтров ПИД по модулю меньше 90°, развёртка
-// не нужна). → { freq, gyro: { amp_dB, phase_deg }, roll: { P: { amp_dB, phase_deg }, D: { … } }, pitch: { … } }
+// и на FLTD (lowpass_axis_filters с профилем контекста; в дБ и градусах — сложение; фаза фильтров ПИД по модулю меньше
+// 90°, развёртка не нужна). → { freq, gyro: { amp_dB, phase_deg }, roll: { P: { amp_dB, phase_deg }, D: { … } }, pitch: { … } }
 // (амплитуда 20·log10, фаза в градусах без свёртки); null, если у экземпляра нет FFT, контур ctx.loop_rate или step
 // не положительное конечное число. Состояние gyro не меняется
 function lowpass_bode(values, ctx, step = 0.05) {
@@ -485,7 +530,7 @@ function lowpass_bode(values, ctx, step = 0.05) {
     const dB = (h) => 20 * Math.log10(Math.hypot(h[0], h[1]))
     const deg = (h) => Math.atan2(h[1], h[0]) * 180 / Math.PI
     for (const axis of Object.keys(lowpass_pid_axes)) {
-        const { flte, fltd } = lowpass_axis_filters(values, axis)
+        const { flte, fltd } = lowpass_axis_filters(values, axis, ctx.profile)
         const P = { amp_dB: new Array(freq.length), phase_deg: new Array(freq.length) }
         const D = { amp_dB: new Array(freq.length), phase_deg: new Array(freq.length) }
         for (let k = 0; k < freq.length; k++) {
@@ -562,18 +607,22 @@ function lowpass_flags(evaluation, log, rules = lowpass_rules) {
     return flags
 }
 
-// Предупреждения о том, чего модель не учитывает (строки для вердикта); params — log_params (get → число или null):
-// - notch-фильтр ошибки ПИД крена или тангажа (ATC_RAT_RLL/PIT_NEF ≠ 0): стоит на ошибке до FLTE (AC_PID.cpp,
-//   update_all) и меняет шум D и задержку, а модель его не знает → строка на ось. Notch цели (NTF) стоит на цели,
-//   как FLTT, и на шум D и задержку не влияет — о нём строки нет. Рыскания модель не касается вовсе;
+// Предупреждения о том, чего модель не учитывает (строки для вердикта); params — log_params (get → число или null),
+// profile — профиль аппарата (lowpass_profile):
+// - notch-фильтр ошибки ПИД крена или тангажа (<префикс>RAT_RLL/PIT_NEF ≠ 0 — ATC_ у Copter, Q_A_ у QuadPlane): стоит
+//   на ошибке до FLTE (AC_PID.cpp, update_all) и меняет шум D и задержку, а модель его не знает → строка на ось. Notch
+//   цели (NTF) стоит на цели, как FLTT, и на шум D и задержку не влияет — о нём строки нет. Рыскания модель не касается
+//   вовсе;
 // - быстрый поток контура скорости (FSTRATE_ENABLE > 0, Copter 4.7): ПИД скорости идёт на частоте гироскопа,
 //   делённой на делитель от FSTRATE_DIV (ArduCopter/rate_thread.cpp, rate_controller_set_rates), а модель считает
-//   свёртку и фильтры ПИД на SCHED_LOOP_RATE → строка с FSTRATE_ENABLE и FSTRATE_DIV (если он есть в логе) [код]
-function lowpass_model_warnings(params) {
+//   свёртку и фильтры ПИД на SCHED_LOOP_RATE → строка с FSTRATE_ENABLE и FSTRATE_DIV (если он есть в логе) [код].
+//   У Plane FSTRATE_* нет (grep по ArduPlane/ — пусто) — строки не будет
+function lowpass_model_warnings(params, profile = null) {
+    const used = lowpass_profile(profile)
     const titles = { roll: "крена", pitch: "тангажа" }
     const warnings = []
     for (const [axis, names] of Object.entries(lowpass_pid_axes)) {
-        const name = "ATC_RAT_" + names.param + "_NEF"
+        const name = vehicle_atc(used, "RAT_" + names.param + "_NEF")
         const value = params.get(name)
         if ((value != null) && (value != 0)) {
             warnings.push("Notch-фильтр ошибки ПИД " + titles[axis] + " (" + name + " = " + value + ") стоит до FLTE и не учтён в шуме D и задержке")

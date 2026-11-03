@@ -3,6 +3,8 @@
 // отрицательные частоты и пределы ускорения), причина «сравнить нельзя» (нет данных «до» вовсе или у первичного
 // гироскопа), ключ контекста оценки без размера винта и вердикт принятого (не устаревает от размера винта, называет
 // рекомендованный вариант), «Применить вариант» при неготовом расчёте шага 1 — под оверлеем одной функцией.
+// QuadPlane (этап 9): форма, Kd, отказы и заметки с именами Q_A_* (пределы Q_A_ACCEL_* и Q_A_ACC_*), без блока размера
+// винта и варианта по нему, вердикт без рекомендации, описания Q_A_<X> по ATC_<X>, ось Z и подпись D у tailsitter.
 // Страница — заглушки, как в tests/tunewizard-common.test.cjs: элементы по id, оверлей — очередь функций, расчёт
 // шага 1 задаётся тестом; данных гироскопа «до» нет — варианты без оценки (это и нужно: оценка проверена в
 // tests/tunewizard-steps.test.cjs). Скрипты — классические (общая глобальная область), грузятся по порядку index.html.
@@ -83,10 +85,10 @@ const user_log = {
 
 globalThis.state = {}
 
-// В порядке index.html: ядро (lowpass.js при загрузке нужен candidates.js, common.js — summary.js и его зависимости),
-// общий модуль шагов, шаг 3
-for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',
-                    'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
+// В порядке index.html: ядро (vehicle.js — профили аппаратов; lowpass.js при загрузке нужен candidates.js, common.js —
+// summary.js и его зависимости), общий модуль шагов, шаг 3
+for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/vehicle.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js',
+                    'TuneWizard/core/lowpass.js', 'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
                     'TuneWizard/steps/common.js', 'TuneWizard/steps/step3.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })
@@ -95,8 +97,8 @@ for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 
 // Страница с загруженным логом params (объект имя → значение): интервал 10–20 с, версия фильтра 2, данных гироскопа
 // «до» нет (have_pre), принято только step2 (запись state.steps[2] или null); форма шага 3 построена и заполнена
 // (step3_initial_values), поле размера винта — prop (строка, '' — пусто); состояние шага 3 — как после step3_reset.
-// Расчёт шага 1 — ready
-function reset_page({ params = user_log, prop = '', ready = true, step2 = null } = {}) {
+// Расчёт шага 1 — ready. profile — профиль аппарата лога (state.profile; null — как у страницы без вида: Copter)
+function reset_page({ params = user_log, prop = '', ready = true, step2 = null, profile = null } = {}) {
     for (const key of Object.keys(elements)) {
         delete elements[key]
     }
@@ -108,11 +110,11 @@ function reset_page({ params = user_log, prop = '', ready = true, step2 = null }
         steps[2] = step2
     }
     globalThis.state = {
-        log: {}, params: fake_params(params), settings: { start: 10, end: 20 }, spectrum: { filter_version: 2 },
+        log: {}, params: fake_params(params), profile: profile, settings: { start: 10, end: 20 }, spectrum: { filter_version: 2 },
         gyro: { have_pre: false, primary: 0, first_gyro: 0 }, env: {}, tracking: [], steps: steps,
     }
     step3_reset()
-    step3.form_names = lowpass_param_names(state.params)
+    step3.form_names = lowpass_param_names(state.params, state.profile)
     step3.form_built = true
     step3_fill_form(step3_initial_values())
     step3.filled = true
@@ -301,4 +303,160 @@ test('step3_apply при неготовом расчёте шага 1: под о
     assert.equal(verdict_fail.className, 'verdict verdict--fail')
     assert.equal(document.getElementById('lpf_INS_GYRO_FILTER').value, '40', 'форма не тронута')
     assert.equal(step3.candidates, null)
+})
+
+// ---------- QuadPlane (этап 9, дизайн docs/plans/2026-10-30-tune-wizard-stage9-design.md, раздел 6) ----------
+
+// Значения третьего лога (ArduPlane 4.6.3, tailsitter QUAD/X): регулятор Q_A_*, пределы Q_A_ACCEL_* в сантиградусах/с²
+const qp_log = {
+    INS_GYRO_FILTER: 40, INS_ACCEL_FILTER: 20,
+    Q_A_RAT_RLL_FLTT: 25.5, Q_A_RAT_RLL_FLTE: 0, Q_A_RAT_RLL_FLTD: 25.5,
+    Q_A_RAT_PIT_FLTT: 25.5, Q_A_RAT_PIT_FLTE: 0, Q_A_RAT_PIT_FLTD: 25.5,
+    Q_A_RAT_YAW_FLTT: 25.5, Q_A_RAT_YAW_FLTE: 2, Q_A_RAT_YAW_FLTD: 0,
+    Q_A_ACCEL_R_MAX: 70000, Q_A_ACCEL_P_MAX: 70000, Q_A_ACCEL_Y_MAX: 28800,
+    Q_A_RAT_RLL_D: 0.003, Q_A_RAT_PIT_D: 0.0028, Q_FRAME_CLASS: 1, Q_TAILSIT_ENABLE: 2,
+}
+const quadplane = () => vehicle_profiles.quadplane
+
+// Значения третьего лога без имён names
+function qp_log_without(...names) {
+    return Object.fromEntries(Object.entries(qp_log).filter(([name]) => !names.includes(name)))
+}
+
+test('QuadPlane: форма и Kd — Q_A_*; блока размера винта нет, размер в поле варианта не даёт; таблица — FLTD / FLTT Q_A_*', () => {
+    reset_page({ params: qp_log, profile: quadplane(), prop: '10' })
+    assert.deepEqual(step3.form_names, lowpass_param_names(state.params, quadplane()))
+    assert.equal(step3.form_names.some((name) => name.startsWith('ATC_')), false, 'ни одного имени Copter')
+    assert.equal(document.getElementById('lpf_Q_A_RAT_RLL_FLTD').value, '25.5', 'форма — значения лога Q_A_*')
+    assert.equal(document.getElementById('lpf_Q_A_ACCEL_R_MAX').value, '70000')
+    assert.deepEqual(step3_kd(), { roll: 0.003, pitch: 0.0028 })
+
+    // Блок размера винта скрыт, вместо него — заметка; размер из памяти браузера (поле) в расчёт не идёт
+    assert.equal(document.getElementById('prop_lab').hidden, true)
+    assert.equal(document.getElementById('step3_vehicle_note').hidden, false)
+    assert.equal(document.getElementById('prop_hint').hidden, true)
+    assert.equal(step3_prop_size(), null)
+    assert.equal(JSON.parse(step3_calc_key()).at(-1), null, 'ключ расчёта — без размера винта')
+    step3_compute()
+    assert.deepEqual(step3.candidates.map((c) => c.id), ['log', 'half'])
+    assert.equal(step3_recommended_id(), null, 'рекомендации нет')
+    assert.equal(step3.selected_id, 'log', 'выбор по умолчанию — «Как в логе»')
+    assert.deepEqual(step3.candidates[1].values, {
+        ...lowpass_log_values(state.params, quadplane()),
+        Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20, Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTD: 20, Q_A_RAT_YAW_FLTT: 20,
+    }, '«Лог + правило /2» — FLTT и FLTD 20')
+
+    step3_render_candidates()
+    const body = document.getElementById('candidates3').querySelector('tbody').innerHTML
+    assert.match(body, /<td class="num">25\.5 \/ 25\.5<\/td>/, 'FLTD / FLTT лога — из Q_A_*')
+    assert.match(body, /<td class="num">20 \/ 20<\/td>/, 'FLTD / FLTT правила /2')
+    assert.doesNotMatch(body, /рекомендуется/)
+    const note = document.getElementById('candidates3_note').textContent
+    assert.doesNotMatch(note, /Введите размер винта/)
+    assert.match(note, /Шум D крена VTOL — по оси Z гироскопа, тангажа — по оси Y\. /)
+    assert.match(note, /рыскание и пределы ускорения — без метрик, пределы — из лога \(формулы у QuadPlane нет\), правятся в форме\./)
+
+    // Новый лог Copter: блок размера винта — снова виден (step3_reset → step3_render_prop)
+    reset_page({ prop: '10' })
+    assert.equal(document.getElementById('prop_lab').hidden, false)
+    assert.equal(document.getElementById('step3_vehicle_note').hidden, true)
+    assert.equal(step3_prop_size(), 10)
+})
+
+test('QuadPlane: вердикт без рекомендации — «Лог + правило /2» против лога; совпал с логом; фильтр гироскопа выключен; принятое', () => {
+    reset_page({ params: qp_log, profile: quadplane() })
+    step3_compute()
+    step3_render_verdict()
+    // Блок вердикта — заново после каждого reset_page: он пересоздаёт элементы страницы
+    const verdict = () => document.getElementById('verdict3')
+    assert.equal(verdict().textContent, 'Рекомендации нет: формулы по размеру винта для QuadPlane нет — выбор за вами. «Лог + правило /2» против лога. ' +
+        'Меняется: Q_A_RAT_RLL_FLTT 25.5 → 20, Q_A_RAT_RLL_FLTD 25.5 → 20, Q_A_RAT_PIT_FLTT 25.5 → 20, Q_A_RAT_PIT_FLTD 25.5 → 20, Q_A_RAT_YAW_FLTT 25.5 → 20. ' +
+        'Сравнить варианты с логом нельзя: нужны данные гироскопа до фильтров (INS_LOG_BAT_OPT / INS_RAW_LOG_OPT). Чтобы взять его, выберите его в таблице и ' +
+        'нажмите «Применить вариант», затем «Принять»; чтобы оставить лог — «Принять» со значениями «Как в логе». Notch — из лога (шаг 2 не принят).')
+    assert.equal(verdict().className, 'verdict verdict--warn', 'без сравнения с логом — ВНИМ')
+    // Значения варианта уже в форме
+    step3_set_form_values(step3.candidates[1].values)
+    step3_render_verdict()
+    assert.match(verdict().textContent, / Его значения уже в форме — нажмите «Принять»\. Notch — из лога/)
+
+    // Правило /2 совпало с логом — менять нечего
+    reset_page({ params: { ...qp_log, Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20, Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTD: 20, Q_A_RAT_YAW_FLTT: 20 }, profile: quadplane() })
+    step3_compute()
+    step3_render_verdict()
+    assert.match(verdict().textContent, /^Рекомендации нет: формулы по размеру винта для QuadPlane нет — выбор за вами\. Значения лога совпадают с «Лог \+ правило \/2» — менять нечего\. Сравнить/)
+    assert.equal(verdict().className, 'verdict verdict--ok')
+
+    // Фильтр гироскопа выключен — варианта /2 нет
+    reset_page({ params: { ...qp_log, INS_GYRO_FILTER: 0 }, profile: quadplane() })
+    step3_compute()
+    step3_render_verdict()
+    assert.match(verdict().textContent, /Варианта «Лог \+ правило \/2» нет: фильтр гироскопа в логе выключен \(INS_GYRO_FILTER 0\) — свои значения задайте в форме\./)
+
+    // Принято «Как в логе» — без «Рекомендовался»
+    reset_page({ params: qp_log, profile: quadplane() })
+    step3_compute()
+    state.steps[3] = {
+        accepted: form_values(), candidate_id: 'log', prop_in: null, metrics: null, flags: null,
+        calc_key: step3.key, context_key: step3.context_key, inputs: 'x', evaluated_at: 0,
+    }
+    step3_render_verdict()
+    assert.equal(verdict().textContent, 'Принято: «Как в логе» (без сравнения с логом). Notch — из лога (шаг 2 не принят).')
+})
+
+test('QuadPlane: отказ «Принять», заметки Kd и NEF — имена Q_A_*; описания Q_A_<X> — ATC_<X>, у Q_A_ACCEL_* — сантиградусы', () => {
+    reset_page({ params: qp_log, profile: quadplane() })
+    assert.equal(step3_accept_refusal({ ...form_values(), Q_A_ACCEL_R_MAX: -5 }), 'Принять нельзя — отрицательные пределы ускорения: Q_A_ACCEL_R_MAX.')
+    assert.equal(step3_accept_refusal({ ...form_values(), Q_A_RAT_PIT_FLTD: -1 }), 'Принять нельзя — отрицательные частоты: Q_A_RAT_PIT_FLTD.')
+    // Новые имена пределов (4.7+, °/с²); чего нет в логе — заводское QuadPlane
+    reset_page({ params: { ...qp_log_without('Q_A_ACCEL_R_MAX', 'Q_A_ACCEL_P_MAX', 'Q_A_ACCEL_Y_MAX'), Q_A_ACC_R_MAX: 700 }, profile: quadplane() })
+    assert.deepEqual(step3.form_names.slice(-3), ['Q_A_ACC_R_MAX', 'Q_A_ACC_P_MAX', 'Q_A_ACC_Y_MAX'])
+    assert.equal(document.getElementById('lpf_Q_A_ACC_P_MAX').value, '400', 'нет в логе — заводское QuadPlane 400 °/с²')
+    assert.equal(step3_accept_refusal({ ...form_values(), Q_A_ACC_Y_MAX: -1 }), 'Принять нельзя — отрицательные пределы ускорения: Q_A_ACC_Y_MAX.')
+
+    // Заметки: NEF ≠ 0, D выключен, нет Kd
+    reset_page({ params: { ...qp_log_without('Q_A_RAT_PIT_D'), Q_A_RAT_RLL_NEF: 1, Q_A_RAT_RLL_D: 0 }, profile: quadplane() })
+    step3_render_warnings()
+    assert.deepEqual(document.getElementById('warnings3').innerHTML.split('<br>'), [
+        'Notch-фильтр ошибки ПИД крена (Q_A_RAT_RLL_NEF = 1) стоит до FLTE и не учтён в шуме D и задержке',
+        'D крена выключен (Q_A_RAT_RLL_D = 0): шум D и путь D крена не сравниваются.',
+        'Нет Q_A_RAT_PIT_D в логе — неполные данные: шум D тангажа не оценивается.',
+    ])
+    assert.equal(step3_d_off_reason('roll', 0), 'D выключен (Q_A_RAT_RLL_D = 0)')
+    assert.equal(step3_d_absent_reason('pitch', null), 'в логе нет Q_A_RAT_PIT_D')
+
+    // Описания: метаданные FilterReview — только ATC_*; у Q_A_<X> — описание ATC_<X>, у старых пределов — ACC_ с cdeg/s/s
+    step_metadata_state.data = {
+        ATC_: {
+            ATC_ACC_R_MAX: { Description: 'Maximum acceleration in roll axis', Units: 'deg/s/s' },
+            ATC_RAT_RLL_FLTD: { Description: 'Roll axis rate controller derivative frequency in Hz', Units: 'Hz' },
+        },
+    }
+    try {
+        assert.deepEqual(step3_param_metadata('Q_A_RAT_RLL_FLTD'), { Description: 'Roll axis rate controller derivative frequency in Hz', Units: 'Hz' })
+        assert.deepEqual(step3_param_metadata('Q_A_ACC_R_MAX'), { Description: 'Maximum acceleration in roll axis', Units: 'deg/s/s' })
+        assert.deepEqual(step3_param_metadata('Q_A_ACCEL_R_MAX'), { Description: 'Maximum acceleration in roll axis', Units: 'cdeg/s/s' })
+        assert.deepEqual(step3_param_metadata('ATC_ACCEL_R_MAX'), { Description: 'Maximum acceleration in roll axis', Units: 'cdeg/s/s' }, 'Copter — как раньше')
+        assert.equal(step3_param_metadata('Q_A_RAT_YAW_FLTD'), null, 'нет и у ATC_ — нет')
+        assert.equal(step_find_metadata(step_metadata_state.data, 'Q_M_THST_HOVER'), null, 'подменяется только префикс регулятора')
+    } finally {
+        step_metadata_state.data = null
+    }
+})
+
+test('QuadPlane tailsitter: подпись оси D — «Крен VTOL (Z)», тангаж — «Тангаж», цвет — оси Z; обычный QuadPlane и Copter — «Крен», ось X', () => {
+    reset_page({ params: qp_log, profile: quadplane() })
+    assert.deepEqual([step3_axis_label('roll'), step3_axis_label('pitch')], ['Крен VTOL (Z)', 'Тангаж'])
+    assert.deepEqual(step3_axes(), { roll: { param: 'RLL', gyro: 'z' }, pitch: { param: 'PIT', gyro: 'y' } })
+    // Цвет трасс D (крен: лог и выбранный, тангаж: лог и выбранный) — цвет оси гироскопа
+    const data = [0, 1, 2, 3].map(() => ({ line: {} }))
+    const palette = { axis: { x: 'X', y: 'Y', z: 'Z' } }
+    dterm3_theme(palette, data, {})
+    assert.deepEqual(data.map((trace) => trace.line.color), ['Z', 'Z', 'Y', 'Y'])
+
+    reset_page({ params: { ...qp_log, Q_TAILSIT_ENABLE: 0 }, profile: quadplane() })
+    assert.deepEqual([step3_axis_label('roll'), step3_axis_label('pitch')], ['Крен', 'Тангаж'])
+    reset_page()
+    assert.deepEqual([step3_axis_label('roll'), step3_axis_label('pitch')], ['Крен', 'Тангаж'])
+    dterm3_theme(palette, data, {})
+    assert.deepEqual(data.map((trace) => trace.line.color), ['X', 'X', 'Y', 'Y'])
 })

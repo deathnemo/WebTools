@@ -4,7 +4,8 @@
 // среза фильтра гироскопа 0.4 частоты выборки, как в прошивке; модель ПИД
 // без гироскопа — фильтр первого порядка и его задержка, производная (обе — и против разностных уравнений
 // AC_PID::update_all во времени), отметки вариантов, предупреждения модели (оценка на синтетическом гироскопе —
-// в tests/tunewizard-steps.test.cjs).
+// в tests/tunewizard-steps.test.cjs). QuadPlane (этап 9, профиль core/vehicle.js): имена Q_A_*, пределы Q_A_ACCEL_*
+// и Q_A_ACC_*, заводские QuadPlane, варианты без «по размеру винта», оси гироскопа tailsitter, NEF.
 // Скрипты ядра — классические (общая глобальная область), поэтому загружаются как на странице:
 // по порядку через vm.runInThisContext (как в tests/tunewizard-steps.test.cjs).
 const test = require('node:test')
@@ -29,6 +30,7 @@ function load_page_scripts(files) {
 load_page_scripts([
     'Libraries/Array_Math.js',
     'Libraries/fft.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/log.js',
     'TuneWizard/core/gyro.js',
     'TuneWizard/core/tracking/Atmosphere_model.js',
@@ -199,13 +201,16 @@ test('prop_from_gyro_filter: обратная формула, без кламп�
     assert.equal(prop_values(prop_from_gyro_filter(42)).INS_GYRO_FILTER, 42)
 })
 
-test('lowpass_accel_names: имена и единицы пределов ускорения по логу — 4.6 и новые версии', () => {
+test('lowpass_accel_names: имена, единицы и заводские пределов ускорения по логу — 4.6 и новые версии', () => {
+    const copter_defaults = { r: 1100, p: 1100, y: 270 }
     assert.deepEqual(lowpass_accel_names(fake_params(user_log)),
-        { r: 'ATC_ACCEL_R_MAX', p: 'ATC_ACCEL_P_MAX', y: 'ATC_ACCEL_Y_MAX', scale: 100, units: 'cdeg/s/s' })
+        { r: 'ATC_ACCEL_R_MAX', p: 'ATC_ACCEL_P_MAX', y: 'ATC_ACCEL_Y_MAX', scale: 100, units: 'cdeg/s/s', defaults_degss: copter_defaults })
     assert.deepEqual(lowpass_accel_names(fake_params({ ATC_ACC_R_MAX: 1100 })),
-        { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s' })
+        { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s', defaults_degss: copter_defaults })
     assert.deepEqual(lowpass_accel_names(fake_params({})),
-        { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s' })
+        { r: 'ATC_ACC_R_MAX', p: 'ATC_ACC_P_MAX', y: 'ATC_ACC_Y_MAX', scale: 1, units: 'deg/s/s', defaults_degss: copter_defaults })
+    // Без профиля (null) — как с профилем Copter
+    assert.deepEqual(lowpass_accel_names(fake_params(user_log), null), lowpass_accel_names(fake_params(user_log), vehicle_profiles.copter))
 })
 
 test('lowpass_param_names: фильтры по осям, затем пределы ускорения под именами из лога', () => {
@@ -697,4 +702,125 @@ test('lowpass_model_warnings: notch ошибки ПИД (NEF ≠ 0) — стро
     assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NTF: 0, ATC_RAT_RLL_NEF: 0, ATC_RAT_PIT_NTF: 0, ATC_RAT_PIT_NEF: 0 })), [])
     assert.deepEqual(lowpass_model_warnings(fake_params({})), [], 'параметров нет (прошивка без notch ПИД и быстрого потока)')
     assert.deepEqual(lowpass_model_warnings(fake_params(user_log)), [])
+})
+
+// ---------- QuadPlane (этап 9, дизайн docs/plans/2026-10-30-tune-wizard-stage9-design.md, раздел 6) ----------
+
+const quadplane = vehicle_profiles.quadplane
+
+// Значения третьего лога (ArduPlane 4.6.3, tailsitter QUAD/X): регулятор Q_A_*, старые имена пределов Q_A_ACCEL_* в
+// сантиградусах/с², Kd крена и тангажа
+const qp_log = {
+    INS_GYRO_FILTER: 40, INS_ACCEL_FILTER: 20,
+    Q_A_RAT_RLL_FLTT: 25.5, Q_A_RAT_RLL_FLTE: 0, Q_A_RAT_RLL_FLTD: 25.5,
+    Q_A_RAT_PIT_FLTT: 25.5, Q_A_RAT_PIT_FLTE: 0, Q_A_RAT_PIT_FLTD: 25.5,
+    Q_A_RAT_YAW_FLTT: 25.5, Q_A_RAT_YAW_FLTE: 2, Q_A_RAT_YAW_FLTD: 0,
+    Q_A_ACCEL_R_MAX: 70000, Q_A_ACCEL_P_MAX: 70000, Q_A_ACCEL_Y_MAX: 28800,
+    Q_A_RAT_RLL_D: 0.003, Q_A_RAT_PIT_D: 0.0028, Q_FRAME_CLASS: 1, Q_TAILSIT_ENABLE: 2,
+}
+const qp_filter_names = filter_names.map((name) => name.replace(/^ATC_/, 'Q_A_'))
+
+test('QuadPlane: имена Q_A_*, пределы Q_A_ACCEL_* (сантиградусы/с², 4.6) или Q_A_ACC_* (°/с²), заводские пределы QuadPlane и рамы 10', () => {
+    const qp_defaults = { r: 400, p: 400, y: 100 }
+    assert.deepEqual(lowpass_accel_names(fake_params(qp_log), quadplane),
+        { r: 'Q_A_ACCEL_R_MAX', p: 'Q_A_ACCEL_P_MAX', y: 'Q_A_ACCEL_Y_MAX', scale: 100, units: 'cdeg/s/s', defaults_degss: qp_defaults })
+    assert.deepEqual(lowpass_accel_names(fake_params({ Q_A_ACC_R_MAX: 400 }), quadplane),
+        { r: 'Q_A_ACC_R_MAX', p: 'Q_A_ACC_P_MAX', y: 'Q_A_ACC_Y_MAX', scale: 1, units: 'deg/s/s', defaults_degss: qp_defaults })
+    assert.deepEqual(lowpass_accel_names(fake_params({}), quadplane).r, 'Q_A_ACC_R_MAX', 'нет пределов в логе — новые имена')
+    // Префиксы не смешиваются: у QuadPlane ATC_ACCEL_R_MAX не смотрится, у Copter — Q_A_ACCEL_R_MAX
+    assert.equal(lowpass_accel_names(fake_params({ ATC_ACCEL_R_MAX: 90000 }), quadplane).r, 'Q_A_ACC_R_MAX')
+    assert.equal(lowpass_accel_names(fake_params({ Q_A_ACCEL_R_MAX: 70000 })).r, 'ATC_ACC_R_MAX')
+    // Рама Q_FRAME_CLASS = 10 (MOTOR_FRAME_TAILSITTER) — крен и тангаж 300 °/с² (vehicle_accel_defaults)
+    assert.deepEqual(lowpass_accel_names(fake_params({ Q_FRAME_CLASS: 10 }), quadplane).defaults_degss, { r: 300, p: 300, y: 100 })
+
+    assert.deepEqual(lowpass_param_names(fake_params(qp_log), quadplane), [...qp_filter_names, 'Q_A_ACCEL_R_MAX', 'Q_A_ACCEL_P_MAX', 'Q_A_ACCEL_Y_MAX'])
+    assert.deepEqual(lowpass_param_names(fake_params({}), quadplane), [...qp_filter_names, 'Q_A_ACC_R_MAX', 'Q_A_ACC_P_MAX', 'Q_A_ACC_Y_MAX'])
+})
+
+test('QuadPlane: значения лога Q_A_*, отсутствующие — заводские QuadPlane (FLTD крена и тангажа 10, рыскания 20; пределы 400 / 400 / 100)', () => {
+    const params = fake_params(qp_log)
+    const values = lowpass_log_values(params, quadplane)
+    assert.deepEqual(Object.keys(values), lowpass_param_names(params, quadplane))
+    assert.equal(Object.keys(values).some((name) => name.startsWith('ATC_')), false, 'ни одного имени Copter')
+    // Третий лог: «Как в логе» — FLTD 25.5, INS_GYRO_FILTER 40, пределы 70000 / 70000 / 28800 (дизайн, раздел 6 [лог])
+    assert.deepEqual([values.Q_A_RAT_RLL_FLTD, values.Q_A_RAT_PIT_FLTD, values.INS_GYRO_FILTER], [25.5, 25.5, 40])
+    assert.deepEqual([values.Q_A_ACCEL_R_MAX, values.Q_A_ACCEL_P_MAX, values.Q_A_ACCEL_Y_MAX], [70000, 70000, 28800])
+
+    // Пустой лог: заводские QuadPlane — не Copter (FLTD 20, 1100 / 1100 / 270)
+    assert.deepEqual(lowpass_log_values(fake_params({}), quadplane), {
+        INS_GYRO_FILTER: 20, INS_ACCEL_FILTER: 20,
+        Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTE: 0, Q_A_RAT_RLL_FLTD: 10,
+        Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTE: 0, Q_A_RAT_PIT_FLTD: 10,
+        Q_A_RAT_YAW_FLTT: 20, Q_A_RAT_YAW_FLTE: 2.5, Q_A_RAT_YAW_FLTD: 20,
+        Q_A_ACC_R_MAX: 400, Q_A_ACC_P_MAX: 400, Q_A_ACC_Y_MAX: 100,
+    })
+    // Старые имена — в сантиградусах/с²; рама 10 — крен и тангаж 30000
+    const old = lowpass_log_values(fake_params({ Q_A_ACCEL_R_MAX: 70000, Q_FRAME_CLASS: 10 }), quadplane)
+    assert.deepEqual([old.Q_A_ACCEL_R_MAX, old.Q_A_ACCEL_P_MAX, old.Q_A_ACCEL_Y_MAX], [70000, 30000, 10000])
+
+    // Заводские пределы распознаются по значениям профиля: у QuadPlane 400 / 400 / 100, а 1100 / 1100 / 270 Copter — нет
+    const names = lowpass_accel_names(fake_params({}), quadplane)
+    assert.equal(lowpass_accel_is_default({ Q_A_ACC_R_MAX: 400, Q_A_ACC_P_MAX: 400, Q_A_ACC_Y_MAX: 100 }, names), true)
+    assert.equal(lowpass_accel_is_default({ Q_A_ACC_R_MAX: 1100, Q_A_ACC_P_MAX: 1100, Q_A_ACC_Y_MAX: 270 }, names), false)
+})
+
+test('QuadPlane: варианты «Как в логе» и «Лог + правило /2» (FLTT и FLTD 20 на третьем логе); варианта по размеру винта нет', () => {
+    const params = fake_params(qp_log)
+    const log_values = lowpass_log_values(params, quadplane)
+    const names = lowpass_accel_names(params, quadplane)
+    for (const prop of [null, 10, 12.5]) {
+        assert.deepEqual(lowpass_candidates(log_values, prop, names, quadplane).map((c) => c.id), ['log', 'half'], 'размер ' + prop + ' — формулы нет')
+    }
+    const [log, half] = lowpass_candidates(log_values, 10, names, quadplane)
+    assert.deepEqual(log.values, log_values)
+    assert.deepEqual(half.values, {
+        ...log_values,
+        Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20,
+        Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTD: 20,
+        Q_A_RAT_YAW_FLTT: 20,
+    })
+    assert.deepEqual(Object.keys(half.values), lowpass_param_names(params, quadplane), 'ровно параметры шага, без ATC_*')
+    // Правило /2 совпало с логом — один вариант «Как в логе»
+    const by_rule = lowpass_log_values(fake_params({ ...qp_log, Q_A_RAT_RLL_FLTT: 20, Q_A_RAT_RLL_FLTD: 20, Q_A_RAT_PIT_FLTT: 20, Q_A_RAT_PIT_FLTD: 20,
+                                                     Q_A_RAT_YAW_FLTT: 20 }), quadplane)
+    const merged = lowpass_candidates(by_rule, null, names, quadplane)
+    assert.deepEqual([merged.map((c) => c.id), merged[0].same_as], [['log'], ['half']])
+    // Фильтр гироскопа выключен — только «Как в логе»
+    assert.deepEqual(lowpass_candidates({ ...log_values, INS_GYRO_FILTER: 0 }, 10, names, quadplane).map((c) => c.id), ['log'])
+    // Формула по размеру винта сама по себе — с именами профиля (у QuadPlane варианты её не зовут)
+    assert.equal(prop_values(10, quadplane).Q_A_RAT_RLL_FLTD, 21)
+    assert.equal(prop_values(10, quadplane).ATC_RAT_RLL_FLTD, undefined)
+})
+
+test('QuadPlane: FLTE и FLTD оси — Q_A_*; оси гироскопа — у tailsitter крен Z, тангаж Y; контекст оценки несёт профиль и оси', () => {
+    const values = { Q_A_RAT_RLL_FLTE: 1, Q_A_RAT_RLL_FLTD: 2, Q_A_RAT_PIT_FLTE: 3, Q_A_RAT_PIT_FLTD: 4, ATC_RAT_RLL_FLTE: 9, ATC_RAT_RLL_FLTD: 8 }
+    assert.deepEqual(lowpass_axis_filters(values, 'roll', quadplane), { flte: 1, fltd: 2 })
+    assert.deepEqual(lowpass_axis_filters(values, 'pitch', quadplane), { flte: 3, fltd: 4 })
+    assert.deepEqual(lowpass_axis_filters(values, 'roll'), { flte: 9, fltd: 8 }, 'без профиля — ATC_')
+
+    const xy = { roll: { param: 'RLL', gyro: 'x' }, pitch: { param: 'PIT', gyro: 'y' } }
+    assert.deepEqual(lowpass_vehicle_axes(), xy, 'без профиля — Copter')
+    assert.deepEqual(lowpass_vehicle_axes(quadplane, fake_params({ Q_TAILSIT_ENABLE: 0 })), xy)
+    assert.deepEqual(lowpass_vehicle_axes(quadplane, null), xy)
+    assert.deepEqual(lowpass_vehicle_axes(quadplane, fake_params(qp_log)), { roll: { param: 'RLL', gyro: 'z' }, pitch: { param: 'PIT', gyro: 'y' } })
+    assert.deepEqual(lowpass_vehicle_axes(vehicle_profiles.copter, fake_params({ Q_TAILSIT_ENABLE: 2 })), xy, 'у Copter tailsitter не бывает')
+
+    const base = { gyro: [], env: {}, tracking: [], range: [0, 1], sensor: 0 }
+    const ctx = lowpass_ctx(base, { SCHED_LOOP_RATE: 400 }, { roll: 0.003, pitch: 0.0028 }, quadplane, fake_params(qp_log))
+    assert.equal(ctx.profile, quadplane)
+    assert.deepEqual(ctx.pid_axes, lowpass_vehicle_axes(quadplane, fake_params(qp_log)))
+    const copter_ctx = lowpass_ctx(base, { SCHED_LOOP_RATE: 400 }, null)
+    assert.equal(copter_ctx.profile, vehicle_profiles.copter, 'без профиля — Copter')
+    assert.deepEqual(copter_ctx.pid_axes, xy)
+})
+
+test('QuadPlane: предупреждения модели — Q_A_RAT_*_NEF ≠ 0; NEF Copter у QuadPlane не смотрится; FSTRATE у Plane нет', () => {
+    assert.deepEqual(lowpass_model_warnings(fake_params({ Q_A_RAT_RLL_NEF: 2, Q_A_RAT_PIT_NEF: 0 }), quadplane),
+        ['Notch-фильтр ошибки ПИД крена (Q_A_RAT_RLL_NEF = 2) стоит до FLTE и не учтён в шуме D и задержке'])
+    assert.deepEqual(lowpass_model_warnings(fake_params({ Q_A_RAT_PIT_NEF: 1 }), quadplane),
+        ['Notch-фильтр ошибки ПИД тангажа (Q_A_RAT_PIT_NEF = 1) стоит до FLTE и не учтён в шуме D и задержке'])
+    assert.deepEqual(lowpass_model_warnings(fake_params({ ATC_RAT_RLL_NEF: 1 }), quadplane), [], 'имя Copter у QuadPlane — не его')
+    assert.deepEqual(lowpass_model_warnings(fake_params({ Q_A_RAT_RLL_NEF: 1 })), [], 'имя QuadPlane у Copter — не его')
+    assert.deepEqual(lowpass_model_warnings(fake_params({ Q_A_RAT_YAW_NEF: 1 }), quadplane), [], 'рыскания модель не касается')
+    assert.deepEqual(lowpass_model_warnings(fake_params(qp_log), quadplane), [], 'третий лог: NEF 0')
 })
