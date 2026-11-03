@@ -787,8 +787,17 @@ test('run_checks QuadPlane: аппарат, сообщения PID VTOL (без 
     assert.equal(fast.fix, null)
     const none = by_id(quadplane_checks({ piq_hz: null }), 'pid_log')
     assert.equal(none.status, 'warn')
-    assert.equal(none.text, 'Сообщений PIQR/PIQP/PIQY нет; шаг 4 для QuadPlane пока недоступен')
-    assert.match(none.fix, /^Включите бит ATTITUDE_FULLRATE \(20\)/)
+    // PIQx нет при включённом бите записи положения (65535 — ATTITUDE_FAST и MED): они пишутся, только пока работает
+    // регулятор VTOL (ArduPlane/Log.cpp:30) — совет без частоты «без бита 20», иначе противоречие с «нет» (ревью задачи 6)
+    assert.equal(none.text, 'Сообщений PIQR/PIQP/PIQY нет: они пишутся, только пока работает регулятор VTOL (бит записи положения в LOG_BITMASK ' +
+        'включён); шаг 4 для QuadPlane пока недоступен')
+    assert.equal(none.fix, 'Включите бит ATTITUDE_FULLRATE (20) в LOG_BITMASK (+1048576) — для будущего шага 4: с ним PIQR/PIQP/PIQY пишутся с частотой ' +
+        'цикла — тоже только при работающем регуляторе VTOL')
+    assert.doesNotMatch(none.fix, /25 Гц|10 Гц/)
+    // Одного ATTITUDE_MED — так же; бит 20 уже включён — совета нет
+    assert.equal(by_id(quadplane_checks({ piq_hz: null, params: { LOG_BITMASK: 2 } }), 'pid_log').text, none.text)
+    const none_full = by_id(quadplane_checks({ piq_hz: null, params: { LOG_BITMASK: 1114111 } }), 'pid_log')
+    assert.deepEqual([none_full.status, none_full.text, none_full.fix], ['warn', none.text, null])
     // Без ATTITUDE_FAST и ATTITUDE_MED PIQx не пишутся вовсе; с одним ATTITUDE_MED — 10 Гц; LOG_BITMASK нет — все случаи
     assert.match(by_id(quadplane_checks({ piq_hz: null, params: { LOG_BITMASK: 65532 } }), 'pid_log').fix,
         /: без него PIQR\/PIQP\/PIQY не пишутся вовсе: в LOG_BITMASK нет ни ATTITUDE_FAST \(0\), ни ATTITUDE_MED \(1\)$/)

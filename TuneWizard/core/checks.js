@@ -195,13 +195,24 @@ function run_checks(info, params, vibe) {
         const step4 = profile.steps.includes(4)
         const step4_note = step4 ? "" : "; шаг 4 для " + profile.title + " пока недоступен"
         const bit = profile.fullrate_bit
-        const fullrate_fix = "Включите бит ATTITUDE_FULLRATE (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ") — " + (step4 ? "для шага 4" : "для будущего шага 4") +
-            ": без него " + check_plane_pid_rate_text(pid_names, params.get("LOG_BITMASK"))
+        const bitmask = params.get("LOG_BITMASK")
+        const bit_on = (b) => Number.isFinite(bitmask) && ((bitmask & (1 << b)) !== 0)
+        const fullrate_head = "Включите бит ATTITUDE_FULLRATE (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ") — " + (step4 ? "для шага 4" : "для будущего шага 4")
+        const fullrate_fix = fullrate_head + ": без него " + check_plane_pid_rate_text(pid_names, bitmask)
+        // PIQx пишет Log_Write_Attitude, только пока регулятор VTOL работал последние 100 мс [код] ArduPlane/Log.cpp:30,
+        // quadplane.cpp:2005–2022 (motors_output, last_att_control_ms): при включённом бите записи положения (ATTITUDE_FULLRATE,
+        // ATTITUDE_FAST или ATTITUDE_MED) их нет, если VTOL-регулятор не работал, — совет о частоте без бита 20 противоречил бы
+        // «нет» (ревью задачи 6 этапа 9)
+        const attitude_on = [bit, r.plane_log_bitmask_attitude_fast, r.plane_log_bitmask_attitude_med].some(bit_on)
         if (m.pid && slow) {
             add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + rate_message + " пишется с частотой " + hz_text + " Гц — ниже " +
                 r.pid_log_min_rate_hz + " Гц отклик на ступеньку не считается" + step4_note, fullrate_fix)
         } else if (m.pid) {
             add("pid_log", "ok", profile.pid_title, pid_names.join("/") + " есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + step4_note)
+        } else if (attitude_on) {
+            add("pid_log", "warn", profile.pid_title, "Сообщений " + pid_names.join("/") + " нет: они пишутся, только пока работает регулятор VTOL " +
+                "(бит записи положения в LOG_BITMASK включён)" + step4_note,
+                bit_on(bit) ? null : fullrate_head + ": с ним " + pid_names.join("/") + " пишутся с частотой цикла — тоже только при работающем регуляторе VTOL")
         } else {
             add("pid_log", "warn", profile.pid_title, "Сообщений " + pid_names.join("/") + " нет" + step4_note, fullrate_fix)
         }
