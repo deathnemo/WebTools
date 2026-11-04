@@ -20,6 +20,7 @@
 <script type="text/javascript" src="../Libraries/Param_Helpers.js"></script>
 <script type="text/javascript" src="../Libraries/FileSaver.js"></script>
 
+<script type="text/javascript" src="core/vehicle.js"></script>
 <script type="text/javascript" src="core/log.js"></script>
 <script type="text/javascript" src="core/checks.js"></script>
 <script type="text/javascript" src="core/gyro.js"></script>
@@ -313,9 +314,9 @@ details.more > .tablewrap{margin-top:8px}
 <div class="wrap">
 
 <header class="hero">
-  <span class="eyebrow">ArduPilot · Copter</span>
+  <span class="eyebrow">ArduPilot · Copter и QuadPlane</span>
   <h1>Мастер настройки</h1>
-  <p class="lede">Один лог — шесть шагов: проверка лога, спектр гироскопов, гармонический notch, низкочастотные фильтры, PID по осям и сводка с файлом параметров. На каждом шаге мастер предлагает значения, вы их правите и подтверждаете.</p>
+  <p class="lede">Один лог — шесть шагов: проверка лога, спектр гироскопов, гармонический notch, низкочастотные фильтры, PID по осям (пока только Copter) и сводка с файлом параметров. На каждом шаге мастер предлагает значения, вы их правите и подтверждаете.</p>
 </header>
 
 <nav class="wizbar" id="wizbar" aria-label="Шаги мастера"></nav>
@@ -347,7 +348,8 @@ details.more > .tablewrap{margin-top:8px}
         <input id="FFTWindow_size" type="number" min="64" step="1" value="1024" disabled onchange="window_size_changed(this)">
       </div>
     </div>
-    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше. По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны. Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1. «Проверить .param» — подготовка к следующему полёту по файлу параметров, можно и без лога.</p>
+    <p class="note" id="interval_vtol_note" hidden>Интервал по умолчанию у QuadPlane — только VTOL-режимы (Q-режимы): самый длинный участок с газом, другие называет проверка «Полёт». VTOL-взлёт и посадка внутри AUTO и GUIDED по MODE не видны — такой участок задайте вручную.</p>
+    <p class="note">Интервал анализа задаётся ползунком под графиком полёта или полями выше.<span id="interval_default_note"> По умолчанию — участок с ненулевым газом с отступом по секунде с каждой стороны.</span> Окно FFT — степень двойки; оно действует на raw-лог (GYR), а для batch-лога окно задаётся числом окон на пакет на шаге 1. «Проверить .param» — подготовка к следующему полёту по файлу параметров, можно и без лога.</p>
   </div>
 
   <div class="verdict" id="log_verdict" hidden></div>
@@ -488,6 +490,7 @@ details.more > .tablewrap{margin-top:8px}
 
   <div class="head"><span class="eyebrow">Средний спектр</span><h2>Гироскопы по осям: до фильтров, после и оценка «после»</h2></div>
   <div id="Spectrum1" class="plot"></div>
+  <p class="note" id="spec_axes_note" hidden></p>
 
   <div class="head"><span class="eyebrow">Спектрограмма</span><h2>Спектр по времени</h2></div>
   <div class="row">
@@ -667,10 +670,11 @@ details.more > .tablewrap{margin-top:8px}
   <p class="note">Линии — гармоники notch для посчитанных значений формы; записанные в лог (FTN) включаются в легенде.</p>
 </section>
 <section data-step="3" hidden>
-  <div class="head"><span class="eyebrow">03 · Низкочастотные фильтры</span><h2>Фильтры гироскопа и ПИД по размеру винта</h2></div>
-  <p class="lede">Мастер предлагает частоты фильтра гироскопа и фильтров ПИД и пределы ускорения по размеру винта — по формулам Mission Planner — и сравнивает варианты по данным лога: шум гироскопа после фильтров в полосе <span data-rule3="band">20–400 Гц</span>, шум D-составляющей крена и тангажа и задержку путей P и D. Вариант отмечается, если он шумнее лога больше чем на <span data-rule3="noise">3 дБ</span> или задержка на <span data-rule3="lag_hz">30 Гц</span> больше чем на <span data-rule3="lag">1 мс</span>; отметки выбор не блокируют.</p>
+  <div class="head"><span class="eyebrow">03 · Низкочастотные фильтры</span><h2>Фильтры гироскопа и ПИД<span data-prop3="on"> по размеру винта</span></h2></div>
+  <p class="lede">Мастер <span data-prop3="on">предлагает частоты фильтра гироскопа и фильтров ПИД и пределы ускорения по размеру винта — по формулам Mission Planner — и сравнивает варианты</span><span data-prop3="off" hidden>сравнивает варианты частот фильтра гироскопа и фильтров ПИД</span> по данным лога: шум гироскопа после фильтров в полосе <span data-rule3="band">20–400 Гц</span>, шум D-составляющей крена и тангажа и задержку путей P и D. Вариант отмечается, если он шумнее лога больше чем на <span data-rule3="noise">3 дБ</span> или задержка на <span data-rule3="lag_hz">30 Гц</span> больше чем на <span data-rule3="lag">1 мс</span>; отметки выбор не блокируют.</p>
 
-  <div class="lab">
+  <p class="note" id="step3_vehicle_note" hidden>У QuadPlane формулы по размеру винта нет (для Q_A_RAT_* источника нет): поля размера винта, варианта по нему и рекомендации нет. Варианты — «Как в логе» и «Лог + правило /2» (FLTT и FLTD крена и тангажа и FLTT рыскания = max(<span data-rule3="pid_min">10</span>, INS_GYRO_FILTER / 2) — правило Copter для того же регулятора), свои значения — в форме; выбор за вами. Пределы ускорения — из лога. У tailsitter шум D крена VTOL считается по оси Z гироскопа.</p>
+  <div class="lab" id="prop_lab">
     <div class="row">
       <div class="fld">
         <label for="prop_in">Размер винта, <span class="unit">″</span></label>
@@ -700,7 +704,7 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Значения фильтров и пределов ускорения</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="lpf_form"></div>
-    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX. Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле, отрицательную частоту и отрицательный предел ускорения принять нельзя; INS_GYRO_FILTER выше 0.4 частоты гироскопа прошивка ограничит — метрики считаются с ограниченным срезом, об этом предупреждение; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; рыскание и пределы ускорения — по правилам, без метрик. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
+    <p class="note">Значения — из лога. Описания (во всплывающей подсказке у имени) и единицы — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском; у ATC_ACCEL_*_MAX и Q_A_ACCEL_*_MAX (сантиградусы/с², прошивки 4.6 и раньше) — описание ATC_ACC_*_MAX, у Q_A_* QuadPlane — описание ATC_* (тот же регулятор). Правка поля пересчитывает метрики после паузы в наборе или при выходе из поля, в таблице появляется строка «Свой». Пустое поле, отрицательную частоту и отрицательный предел ускорения принять нельзя; INS_GYRO_FILTER выше 0.4 частоты гироскопа прошивка ограничит — метрики считаются с ограниченным срезом, об этом предупреждение; пустой фильтр из метрик (INS_GYRO_FILTER, FLTE и FLTD крена и тангажа) ещё и даёт строке «Свой» отметку. FLTT фильтрует только цель и в метрики не входит; <span data-prop3="on">рыскание и пределы ускорения — по правилам, без метрик.</span><span data-prop3="off" hidden>рыскание (FLTT — по правилу /2) и пределы ускорения (из лога) — без метрик.</span> Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
 
   <div class="head"><span class="eyebrow">Метрики</span><h2>Значения формы против лога</h2></div>
@@ -827,12 +831,12 @@ details.more > .tablewrap{margin-top:8px}
 <section data-step="5" hidden>
   <div class="print-head" id="step5_print_head"></div>
   <div class="head"><span class="eyebrow">05 · Сводка</span><h2>Итог прохода</h2></div>
-  <p class="lede">Что принято на шагах 2–4 и что изменится на аппарате: параметры «было → станет», файл .param только с изменёнными и что перелететь после записи. Устаревшее принятое сводка помечает, но не блокирует.</p>
+  <p class="lede">Что принято на шагах <span data-steps5>2–4</span> и что изменится на аппарате: параметры «было → станет», файл .param только с изменёнными и что перелететь после записи. Устаревшее принятое сводка помечает, но не блокирует.</p>
 
   <div class="verdict" id="verdict5" hidden></div>
   <div class="stats" id="tiles5" hidden></div>
 
-  <div class="head"><span class="eyebrow">Шаги</span><h2>Принятое на шагах 2–4</h2></div>
+  <div class="head"><span class="eyebrow">Шаги</span><h2>Принятое на шагах <span data-steps5>2–4</span></h2></div>
   <div class="tablewrap cands" id="steps5" hidden>
     <table>
       <thead><tr><th>Шаг</th><th>Состояние</th><th>Итог</th><th>Действие</th></tr></thead>

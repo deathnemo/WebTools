@@ -1,13 +1,15 @@
 // Шаг 0, блок «Подготовка к следующему полёту»: проверка параметров для качественного лога следующего полёта по цели
 // (фильтры, PID или оба) — по загруженному файлу .param или по параметрам лога, файл .param исправлений, положения
 // переключателя режимов с выбором положения для ACRO, план полёта и его печать. Правила, исправления, положения и план —
-// ядро core/prep.js; здесь — источник параметров (только Copter), выбор пользователя и разметка. Дизайн —
-// docs/plans/2026-10-30-tune-wizard-stage7-design.md (разделы 2, 4, 5, 10), план — …-stage7.md, задача 2.
-// Источники: [решение пользователя 30.10.2026] — дизайн этапа 7; [наше] — решение мастера.
+// ядро core/prep.js; здесь — источник параметров и его вид аппарата (Copter или QuadPlane), выбор пользователя и
+// разметка. Дизайн — docs/plans/2026-10-30-tune-wizard-stage7-design.md (разделы 2, 4, 5, 10), план — …-stage7.md,
+// задача 2; QuadPlane — docs/plans/2026-10-30-tune-wizard-stage9-design.md (раздел 9), план — …-stage9.md, задача 5.
+// Источники: [решение пользователя 30.10.2026] — дизайн этапов 7 и 9; [наше] — решение мастера.
 //
-// Нужны глобалы страницы: core/prep.js (prep_*), core/params.js (parse_param_file, param_file_text), core/checks.js
-// (checks_summary), Libraries/FileSaver.js (saveAs), wizard.js (state, html_escape, checks_html), steps/common.js
-// (step_try, step_verdict, step_plural, step_cell, step_value_text). Все они нужны только при вызове.
+// Нужны глобалы страницы: core/prep.js (prep_*), core/vehicle.js (vehicle_profiles, vehicle_profile,
+// vehicle_kind_of_params), core/params.js (parse_param_file, param_file_text), core/checks.js (checks_summary),
+// Libraries/FileSaver.js (saveAs), wizard.js (state, html_escape, checks_html), steps/common.js (step_try, step_verdict,
+// step_plural, step_cell, step_value_text). Все они нужны только при вызове.
 
 // Состояние блока: goal — цель полёта (ключ prep_goals); file — загруженный файл .param ({ name, params }: params с
 // get/has, как у log_params; null — файла нет); slot и slot_source — положение для ACRO, выбранное пользователем
@@ -23,11 +25,6 @@ const prep0_default_goal = "both"
 // Имя параметра ArduPilot: заглавная латинская буква, затем заглавные, цифры и «_». Файл, где таких имён меньше
 // половины (двоичный лог, чужой текст), — не файл параметров [наше]
 const prep0_param_name = /^[A-Z][A-Z0-9_]*$/
-
-// Только Copter [решение пользователя 23.10.2026]: правила подготовки — для Copter (у Plane режим 1 — CIRCLE, и файл
-// исправлений предложил бы FLTMODE6 = 1). Файл .param — параметры Copter, если в нём есть ATC_RAT_RLL_P (контур
-// скорости крена Copter; у Plane и QuadPlane — Q_A_RAT_RLL_P) [наше]
-const prep0_copter_param = "ATC_RAT_RLL_P"
 
 // Формы слов для step_plural
 const prep0_param_forms = ["параметр", "параметра", "параметров"]
@@ -87,26 +84,53 @@ function prep0_current_source() {
 }
 
 // Положение для ACRO у источника source: выбранное пользователем для этого источника (1–6 или null), иначе
-// предложение ядра (prep_acro_suggestion: 6 или null)
-function prep0_chosen_slot(source) {
-    return (prep0_state.slot_source === source.id) ? prep0_state.slot : prep_acro_suggestion(source.params)
+// предложение ядра (prep_acro_suggestion: 6 или null) для профиля источника profile
+function prep0_chosen_slot(source, profile) {
+    return (prep0_state.slot_source === source.id) ? prep0_state.slot : prep_acro_suggestion(source.params, profile)
 }
 
-// Почему подготовка не для этого источника → текст для вердикта или null (Copter): лог — аппарат лога не Copter
-// (state.info.vehicle); файл — в нём нет prep0_copter_param
+// Вид аппарата источника: файл — по признаку вида в параметрах (vehicle_kind_of_params: ATC_RAT_RLL_P — Copter,
+// Q_A_RAT_RLL_P — QuadPlane), лог — вид лога (state.kind); null — не поддержан [дизайн этапа 9, разделы 3 и 9]
+function prep0_source_kind(source) {
+    return (source.kind === "file") ? vehicle_kind_of_params(source.params) : state.kind
+}
+
+// Вид аппарата лога словами: имя профиля или аппарат из VER (state.info.vehicle: «Plane», «Rover»…)
+function prep0_log_vehicle() {
+    return state.profile?.title ?? state.info?.vehicle ?? "неизвестный аппарат"
+}
+
+// Почему подготовка не для этого источника → текст для вердикта или null: лог — вид лога не поддержан (нет профиля:
+// Plane без Q_ENABLE, Rover…); файл — в нём нет признака ни одного вида (vehicle_kind_of_params) или загружен лог
+// другого вида [дизайн этапа 9, раздел 9: «файл и лог разных видов — отказ»; без лога — любой поддержанный вид]. Лог
+// неподдержанного вида — «выберите файл этого аппарата» невыполнимо: пометка «(не поддержан)» и как проверить файл —
+// без лога или с логом его вида (ревью задачи 5 этапа 9)
 function prep0_refusal(source) {
+    const supported = Object.values(vehicle_profiles)
+    const titles = supported.map((p) => p.title).join(" и ")
     if (source.kind === "log") {
-        const vehicle = state.info?.vehicle ?? null
-        return (vehicle === "Copter") ? null
-            : "Подготовка к полёту — только для Copter: лог от " + ((vehicle != null) ? vehicle : "неизвестного аппарата")
+        return (state.profile != null) ? null
+            : "Подготовка к полёту — только для " + titles + ": лог от " + ((state.info?.vehicle != null) ? state.info.vehicle : "неизвестного аппарата")
     }
-    return source.params.has(prep0_copter_param) ? null
-        : "Подготовка к полёту — только для Copter: файл «" + source.name + "» не похож на параметры Copter — нет " + prep0_copter_param
+    const kind = prep0_source_kind(source)
+    if (kind == null) {
+        return "Подготовка к полёту — только для " + titles + ": файл «" + source.name + "» не похож на их параметры — нет " +
+            supported.map((p) => p.param_marker).join(" и ")
+    }
+    if ((state.params != null) && (kind !== state.kind)) {
+        const file_title = vehicle_profile(kind).title
+        return "Файл «" + source.name + "» — " + file_title + ", лог — " + prep0_log_vehicle() + ((state.profile != null)
+            ? ": выберите файл этого аппарата или уберите файл"
+            : " (не поддержан): проверить файл можно без лога (перезагрузите страницу и выберите только файл) или с логом " + file_title)
+    }
+    return null
 }
 
-// Данные блока → null (источника нет) или { source, goal, refusal, slot, items }: refusal — текст отказа (prep0_refusal;
-// тогда slot и items — null); иначе items — prep_check по источнику, цели и положению ACRO; газ висения (проверка шага 0
-// hover_throttle) — из загруженного лога и при файле (дизайн, раздел 4)
+// Данные блока → null (источника нет) или { source, goal, refusal, profile, tailsitter, slot, items }: refusal — текст
+// отказа (prep0_refusal; тогда profile, slot и items — null); иначе profile — профиль вида источника, tailsitter — по
+// параметрам источника (profile.is_tailsitter), items — prep_check по источнику, цели, профилю и положению ACRO; газ
+// висения (проверка шага 0 hover_throttle) — из загруженного лога того же вида и при файле (дизайн этапа 7, раздел 4;
+// этапа 9, раздел 9: лог другого вида — отказ выше)
 function prep0_context() {
     const source = prep0_current_source()
     if (source == null) {
@@ -115,17 +139,20 @@ function prep0_context() {
     const goal = prep0_state.goal
     const refusal = prep0_refusal(source)
     if (refusal != null) {
-        return { source: source, goal: goal, refusal: refusal, slot: null, items: null }
+        return { source: source, goal: goal, refusal: refusal, profile: null, tailsitter: false, slot: null, items: null }
     }
-    const slot = prep0_chosen_slot(source)
-    const hover_check = state.checks?.find((c) => c.id === "hover_throttle") ?? null
-    const items = prep_check(source.params, goal, { acro_slot: slot, hover_check: hover_check })
-    return { source: source, goal: goal, refusal: null, slot: slot, items: items }
+    const kind = prep0_source_kind(source)
+    const profile = vehicle_profile(kind)
+    const tailsitter = profile.is_tailsitter?.(source.params) ?? false
+    const slot = prep0_chosen_slot(source, profile)
+    const hover_check = (state.kind === kind) ? (state.checks?.find((c) => c.id === "hover_throttle") ?? null) : null
+    const items = prep_check(source.params, goal, { acro_slot: slot, hover_check: hover_check, profile: profile })
+    return { source: source, goal: goal, refusal: null, profile: profile, tailsitter: tailsitter, slot: slot, items: items }
 }
 
-// Подготовка для «что сделать перед следующим полётом» шага 5 (ctx.prep summary_refly) → null — источника нет или он не
-// Copter (prep0_refusal); иначе { items, file_name, reboot_names }: items — пункты prep_check для текущего источника,
-// цели и положения ACRO; file_name — имя файла исправлений (prep_file_name) или null — в файл записать нечего
+// Подготовка для «что сделать перед следующим полётом» шага 5 (ctx.prep summary_refly) → null — источника нет или
+// отказ (prep0_refusal); иначе { items, file_name, reboot_names }: items — пункты prep_check для текущего источника,
+// цели, профиля и положения ACRO; file_name — имя файла исправлений (prep_file_name) или null — в файл записать нечего
 // (prep_changes пусто, как у выключенной кнопки «Скачать»); reboot_names — имена файла, которым нужна перезагрузка
 // (prep_reboot_names; [] — не нужна). Сбой подготовки не должен ронять сводку — ошибка в консоль, null
 function prep0_summary() {
@@ -229,7 +256,7 @@ function prep0_remove_file() {
 }
 
 // «Скачать .param исправлений»: только изменения (prep_changes) в файл <лог или файл>_prep.param (prep_file_name) —
-// отдельно от _tune.param шага 5 [решение пользователя 30.10.2026, раздел 10, е]. Не Copter — файла нет
+// отдельно от _tune.param шага 5 [решение пользователя 30.10.2026, раздел 10, е]. Отказ (prep0_refusal) — файла нет
 function prep0_save_file() {
     step_try(() => {
         const ctx = prep0_context()
@@ -300,39 +327,57 @@ function prep0_show_verdict(items, goal) {
     return summary.status
 }
 
-// Поле «Положение для ACRO» — только при fail acro_slot (ACRO нет ни в одном положении): FLTMODE1–6 с режимом сейчас и
-// PWM; выбрано slot (предложение ядра или выбор пользователя), иначе «— выберите —»
-function prep0_draw_slot(params, items, slot) {
+// Поле «Положение для ACRO» (у QuadPlane — «для QACRO»: режим ACRO профиля) — только при fail acro_slot (ACRO нет ни в
+// одном положении): FLTMODE1–6 с режимом сейчас (имена режимов профиля) и PWM; выбрано slot (предложение ядра или выбор
+// пользователя), иначе «— выберите —»
+function prep0_draw_slot(params, items, slot, profile) {
     const show = items.find((item) => item.id === "acro_slot")?.status === "fail"
     document.getElementById("prep0_slot_field").hidden = !show
     if (!show) {
         return
     }
+    document.querySelector('label[for="prep0_slot"]').textContent = "Положение для " + prep_mode_name(profile.acro_mode, profile)
     const select = document.getElementById("prep0_slot")
-    select.innerHTML = '<option value="">— выберите —</option>' + prep_mode_slots(params).map((s) =>
+    select.innerHTML = '<option value="">— выберите —</option>' + prep_mode_slots(params, null, profile).map((s) =>
         '<option value="' + s.slot + '">' + html_escape(s.name + " · " + (s.mode_name ?? "нет параметра") + " · PWM " + s.pwm) + '</option>').join("")
     select.value = (slot != null) ? String(slot) : ""
 }
 
-// Таблица положений переключателя (#prep0_modes) — при цели с PID: положение, PWM, режим сейчас. Положение с ACRO —
-// сейчас или после записи файла (prep_acro_applied) — выделено; пометки — «станет ACRO (файл исправлений)» и «выход
-// из ACRO» у положения выхода плана полёта (prep_plan_slots)
-function prep0_draw_modes(params, slot) {
-    const acro = prep_rules.acro_mode
-    const applied = prep_acro_applied(params, slot)
-    const plan = prep_plan_slots(params, slot)
-    const rows = prep_mode_slots(params).map((s) => {
+// Подпись таблицы положений: «Положения переключателя режимов», у вида с каналом в подписи (prep_vehicles, mode_channel:
+// у QuadPlane — FLTMODE_CH, по умолчанию 8 — не тот, что у Copter) — ещё «· канал FLTMODE_CH = N» или «· канал
+// FLTMODE_CH (по умолчанию 8)», если параметра нет
+function prep0_modes_head_text(params, profile) {
+    const channel = prep_vehicle(profile).mode_channel
+    const head = "Положения переключателя режимов"
+    if (channel == null) {
+        return head
+    }
+    const value = params.get(channel.param)
+    return head + " · канал " + ((value != null) ? prep_eq(channel.param, value) : channel.param + " (по умолчанию " + channel.default + ")")
+}
+
+// Таблица положений переключателя (#prep0_modes) — при цели с PID: положение, PWM, режим сейчас (имена режимов
+// профиля). Положение с ACRO — сейчас или после записи файла (prep_acro_applied) — выделено; пометки — «станет ACRO
+// (файл исправлений)» и «выход из ACRO» у положения выхода плана полёта (prep_plan_slots); ACRO — режим профиля (у
+// QuadPlane — QACRO)
+function prep0_draw_modes(params, slot, profile) {
+    const acro = profile.acro_mode
+    const acro_name = prep_mode_name(acro, profile)
+    const applied = prep_acro_applied(params, slot, profile)
+    const plan = prep_plan_slots(params, slot, profile)
+    const rows = prep_mode_slots(params, null, profile).map((s) => {
         let mark = null
         if (s.slot === applied) {
-            mark = "станет ACRO (файл исправлений)"
+            mark = "станет " + acro_name + " (файл исправлений)"
         } else if ((s.slot === plan.exit) && (plan.acro != null)) {
-            mark = "выход из ACRO"
+            mark = "выход из " + acro_name
         }
         const hot = (s.slot === applied) || (s.mode == acro)
         return '<tr' + (hot ? ' class="recommended"' : "") + '>' + step_cell(String(s.slot), s.name, "") + step_cell(s.pwm, null, "") +
             step_cell(s.mode_name ?? "нет параметра", mark, "") + '</tr>'
     })
     document.querySelector("#prep0_modes tbody").innerHTML = rows.join("")
+    document.getElementById("prep0_modes_head").textContent = prep0_modes_head_text(params, profile)
     for (const id of ["prep0_modes_head", "prep0_modes"]) {
         document.getElementById(id).hidden = false
     }
@@ -360,10 +405,10 @@ function prep0_draw_file(ctx, status) {
 }
 
 // План полёта (prep_flight_plan): положение ACRO и выхода — prep_plan_slots (найденное или выбранное), проверки шага 0 —
-// state.checks (null — лога нет)
+// state.checks (null — лога нет), профиль и tailsitter — источника (prep0_context)
 function prep0_draw_plan(ctx) {
-    const slots = prep_plan_slots(ctx.source.params, ctx.slot)
-    const plan = prep_flight_plan(ctx.goal, { acro_slot: slots.acro, exit_slot: slots.exit, checks: state.checks })
+    const slots = prep_plan_slots(ctx.source.params, ctx.slot, ctx.profile)
+    const plan = prep_flight_plan(ctx.goal, { acro_slot: slots.acro, exit_slot: slots.exit, checks: state.checks, profile: ctx.profile, tailsitter: ctx.tailsitter })
     document.getElementById("prep0_plan").innerHTML = plan.map((text) => '<li>' + html_escape(text) + '</li>').join("")
     for (const id of ["prep0_plan_head", "prep0_plan"]) {
         document.getElementById(id).hidden = false
@@ -371,10 +416,11 @@ function prep0_draw_plan(ctx) {
 }
 
 // Блок целиком: нет ни источника, ни ошибки — скрыт; ошибка чтения файла без источника — только она в вердикте;
-// источник не Copter (prep0_refusal) — цель, строка источника и отказ в вердикте; иначе цель, строка источника, вердикт,
-// список, положения переключателя (цель с PID), файл исправлений и план. Ошибка чтения файла показывается, пока
-// источник тот же, что при ошибке; при другом — забывается, иначе вернулась бы, когда источник снова станет прежним
-// (например, без источника после неудачной загрузки лога)
+// отказ (prep0_refusal: вид не поддержан или файл и лог разных видов) — цель с пояснением по виду лога, строка источника
+// и отказ в вердикте; иначе цель с пояснением по виду источника (prep_goal_text), строка источника, вердикт, список,
+// положения переключателя (цель с PID), файл исправлений и план. Ошибка чтения файла показывается, пока источник тот же,
+// что при ошибке; при другом — забывается, иначе вернулась бы, когда источник снова станет прежним (например, без
+// источника после неудачной загрузки лога)
 function prep0_draw() {
     const source = prep0_current_source()
     const id = source?.id ?? null
@@ -398,12 +444,14 @@ function prep0_draw() {
     }
 
     const goal = prep0_state.goal
+    const ctx = prep0_context()
     document.getElementById("prep0_goal").value = goal
-    document.getElementById("prep0_goal_text").textContent = prep_goals[goal].text
+    // При отказе профиля источника нет — пояснение по профилю лога (лог QuadPlane и файл Copter — цели QuadPlane), а без
+    // него (лога нет или вид не поддержан) — Copter, как до этапа 9 (ревью задачи 5 этапа 9)
+    document.getElementById("prep0_goal_text").textContent = prep_goal_text(goal, ctx.profile ?? state.profile)
     document.getElementById("prep0_source").textContent = prep0_source_text(source, error)
     document.getElementById("prep0_unfile").hidden = (source.kind !== "file")
 
-    const ctx = prep0_context()
     if (ctx.refusal != null) {
         step_verdict("prep0_verdict", "fail", ctx.refusal)
         return
@@ -413,8 +461,8 @@ function prep0_draw() {
     checks.innerHTML = checks_html(ctx.items)
     checks.hidden = false
     if (prep_goal_parts(goal).includes("pid")) {
-        prep0_draw_slot(source.params, ctx.items, ctx.slot)
-        prep0_draw_modes(source.params, ctx.slot)
+        prep0_draw_slot(source.params, ctx.items, ctx.slot, ctx.profile)
+        prep0_draw_modes(source.params, ctx.slot, ctx.profile)
     }
     prep0_draw_file(ctx, status)
     prep0_draw_plan(ctx)

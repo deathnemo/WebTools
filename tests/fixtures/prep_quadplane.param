@@ -1,0 +1,35 @@
+# Синтетический файл параметров ArduPlane с QuadPlane для браузерного теста подготовки к полёту
+# (tests/tunewizard-prep-browser.cjs, npm run test:tunewizard-prep; этап 9, дизайн — раздел 9). Не файл пользователя:
+# значения подобраны, чтобы при цели «Фильтры и PID» блок «Подготовка к следующему полёту» шага 0 нашёл:
+# - QACRO (23) нет ни в одном положении (FLTMODE1–3 QSTABILIZE, QHOVER, QLOITER, 4 FBWA, 5 RTL, 6 MANUAL) — предлагается
+#   положение 6, выход — положение 1; канал переключателя FLTMODE_CH 8;
+# - LOG_BITMASK 65535 — заводская маска Plane без бита 20 (ATTITUDE_FULLRATE): PIQR/PIQP/PIQY не на частоте цикла;
+# - ACRO_LOCKING 1 — в QACRO удерживается угол;
+# - batch гироскопа ICM20602 по SPI (INS_GYR_ID 3080458 = 0x2F010A: тип 0x2F, шина SPI) с INS_LOG_BAT_OPT 5 — бит 0
+#   (Sensor-Rate) вместе с битом 2: у Invensense v1 обе половины batch сырые — исправление INS_LOG_BAT_OPT 4;
+# - notch по ESC с двунаправленным DShot, Q_M_HOVER_LEARN 0 (без лога — совет, без записи в файл); не tailsitter.
+# Q_A_RAT_RLL_P — признак параметров QuadPlane (у Copter — ATC_RAT_RLL_P): без него блок отказывает.
+ACRO_LOCKING,1
+FLTMODE_CH,8
+FLTMODE1,17
+FLTMODE2,18
+FLTMODE3,19
+FLTMODE4,5
+FLTMODE5,11
+FLTMODE6,0
+INS_GYR_ID,3080458
+INS_HNTC2_ENABLE,0
+INS_HNTCH_ENABLE,1
+INS_HNTCH_MODE,3
+INS_LOG_BAT_MASK,1
+INS_LOG_BAT_OPT,5
+INS_RAW_LOG_OPT,0
+LOG_BACKEND_TYPE,1
+LOG_BITMASK,65535
+LOG_FILE_BUFSIZE,16
+Q_A_RAT_RLL_P,0.25
+Q_ENABLE,1
+Q_M_HOVER_LEARN,0
+Q_M_THST_HOVER,0.35
+Q_TAILSIT_ENABLE,0
+SERVO_BLH_BDMASK,15

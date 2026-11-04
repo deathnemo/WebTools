@@ -12,7 +12,9 @@
 // не затирают: заменяет её только явное сохранение прохода на шаге 5 («Запомнить проход», «Скачать .param») — иначе
 // первая же загрузка лога в старой версии мастера уничтожала бы память новой [наше].
 // Поле bits записи (размер маски HMNCS при сохранении) добавлено без смены версии: записи без него читаются как
-// прежде (passmem_applied).
+// прежде (passmem_applied). Так же — вид аппарата (этап 9, QuadPlane): поле kind записи и префикс вида в ключе у
+// аппаратов не Copter (passmem_aircraft_key); записи без kind — Copter (passmem_kind), ключ Copter прежний — проходы,
+// сохранённые до этапа 9, находятся [дизайн этапа 9, раздел 8].
 //
 // Нужны глобалы страницы: core/summary.js (summary_same; ему — core/params.js и Libraries/Param_Helpers.js),
 // core/filters.js (notch_param_names), core/lowpass.js (lowpass_pid_axes), core/pidtune.js (pidtune_axes).
@@ -29,12 +31,15 @@ function passmem_is_object(value) {
 }
 
 // Годна ли запись прохода record, лежащая в карте под ключом key, для функций памяти: объект; key — строка, равная
-// ключу в карте (иначе «Забыть» по pass.key промахнётся); changed — массив объектов со строковым name и числовым step;
-// saved_at — число или нет (null — тоже нет: так его пишет passmem_record без даты); estimates — объект или нет, его
-// оценки шагов 2–4 — объекты или null (нет). Остальные поля функции памяти читают осторожно (?., null)
+// ключу в карте (иначе «Забыть» по pass.key промахнётся); kind — строка или нет (записи до этапа 9 — без него;
+// неизвестная строка — не битая запись, ради будущих видов: её нет ни в одном списке, но место в PASSMEM_MAX она занимает);
+// changed — массив объектов со строковым name и числовым step; saved_at — число или нет (null — тоже нет: так его
+// пишет passmem_record без даты); estimates — объект или нет, его оценки шагов 2–4 — объекты или null (нет). Остальные
+// поля функции памяти читают осторожно (?., null)
 function passmem_valid(key, record) {
     return passmem_is_object(record) &&
         (record.key === key) &&
+        ((record.kind == null) || (typeof record.kind === "string")) &&
         Array.isArray(record.changed) &&
         record.changed.every((change) => passmem_is_object(change) && (typeof change.name === "string") &&
                                          (typeof change.step === "number")) &&
@@ -111,19 +116,33 @@ function passmem_write(storage, passes) {
     return null
 }
 
+// Вид аппарата записей без поля kind — сохранённых до этапа 9, когда мастер был только для Copter
+const PASSMEM_DEFAULT_KIND = "copter"
+
+// Вид аппарата записи прохода: поле kind ("copter" | "quadplane"); нет (null, нет поля — запись до этапа 9) — Copter
+// (PASSMEM_DEFAULT_KIND)
+function passmem_kind(record) {
+    return record?.kind ?? PASSMEM_DEFAULT_KIND
+}
+
 // Ключ аппарата. info — state.info (log_info): board — строка полётного контроллера из MSG (плата и уникальный номер
 // процессора, например «StellarH7V2 0034002E 35335104 39363630»; сохраняется и в обезличенных логах), board_id — номер
-// платы APJ из VER, frame — рама.
+// платы APJ из VER, frame — рама (у QuadPlane — из «QuadPlane Frame: …», log_frame), kind — вид аппарата.
 // Строка контроллера есть (непустая строка) — «fc:<строка>»: тот же аппарат узнаётся в любом логе
 // [решение пользователя 25.10.2026]. Нет — запасной «log:<номер платы>·<рама>·<имя лога>»: такой проход найдётся только
 // для того же файла, шаг 0 предлагает выбрать проход вручную. Плата — номер APJ, а не из VER.FWS (fw_string): там её
-// нет, только «ArduCopter V4.6.3 (<git>)» [код, AP_FWVersionDefine.h]. Нет значения (в том числе поля в info) — «—»
+// нет, только «ArduCopter V4.6.3 (<git>)» [код, AP_FWVersionDefine.h]. Нет значения (в том числе поля в info) — «—».
+// Вид аппарата не Copter (info.kind задан и не PASSMEM_DEFAULT_KIND) — впереди «<вид>·» («quadplane·fc:…»): одна плата
+// на Copter и на QuadPlane — разные аппараты, и «применено» не сравнит ATC_* с Q_A_*; у Copter и без вида ключ
+// прежний — проходы, сохранённые до этапа 9, находятся [дизайн этапа 9, раздел 8]
 function passmem_aircraft_key(info, file_name) {
+    const kind = info?.kind ?? null
+    const prefix = ((kind != null) && (kind !== PASSMEM_DEFAULT_KIND)) ? kind + "·" : ""
     const board = info?.board
     if ((typeof board === "string") && (board !== "")) {
-        return "fc:" + board
+        return prefix + "fc:" + board
     }
-    return "log:" + [info?.board_id ?? "—", info?.frame ?? "—", file_name ?? "—"].join("·")
+    return prefix + "log:" + [info?.board_id ?? "—", info?.frame ?? "—", file_name ?? "—"].join("·")
 }
 
 // Значение для записи в JSON: undefined → null (JSON.stringify выбросил бы поле)
@@ -218,7 +237,9 @@ function passmem_estimates4(step) {
 // (summary_rows(…).rows и .conflicts; conflicts нет — расхождений нет); steps — state.steps; saved_at — дата
 // сохранения, мс (Date.now()); stale — { 2, 3, 4 }: устарело ли принятое шага (step_accepted_stale; нет — не
 // устарело); bits — размер маски HMNCS лога (hmncs_bits), с которым считались строки итога.
-// → { key, board, frame, fw, file_name, saved_at, bits, changed, estimates }:
+// → { key, kind, board, frame, fw, file_name, saved_at, bits, changed, estimates }:
+// - kind — вид аппарата (info.kind; нет — null, читается как Copter — passmem_kind): список проходов для выбора — только
+//   того же вида (passmem_list);
 // - подпись: board, frame, fw (info.fw_string) — для показа; нет — null;
 // - bits — размер маски HMNCS при сохранении (нет — null): «применено» на логе с другим размером (смена версии
 //   фильтра 2 → 3) сравнивает маски по большему из размеров (passmem_applied);
@@ -234,6 +255,7 @@ function passmem_record(ctx) {
     const valid = (n) => !ctx.stale?.[n] && !conflicts.some((conflict) => (n in conflict.values) && (conflict.used !== n))
     return {
         key: ctx.key,
+        kind: passmem_value(info.kind),
         board: passmem_value(info.board),
         frame: passmem_value(info.frame),
         fw: passmem_value(info.fw_string),
@@ -277,9 +299,11 @@ function passmem_forget(passes, key) {
     return next
 }
 
-// Проходы списком по убыванию даты сохранения — для выбора вручную, когда в логе нет строки контроллера
-function passmem_list(passes) {
-    return Object.values(passes).sort((a, b) => (b.saved_at ?? 0) - (a.saved_at ?? 0))
+// Проходы аппаратов вида kind (passmem_kind записи; kind — info.kind лога, null — вид не поддержан: проходов нет)
+// списком по убыванию даты сохранения — для выбора вручную, когда в логе нет строки контроллера или прохода этого
+// аппарата нет. Проход другого вида не предлагается: «применено» не сравнит ATC_* с Q_A_* [дизайн этапа 9, раздел 8]
+function passmem_list(passes, kind) {
+    return Object.values(passes).filter((pass) => passmem_kind(pass) === kind).sort((a, b) => (b.saved_at ?? 0) - (a.saved_at ?? 0))
 }
 
 // Что из предложенного в проходе pass стоит в новом логе. params — параметры лога (get, has), bits — размер маски

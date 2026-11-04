@@ -26,6 +26,7 @@ function load_page_scripts(files) {
 load_page_scripts([
     'Libraries/Array_Math.js',
     'Libraries/fft.js',
+    'TuneWizard/core/vehicle.js',
     'TuneWizard/core/log.js',
     'TuneWizard/core/gyro.js',
     'TuneWizard/core/tracking/Atmosphere_model.js',
@@ -731,6 +732,46 @@ test('evaluate_lowpass: шум гироскопа «как в логе» — т�
         })
         assert.ok(Math.abs(e.dterm[axis].dB - 10 * Math.log10(sum / count)) < 1e-9, axis + ': среднее по 20–200 Гц')
     }
+})
+
+test('evaluate_lowpass QuadPlane (этап 9): имена Q_A_*; у tailsitter шум D крена — по оси Z гироскопа, тангажа — по Y; обычный QuadPlane — как Copter', () => {
+    const { gyro, env: log_env, tracking, range, base, ctx } = lowpass_setup()
+    const quadplane = vehicle_profiles.quadplane
+    const notch = { ...log_values_7a }
+    // Те же значения под именами регулятора QuadPlane
+    const to_qp = (values) => Object.fromEntries(Object.entries(values).map(([name, value]) => [name.replace(/^ATC_/, 'Q_A_'), value]))
+    const values = { ...lowpass_values_8, ATC_RAT_RLL_FLTE: 10, ATC_RAT_PIT_FLTD: 15 }
+    const copter = evaluate_lowpass(values, ctx)
+
+    // Обычный QuadPlane (Q_TAILSIT_ENABLE = 0): оси X и Y — оценка та же, что у Copter
+    const plain = evaluate_lowpass(to_qp(values), lowpass_ctx(base, notch, lowpass_kd_8, quadplane, fake_params({ Q_TAILSIT_ENABLE: 0 })))
+    assert.deepEqual(lowpass_metrics(plain), lowpass_metrics(copter))
+    assert.deepEqual(plain.dterm, copter.dterm)
+
+    // Tailsitter: крен VTOL — ось Z, тангаж — Y; задержки и шум гироскопа от осей не зависят
+    const tail_ctx = lowpass_ctx(base, notch, lowpass_kd_8, quadplane, fake_params({ Q_TAILSIT_ENABLE: 2 }))
+    assert.deepEqual(tail_ctx.pid_axes, { roll: { param: 'RLL', gyro: 'z' }, pitch: { param: 'PIT', gyro: 'y' } })
+    const tail = evaluate_lowpass(to_qp(values), tail_ctx)
+    assert.equal(tail.gyro.band_dB, copter.gyro.band_dB)
+    assert.deepEqual(tail.lag_ms, copter.lag_ms, 'FLTE и FLTD — из Q_A_*: задержки те же')
+    assert.deepEqual(tail.dterm.pitch, copter.dterm.pitch)
+    assert.notEqual(tail.dterm.roll.dB, copter.dterm.roll.dB, 'Z синтетики — белый шум без тонов X')
+    assert.notDeepEqual(tail.dterm.roll.spectrum, copter.dterm.roll.spectrum)
+    calculate_transfer_function(load_filters(log_values_7a, log_env, tracking), gyro)
+    const alias = alias_obj(gyro[0].FFT, { mode: 'fold', loop_rate: 400 })
+    const psd = estimate_post(gyro, 0, spectrum_amplitude_scale('PSD'), range, alias)
+    const abs2 = (h) => h[0] ** 2 + h[1] ** 2
+    alias.bins.forEach((f, k) => {
+        const D = 0.004 ** 2 * 10 ** (psd.z[k] / 10) * pid_lowpass_derivative_gain2(f, 400) * abs2(pid_lowpass_response(10, 400, f)) * abs2(pid_lowpass_response(30, 400, f))
+        const got = tail.dterm.roll.spectrum[k]
+        assert.ok((k == 0) ? (got === -Infinity) : (Math.abs(got - 10 * Math.log10(D)) < 1e-9), 'крен по Z, ' + f + ' Гц: ' + got + ' против ' + 10 * Math.log10(D))
+    })
+
+    // Значения с именами Copter на контексте QuadPlane — FLTE и FLTD не найдены: задержка NaN (имена не смешиваются)
+    assert.ok(Number.isNaN(evaluate_lowpass(values, tail_ctx).lag_ms.roll.P[30]))
+    // Бодэ — тоже по именам профиля контекста
+    const bode = lowpass_bode(to_qp(values), tail_ctx, 0.5)
+    assert.deepEqual(bode.roll, lowpass_bode(values, ctx, 0.5).roll)
 })
 
 test('evaluate_lowpass: FLTD 30 → 15 — шум D крена и тангажа ниже, путь D медленнее, путь P прежний', () => {

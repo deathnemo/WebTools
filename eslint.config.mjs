@@ -57,6 +57,7 @@ const DUAL_SCRIPTS = [
   'AirspeedFit/airspeedfit_core.js',
   'SimpleGCS/commands.js',
   // Ядро мастера настройки: те же скрипты гоняются под Node в tests/tunewizard.test.cjs
+  'TuneWizard/core/vehicle.js',
   'TuneWizard/core/log.js',
   'TuneWizard/core/checks.js'
 ]

@@ -8,7 +8,8 @@
 // Нужны глобалы страницы: wizard.js (state, html_escape), steps/step1.js (step1, step1_ready, step1_prepare),
 // steps/step2.js (step2_param_names), steps/step4.js (step4_param_names), core/spectrum.js (find_instance),
 // core/summary.js (summary_inputs_key, summary_stale), core/passmem.js (passmem_depends4_names), core/lowpass.js
-// (lowpass_param_names), core/params.js (hmncs_bits), plots.js (plot, render_plot), Libraries/LoadingOverlay.js
+// (lowpass_param_names), core/vehicle.js (vehicle_profiles — префиксы регулятора для описаний параметров),
+// core/params.js (hmncs_bits), plots.js (plot, render_plot), Libraries/LoadingOverlay.js
 // (loading_call), Libraries/Param_Helpers.js (param_to_string). Все они нужны только при вызове, поэтому модуль
 // подключается перед steps/step1.js. Обработчики указателя ставятся при первой подписке
 // (step_on_pointer_release), а не при загрузке этого модуля; шаги 3 и 4 подписываются при загрузке своих скриптов
@@ -118,7 +119,8 @@ function step_summary_context() {
         filter_version: state.spectrum.filter_version,
         steps: state.steps,
         params: state.params,
-        names: { 2: step2_param_names(), 3: lowpass_param_names(state.params), 4: step4_param_names() },
+        // Имена шага 3 — с префиксом профиля аппарата (у QuadPlane Q_A_*), как в форме шага 3; без профиля — Copter
+        names: { 2: step2_param_names(), 3: lowpass_param_names(state.params, state.profile), 4: step4_param_names() },
         depends: { 4: step_depends4_names() },
         bits: step_hmncs_bits(),
     }
@@ -198,8 +200,27 @@ function step_open_in(path, on_blocked) {
 const step_metadata_state = { promise: null, data: null, failed: false }
 
 // Описание параметра name в метаданных obj — тем же префиксным обходом, что recursive_search в
-// Libraries/ParameterMetadata.js; null — описания нет
+// Libraries/ParameterMetadata.js; null — описания нет. Метаданные FilterReview — Copter: у регулятора другого вида
+// (Q_A_<X> QuadPlane — префикс atc профиля, core/vehicle.js) своего описания нет, и берётся описание ATC_<X>: тот же
+// класс AC_AttitudeControl_Multi, суффиксы те же (дизайн этапа 9, раздел 6). Одно место для формы шага 3
+// (step3_param_metadata), формы шага 4 (step4_apply_metadata, описания PID) и перезагрузки в сводке (summary_reboot_names,
+// дизайн этапа 9, раздел 8)
 function step_find_metadata(obj, name) {
+    const found = step_find_metadata_in(obj, name)
+    if (found != null) {
+        return found
+    }
+    const copter = vehicle_profiles.copter.atc
+    for (const profile of Object.values(vehicle_profiles)) {
+        if ((profile.atc !== copter) && name.startsWith(profile.atc)) {
+            return step_find_metadata_in(obj, copter + name.slice(profile.atc.length))
+        }
+    }
+    return null
+}
+
+// Префиксный обход step_find_metadata — без замены префикса регулятора
+function step_find_metadata_in(obj, name) {
     for (const [key, value] of Object.entries(obj)) {
         if (!name.startsWith(key)) {
             continue
@@ -207,7 +228,7 @@ function step_find_metadata(obj, name) {
         if (name === key) {
             return value
         }
-        const found = step_find_metadata(value, name)
+        const found = step_find_metadata_in(value, name)
         if (found != null) {
             return found
         }

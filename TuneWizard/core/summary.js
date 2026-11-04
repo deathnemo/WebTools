@@ -4,10 +4,12 @@
 // Источники: [решение пользователя 25.10.2026]; [наше] — решение мастера; [код] — исходники ArduPilot и шагов мастера.
 //
 // Всё, что живёт в steps/, ядро получает аргументом, чтобы core/ не зависело от steps/: списки имён параметров шагов
-// (страница собирает их step2_param_names(), lowpass_param_names(state.params), step4_param_names()) и имён, от которых
-// зависит шаг 4 (step_depends4_names), совет тестового полёта (step4_test_flight_short), подготовка к полёту
-// (prep0_summary: пункты, имя файла исправлений, имена с перезагрузкой) и поиск записи в метаданных параметров
-// (step_find_metadata).
+// (страница собирает их step2_param_names(), lowpass_param_names(state.params, state.profile) — у QuadPlane имена
+// Q_A_*, step4_param_names()) и имён, от которых зависит шаг 4 (step_depends4_names), совет тестового полёта
+// (step4_test_flight_short), доступные аппарату шаги (state.profile.steps — пункт «повторить проход»), подготовка к
+// полёту (prep0_summary: пункты, имя файла исправлений, имена с перезагрузкой) и поиск записи в метаданных параметров
+// (step_find_metadata: у Q_A_<X> — запись ATC_<X>). Дизайн QuadPlane — docs/plans/2026-10-30-tune-wizard-stage9-design.md,
+// раздел 8.
 //
 // Нужны глобалы страницы: core/params.js (param_file_text, is_bitmask_param, escmsk_present, mask_unsigned, mask_signed;
 // ему — Libraries/Param_Helpers.js), Libraries/Param_Helpers.js (param_to_string), core/filters.js (notch_param_names),
@@ -250,7 +252,8 @@ function summary_lower_first(text) {
 // [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight }:
 // - checks — проверки шага 0 (state.checks: { id, status, title, fix }; null — проверок нет);
 // - prep — подготовка к следующему полёту, всё готовое от страницы (prep0_summary(); ядро prep_* не зовёт): null — нет
-//   (нет источника параметров, не Copter, блок подготовки не загрузился) или { items, file_name, reboot_names }:
+//   (нет источника параметров, отказ подготовки — вид не поддержан или файл и лог разных видов, блок подготовки не
+//   загрузился) или { items, file_name, reboot_names }:
 //   items — пункты prep_check ({ id, status, title, fix }; null или [] — нет), file_name — имя файла исправлений
 //   (prep_file_name) или null — в файл записать нечего, reboot_names — имена этого файла, которым нужна перезагрузка
 //   (prep_reboot_names; [] или null — не нужна);
@@ -260,7 +263,9 @@ function summary_lower_first(text) {
 // - unreliable_axes — ключи осей шага 4 без надёжного измерения (roll | pitch | yaw; [] или null — таких нет). Страница
 //   берёт их из принятого шага 4 или из посчитанного: совет нужен и тогда, когда менять нечего и «Принять» на шаге 4
 //   не нажимали [наше];
-// - test_flight — совет тестового полёта (step4_test_flight_short).
+// - test_flight — совет тестового полёта (step4_test_flight_short);
+// - available — шаги мастера, доступные аппарату (profile.steps: у QuadPlane без шага 4); нет (null, undefined) — все,
+//   как у Copter.
 // Пункты:
 // 1. "check" — проверки warn или fail с непустым fix: «title — fix» (в fix бывают свои двоеточия), fix — продолжение
 //    фразы: первая буква обычного слова строчная (summary_lower_first). Проверки, о которых есть пункт подготовки warn
@@ -276,8 +281,9 @@ function summary_lower_first(text) {
 //    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
 // 6. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
 //    в порядке pidtune_axes, первая с заглавной;
-// 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог. Без
-//    изменений проверять нечего, и список может быть пустым [наше]
+// 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог; шаги, которые
+//    покажут, сбылся ли прогноз, — те из 2–4, что доступны аппарату (summary_steps_text: у Copter «шаги 2–4», у
+//    QuadPlane «шаги 2–3» — дизайн этапа 9, раздел 8). Без изменений проверять нечего, и список может быть пустым [наше]
 function summary_refly(ctx) {
     const items = []
     const add = (source, text) => items.push({ source: source, text: summary_period(text) })
@@ -335,10 +341,29 @@ function summary_refly(ctx) {
     }
 
     if (changed.length > 0) {
-        add("repeat", "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, шаги 2–4 — " +
-            "сбылся ли прогноз")
+        const compared = [2, 3, 4].filter((n) => (ctx.available == null) || ctx.available.includes(n))
+        add("repeat", "Слетайте тем же профилем и загрузите лог в мастер: шаг 0 покажет, что применено, " +
+            summary_steps_text(compared) + " — сбылся ли прогноз")
     }
     return items
+}
+
+// Номера шагов steps (по возрастанию) — одно правило диапазона для всех надписей «шаги N–M»: подряд — «2–4», иначе —
+// «2, 4», один — «2», пустой список — пустая строка. Его берут summary_steps_text, вступление и заголовок таблицы шагов
+// сводки и её «менять нечего» (steps/step5.js, step5_steps_range): у Copter «2–4», у QuadPlane «2–3» (ревью качества
+// задачи 4 этапа 9)
+function summary_steps_range(steps) {
+    const in_row = steps.every((n, i) => (i == 0) || (n === steps[i - 1] + 1))
+    return (in_row && (steps.length > 1)) ? steps[0] + "–" + steps[steps.length - 1] : steps.join(", ")
+}
+
+// Шаги словами: один — «шаг 2»; несколько — «шаги » + summary_steps_range («шаги 2–4», «шаги 2, 4»); пустой список —
+// пустая строка (у summary_refly до неё не дойти: «repeat» — только у вида с шагами 2–4, ревью задачи 4 этапа 9)
+function summary_steps_text(steps) {
+    if (steps.length == 0) {
+        return ""
+    }
+    return ((steps.length == 1) ? "шаг " : "шаги ") + summary_steps_range(steps)
 }
 
 // Имена из names, которым после записи нужна перезагрузка: в метаданных параметров (FilterReview/params.json —

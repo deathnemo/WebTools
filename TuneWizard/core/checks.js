@@ -1,11 +1,15 @@
 // Проверки пригодности лога (шаг 0). Чистые функции без DOM.
 // Источники порогов: [wiki] — ardupilot.org, [код] — исходники ArduPilot, [наше] — эвристика, у ArduPilot числа нет.
+// Глобал страницы, без которого файл работает: decode_devid и DEVICE_TYPE_IMU (Libraries/DecodeDevID.js) — тип гироскопа
+// для «до/после фильтров» batch (check_gyro_sensor_rate); без них (под Node через require) тип не определить.
 
 const check_rules = {
     vibe_warn: 30,                  // м/с²: выше — возможны проблемы [wiki, Measuring Vibration]
     vibe_fail: 60,                  // м/с²: выше — почти наверняка проблемы [wiki, Measuring Vibration]
     hover_min_s: 30,                // с: минимальное висение для усреднения спектра [wiki, Initial tuning flight]
     hover_throttle_tolerance: 0.05, // допустимое расхождение MOT_THST_HOVER и среднего газа [наше]
+    // Пределы и время обучения газа висения — одни у MOT_THST_HOVER Copter и Q_M_THST_HOVER QuadPlane: тот же
+    // AP_MotorsMulticopter [код] ArduPlane/quadplane.cpp:17–19
     hover_learn_min: 0.125,         // нижний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MIN]
     hover_learn_max: 0.6875,        // верхний предел обучения MOT_THST_HOVER [код, AP_MotorsMulticopter.h AP_MOTORS_THST_HOVER_MAX]
     hover_learn_s: 30,              // с висения для обучения MOT_THST_HOVER: постоянная времени 10 с, ~95 % за 30 с [код, AP_MOTORS_THST_HOVER_TC]
@@ -13,6 +17,15 @@ const check_rules = {
     log_bitmask_imu_raw: 19,        // номер бита IMU_RAW [код, MASK_LOG_IMU_RAW]
     log_bitmask_attitude_fast: 0,   // номер бита ATTITUDE_FAST [код, MASK_LOG_ATTITUDE_FAST]; без него Copter пишет PIDx
                                     // и RATE с 10 Гц [код, ArduCopter/Copter.cpp ten_hz_logging_loop, rate_thread.cpp medium_logging_rate]
+    // ArduPlane (QuadPlane): PIQR/PIQP/PIQY пишутся вместе с ATT, пока работал регулятор VTOL; с частотой цикла — только при
+    // бите ATTITUDE_FULLRATE (номер — fullrate_bit профиля, core/vehicle.js), при ATTITUDE_FAST без него — 25 Гц, при одном
+    // ATTITUDE_MED — 10 Гц, без всех трёх не пишутся (фраза — check_plane_pid_rate_text); бита PID нет, бит 12 у Plane —
+    // CAMERA [код] ArduPlane/defines.h:102–121, Plane.cpp:269–312, Log.cpp:30–34, 59–65; [4.6.3] defines.h:109–126. RATE у
+    // QuadPlane пишется с частотой цикла без LOG_BITMASK [код] ArduPlane/quadplane.cpp:1812–1826
+    plane_log_bitmask_attitude_fast: 0,
+    plane_attitude_fast_hz: 25,
+    plane_log_bitmask_attitude_med: 1,
+    plane_attitude_med_hz: 10,
     pid_log_min_rate_hz: 100,       // Гц: ниже отклик на ступеньку шага 4 не считается [наше; шумовая оценка метода PIDReview —
                                     // до 25 Гц, дефект upstream 5]. То же, что PID_STEP_MIN_RATE в core/pid.js: этот файл
                                     // грузится раньше и под Node без него, равенство закреплено в tests/tunewizard-pid.test.cjs
@@ -27,44 +40,182 @@ const check_rules = {
     // фильтров (бит 3); бит IMU_RAW в LOG_BITMASK не нужен — он пишет raw всех гироскопов и акселерометров
     // [код] AP_InertialSensor/AP_InertialSensor_Backend.cpp:480–487, 489–492, 750–751. Подготовка — prep_rules.raw_hint
     gyro_raw_hint: 9,
+    // Выборку на частоте датчика (Sensor-Rate, бит 0 INS_LOG_BAT_OPT) включают только драйверы Invensense v1 и v2 — при
+    // быстрой выборке (INS_FAST_SAMPLE) и только по SPI [код] AP_InertialSensor/AP_InertialSensor_Invensense.cpp:889–922,
+    // AP_InertialSensor_Invensensev2.cpp:611–638 (других вызовов _set_gyro_sensor_rate_sampling_enabled нет); на
+    // остальных датчиках бит 0 batch не действует [код] BatchSampler.cpp:103–115. Типы устройств гироскопа этих драйверов —
+    // имена Libraries/DecodeDevID.js (decode_devid): Invensense — GYR_MPU6000 (и MPU6000, MPU6500, ICM20608), GYR_MPU9250,
+    // ICM20602, ICM20601, ICM20789, ICM20689 [код] AP_InertialSensor_Invensense.cpp:240–283; Invensensev2 — ICM20648,
+    // ICM20649, ICM20948 [код] AP_InertialSensor_Invensensev2.cpp:188–206. ICM42688, ICM45686 и другие Invensensev3, BMI088 и
+    // прочие — не включают. [лог] третий лог: ICM45686, при INS_LOG_BAT_OPT = 5 «после» — настоящее после фильтров
+    // (журнал, раздел 8)
+    gyro_sensor_rate_names: ["GYR_MPU6000", "GYR_MPU9250", "ICM20602", "ICM20601", "ICM20789", "ICM20689", "ICM20648", "ICM20649", "ICM20948"],
+    gyro_sensor_rate_bus: "SPI",
 }
 
-// info — из log_info (в том числе info.esc — сводка ESC-телеметрии), params — из log_params, vibe — из vibe_summary
-// (может быть null). Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }.
+// Имя параметра типа гироскопа экземпляра i (0…4): INS_GYR_ID, INS_GYR2_ID, INS_GYR3_ID, INS4_GYR_ID, INS5_GYR_ID —
+// первые три читает и подпись датчика шага 1 (load_gyro, core/gyro.js) [код] AP_InertialSensor.cpp (группы INS_, INS4_, INS5_)
+function check_gyro_id_param(i) {
+    return (i == 0) ? "INS_GYR_ID" : (i < 3) ? "INS_GYR" + (i + 1) + "_ID" : "INS" + (i + 1) + "_GYR_ID"
+}
+
+// Гироскопы batch и выборка на частоте датчика (бит 0 INS_LOG_BAT_OPT, check_rules.gyro_sensor_rate_*) →
+// { sensor_rate, other, unknown } — подписи гироскопов «ИМЯ (параметр)»: sensor_rate — драйвер включает выборку на
+// частоте датчика (Invensense v1/v2 по SPI), other — не включает, unknown — тип не определить (параметра типа нет, он не
+// число больше 0 или decode_devid недоступен). Гироскопы — экземпляры из INS_LOG_BAT_MASK (нет параметра — все пять, у
+// которых есть параметр типа); INS_GYR*_ID = 0 — гироскопа нет, экземпляр пропускается: ID каждого найденного гироскопа
+// прошивка записывает при запуске [код] AP_InertialSensor/AP_InertialSensor.cpp:747–779 (register_gyro), и маска 7 при
+// двух IMU не должна давать «тип не определить» (ревью задачи 5 этапа 9). Тип — по INS_GYR*_ID через decode_devid
+// (Libraries/DecodeDevID.js, глобал страницы; под Node без него — unknown), как подпись датчика шага 1. Тип вне таблицы
+// decode_devid («Unknown») — не Invensense v1/v2: их типы в таблице есть. У DroneCAN (шина 3) decode_devid кладёт в
+// devtype номер датчика (sensor_id), и имя по таблице типов ложное (например, «GYR_MPU6000») — подпись «DroneCAN», драйвер
+// не Invensense по SPI. На Invensense v1/v2 выборку на частоте датчика выключает ещё INS_FAST_SAMPLE без бита экземпляра —
+// не учитывается (бит — по номеру акселерометра, AP_InertialSensor_Backend.h:333–335): предупреждение тогда лишнее, но
+// безвредное [наше]
+function check_gyro_sensor_rate(params) {
+    const r = check_rules
+    const mask = params.get("INS_LOG_BAT_MASK")
+    const result = { sensor_rate: [], other: [], unknown: [] }
+    const decoder = (typeof decode_devid === "function") && (typeof DEVICE_TYPE_IMU !== "undefined")
+    for (let i = 0; i < 5; i++) {
+        const name = check_gyro_id_param(i)
+        const id = params.get(name)
+        if (((mask != null) ? ((mask & (1 << i)) === 0) : (id == null)) || (id === 0)) {
+            continue
+        }
+        if (!decoder || (id == null) || !(id > 0)) {
+            result.unknown.push(name)
+            continue
+        }
+        const decoded = decode_devid(id, DEVICE_TYPE_IMU)
+        const sensor_rate = (decoded.bus_type === r.gyro_sensor_rate_bus) && r.gyro_sensor_rate_names.includes(decoded.name)
+        // DroneCAN — без имени типа (оно ложное); тип вне таблицы — номером из ID
+        const type = (decoded.bus_type === "DRONECAN") ? "DroneCAN" : (decoded.name !== "Unknown") ? decoded.name : "тип 0x" + (id >> 16).toString(16)
+        result[sensor_rate ? "sensor_rate" : "other"].push(type + " (" + name + ")")
+    }
+    return result
+}
+
+// Частота PIQR/PIQP/PIQY (names — pid_messages профиля QuadPlane) без бита ATTITUDE_FULLRATE по LOG_BITMASK bitmask —
+// одна фраза для проверки шага 0 pid_log и правила подготовки log_fast (core/prep.js): при бите ATTITUDE_FAST — «… пишутся
+// с частотой 25 Гц (бит ATTITUDE_FAST, 0)», при одном ATTITUDE_MED — «… 10 Гц (только бит ATTITUDE_MED, 1)», без обоих —
+// «… не пишутся вовсе: в LOG_BITMASK нет ни ATTITUDE_FAST (0), ни ATTITUDE_MED (1)»; bitmask null или не число — все три
+// случая. PIQx пишет Log_Write_Attitude, а его зовут только update_logging25 (ATTITUDE_FAST без FULLRATE), update_logging10
+// (ATTITUDE_MED без более быстрых) и Log_Write_FullRate (FULLRATE) [код] ArduPlane/Plane.cpp:269–312, Log.cpp:30–34, 59–65
+function check_plane_pid_rate_text(names, bitmask) {
+    const r = check_rules
+    const fast = "с частотой " + r.plane_attitude_fast_hz + " Гц (бит ATTITUDE_FAST, " + r.plane_log_bitmask_attitude_fast + ")"
+    const med = r.plane_attitude_med_hz + " Гц (только бит ATTITUDE_MED, " + r.plane_log_bitmask_attitude_med + ")"
+    const none = "ни ATTITUDE_FAST (" + r.plane_log_bitmask_attitude_fast + "), ни ATTITUDE_MED (" + r.plane_log_bitmask_attitude_med + ")"
+    const head = names.join("/") + " "
+    if (!Number.isFinite(bitmask)) {
+        return head + "пишутся " + fast + " или " + med + ", а без обоих не пишутся вовсе"
+    }
+    if ((bitmask & (1 << r.plane_log_bitmask_attitude_fast)) !== 0) {
+        return head + "пишутся " + fast
+    }
+    if ((bitmask & (1 << r.plane_log_bitmask_attitude_med)) !== 0) {
+        return head + "пишутся с частотой " + med
+    }
+    return head + "не пишутся вовсе: в LOG_BITMASK нет " + none
+}
+
+// Batch с битами 0 (Sensor-Rate) и 2 (до и после) без бита 1 → { status: "ok" | "warn", reason } по гироскопам batch
+// (check_gyro_sensor_rate): есть гироскоп с выборкой на частоте датчика — warn, обе половины сырые; тип какого-то не
+// определить (или гироскопов batch нет — INS_LOG_BAT_MASK = 0) — warn с оговоркой «если датчик Invensense v1/v2»; все
+// известны и без неё — ok, бит 0 не действует. reason — продолжение фразы после «… вместе с битом 0 (Sensor-Rate) — »;
+// effect — чем это плохо (у шага 0 и у подготовки свои слова), конец reason при warn. Одно правило для pre_post шага 0 и
+// gyro_prepost подготовки (core/prep.js) [дизайн этапа 9, раздел 5: итог сверки задачи 2]
+function check_sensor_rate_prepost(params, effect) {
+    const g = check_gyro_sensor_rate(params)
+    if (g.sensor_rate.length > 0) {
+        return { status: "warn", reason: g.sensor_rate.join(", ") + " — Invensense v1/v2: драйвер включает выборку на частоте датчика (по SPI с быстрой " +
+            "выборкой), и обе половины batch — сырые, до фильтров: " + effect }
+    }
+    if ((g.unknown.length > 0) || (g.other.length === 0)) {
+        return { status: "warn", reason: "тип гироскопа не определить" + ((g.unknown.length > 0) ? " (" + g.unknown.join(", ") + ")" : "") +
+            ": если датчик Invensense v1/v2 (по SPI с быстрой выборкой), обе половины batch — сырые, до фильтров: " + effect }
+    }
+    return { status: "ok", reason: g.other.join(", ") + ": драйвер не включает выборку на частоте датчика — бит 0 не действует" }
+}
+
+// info — из log_info (в том числе info.esc — сводка ESC-телеметрии; info.profile — профиль аппарата core/vehicle.js,
+// null — вид не поддержан; info.tailsitter), params — из log_params, vibe — из vibe_summary (может быть null).
+// Возвращает список { id, status: "ok" | "warn" | "fail", title, text, fix }. Без профиля — «Аппарат» (СТОП) и проверки,
+// не зависящие от аппарата (данные гироскопа, до/после фильтров, трекинг, вибрации, clipping): сообщения PID, газ полёта и
+// газ висения неподдержанного аппарата судить не по чему (у Plane без QuadPlane PIDR — самолётные регуляторы, бит 12 —
+// CAMERA, CTUN.ThO — самолётный мотор)
 function run_checks(info, params, vibe) {
     const checks = []
     const add = (id, status, title, text, fix) => checks.push({ id, status, title, text, fix: fix ?? null })
     const m = info.messages
     const r = check_rules
+    const profile = info.profile ?? null
 
     // Аппарат
-    if (info.vehicle === "Copter") {
-        add("vehicle", "ok", "Аппарат", "Copter, " + (info.fw_string ?? "версия неизвестна") + (info.board ? ", " + info.board : ""))
+    if (profile != null) {
+        add("vehicle", "ok", "Аппарат", profile.title + (info.tailsitter ? " (tailsitter)" : "") + ", " + (info.fw_string ?? "версия неизвестна") + (info.board ? ", " + info.board : ""))
     } else {
-        add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает только Copter", "Загрузите лог ArduCopter")
+        add("vehicle", "fail", "Аппарат", "Лог от " + (info.vehicle ?? "неизвестного аппарата") + "; мастер поддерживает Copter и QuadPlane",
+            "Загрузите лог ArduCopter или ArduPlane с Q_ENABLE ≥ 1")
     }
 
     // Сообщения PID и их частота: ниже pid_log_min_rate_hz (с запасом pid_log_rate_margin) отклик на ступеньку шага 4
-    // не считается. Частота — того сообщения, по которому выбрана ветка: PIDR при messages.pid, иначе RATE
-    // (info.pid_log_rates; нет частоты — объявлено без отсчётов или старые сведения — проверки частоты нет)
-    const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
-    const rate_message = m.pid ? "PIDR" : (m.rate ? "RATE" : null)
+    // не считается. Частота — того сообщения, по которому выбрана ветка: первое сообщение PID профиля (PIDR, PIQR) при
+    // messages.pid, иначе RATE (info.pid_log_rates; нет частоты — объявлено без отсчётов или старые сведения — проверки
+    // частоты нет)
+    const pid_names = profile?.pid_messages ?? []
+    const rate_message = m.pid ? pid_names[0] : (m.rate ? "RATE" : null)
     const hz = (rate_message != null) ? (info.pid_log_rates?.[rate_message] ?? null) : null
     const slow = (hz != null) && (hz < r.pid_log_min_rate_hz * r.pid_log_rate_margin)
     // Частота словами — с отбрасыванием до десятых, без округления вверх: 98.97 — «98.9», а не «99»
     const hz_text = (hz == null) ? "" : String(Math.floor(hz * 10) / 10)
-    const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
-    const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
-    if (m.pid && slow) {
-        add("pid_log", "warn", "Сообщения PID", "PIDR/PIDP/PIDY есть, но " + slow_text,
-            "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
-    } else if (m.pid) {
-        add("pid_log", "ok", "Сообщения PID", "PIDR/PIDP/PIDY есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
-    } else if (m.rate) {
-        add("pid_log", "warn", "Сообщения PID", "Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила" + (slow ? "; " + slow_text : ""),
-            slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
-    } else {
-        add("pid_log", "fail", "Сообщения PID", "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
+    // Ветка — по виду, а не по признаку профиля (fullrate_bit == null): тексты ниже — про биты и сообщения Copter, и новый
+    // вид без fullrate_bit не должен получить их молча (ревью задачи 1 этапа 9)
+    if ((profile != null) && (profile.kind === "copter")) {
+        // Copter: PID с частотой цикла — биты PID и ATTITUDE_FAST; без PID и RATE шаг 4 недоступен
+        const pid_fix = "Включите бит PID (" + r.log_bitmask_pid + ") в LOG_BITMASK и перелетите"
+        const slow_text = slow ? rate_message + " пишется с частотой " + hz_text + " Гц — ниже " + r.pid_log_min_rate_hz + " Гц отклик на ступеньку на шаге 4 не считается" : ""
+        const fast_fix = "без него Copter пишет PID и RATE с частотой 10 Гц"
+        if (m.pid && slow) {
+            add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + slow_text,
+                "Включите бит ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix)
+        } else if (m.pid) {
+            add("pid_log", "ok", profile.pid_title, pid_names.join("/") + " есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + ": доступны компоненты P/I/D/FF, отфильтрованные цель и ошибка")
+        } else if (m.rate) {
+            add("pid_log", "warn", profile.pid_title, "Есть только RATE: по нему на шаге 4 нет компонент P/I/D, шума D и прогноза — только отклик и правила" + (slow ? "; " + slow_text : ""),
+                slow ? "Включите биты PID (" + r.log_bitmask_pid + ") и ATTITUDE_FAST (" + r.log_bitmask_attitude_fast + ") в LOG_BITMASK и перелетите: " + fast_fix : pid_fix)
+        } else {
+            add("pid_log", "fail", profile.pid_title, "Нет ни PID, ни RATE: шаг 4 недоступен", pid_fix)
+        }
+    } else if (profile != null) {
+        // QuadPlane: PID с частотой цикла пишет один бит fullrate_bit (ATTITUDE_FULLRATE), совета «бит 12» нет — у Plane это
+        // CAMERA (check_rules, plane_*). RATE не в счёт: он пишется всегда. Пока шага 4 у вида нет (profile.steps), проверка
+        // справочная — без СТОП, совет — для будущего шага 4 [решение пользователя 30.10.2026, дизайн этапа 9, раздел 4]
+        const step4 = profile.steps.includes(4)
+        const step4_note = step4 ? "" : "; шаг 4 для " + profile.title + " пока недоступен"
+        const bit = profile.fullrate_bit
+        const bitmask = params.get("LOG_BITMASK")
+        const bit_on = (b) => Number.isFinite(bitmask) && ((bitmask & (1 << b)) !== 0)
+        const fullrate_head = "Включите бит ATTITUDE_FULLRATE (" + bit + ") в LOG_BITMASK (+" + (1 << bit) + ") — " + (step4 ? "для шага 4" : "для будущего шага 4")
+        const fullrate_fix = fullrate_head + ": без него " + check_plane_pid_rate_text(pid_names, bitmask)
+        // PIQx пишет Log_Write_Attitude, только пока регулятор VTOL работал последние 100 мс [код] ArduPlane/Log.cpp:30,
+        // quadplane.cpp:2005–2022 (motors_output, last_att_control_ms): при включённом бите записи положения (ATTITUDE_FULLRATE,
+        // ATTITUDE_FAST или ATTITUDE_MED) их нет, если VTOL-регулятор не работал, — совет о частоте без бита 20 противоречил бы
+        // «нет» (ревью задачи 6 этапа 9)
+        const attitude_on = [bit, r.plane_log_bitmask_attitude_fast, r.plane_log_bitmask_attitude_med].some(bit_on)
+        if (m.pid && slow) {
+            add("pid_log", "warn", profile.pid_title, pid_names.join("/") + " есть, но " + rate_message + " пишется с частотой " + hz_text + " Гц — ниже " +
+                r.pid_log_min_rate_hz + " Гц отклик на ступеньку не считается" + step4_note, fullrate_fix)
+        } else if (m.pid) {
+            add("pid_log", "ok", profile.pid_title, pid_names.join("/") + " есть" + ((hz != null) ? " (" + hz_text + " Гц)" : "") + step4_note)
+        } else if (attitude_on) {
+            add("pid_log", "warn", profile.pid_title, "Сообщений " + pid_names.join("/") + " нет: они пишутся, только пока работает регулятор VTOL " +
+                "(бит записи положения в LOG_BITMASK включён)" + step4_note,
+                bit_on(bit) ? null : fullrate_head + ": с ним " + pid_names.join("/") + " пишутся с частотой цикла — тоже только при работающем регуляторе VTOL")
+        } else {
+            add("pid_log", "warn", profile.pid_title, "Сообщений " + pid_names.join("/") + " нет" + step4_note, fullrate_fix)
+        }
     }
 
     // Данные гироскопа. Совет — batch (gyro_batch_fix) или raw (gyro_raw_hint); нет INS_RAW_LOG_OPT (старая прошивка) —
@@ -101,7 +252,9 @@ function run_checks(info, params, vibe) {
         // - с битом 0 на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI с быстрой выборкой
         //   [код] AP_InertialSensor_Invensense.cpp:889–922, AP_InertialSensor_Invensensev2.cpp:611–638) batch берёт только
         //   сырые отсчёты — обе половины до фильтров [код] BatchSampler.cpp:103–115, AP_InertialSensor_Backend.cpp:503–508,
-        //   727–738; на остальных датчиках бит 0 не действует, и с битом 1 обе половины — после фильтров.
+        //   727–738; на остальных датчиках бит 0 не действует, и с битом 1 обе половины — после фильтров. Бит 0 с битом 2
+        //   без бита 1 — warn, только если такой датчик в batch есть или тип не определить (check_sensor_rate_prepost: тип —
+        //   по INS_GYR*_ID); на остальных — до и после, ok [дизайн этапа 9, раздел 5; лог ICM45686 — журнал, раздел 8].
         // Исправление одно — INS_LOG_BAT_OPT = 4 (gyro_batch_fix) и перезагрузка: флаги batch при смене параметра только
         // выставляются, не сбрасываются (BatchSampler.cpp:97–102) — снятый бит 1 действует после перезагрузки [наше, по
         // коду]. То же правило — gyro_prepost в core/prep.js
@@ -111,16 +264,25 @@ function run_checks(info, params, vibe) {
         const prepost = (opt & (1 << 2)) != 0
         const fix = "Запишите INS_LOG_BAT_OPT = " + r.gyro_batch_fix.INS_LOG_BAT_OPT + " (только бит 2 — до и после фильтров) и перезагрузите полётный контроллер"
         const fix_post = fix + ": флаг «после фильтров» сбрасывается только перезагрузкой"
-        if (prepost && (post || sensor_rate)) {
-            const others = [sensor_rate ? "битом 0 (Sensor-Rate)" : null, post ? "битом 1 (после фильтров)" : null].filter((t) => t != null)
+        const prepost_ok = "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными"
+        if (prepost && sensor_rate && !post) {
+            const rate = check_sensor_rate_prepost(params, "спектр «после фильтров» на шаге 1 на самом деле до фильтров")
+            if (rate.status === "warn") {
+                add("pre_post", "warn", "До/после фильтров", "Batch-лог с INS_LOG_BAT_OPT = " + opt + ": бит 2 (до и после) вместе с битом 0 (Sensor-Rate) — " + rate.reason, fix)
+            } else {
+                add("pre_post", "ok", "До/после фильтров", prepost_ok + "; бит 0 (Sensor-Rate) в INS_LOG_BAT_OPT = " + opt + " — " + rate.reason)
+            }
+        } else if (prepost && post) {
+            // С битом 1 — warn при любом датчике: на Invensense v1/v2 с битом 0 обе половины сырые, на остальных — обе после
+            // фильтров
+            const others = [sensor_rate ? "битом 0 (Sensor-Rate)" : null, "битом 1 (после фильтров)"].filter((t) => t != null)
             const reason = !sensor_rate ? "обе половины пишутся после фильтров: спектр «до фильтров» на шаге 1 на самом деле после фильтров"
-                : "на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины — сырые, до фильтров" +
-                  (post ? ", на остальных бит 1 даёт обе после фильтров: «до» и «после» на шаге 1 не различаются"
-                      : ": спектр «после фильтров» на шаге 1 на таких датчиках на самом деле до фильтров")
+                : "на датчиках с выборкой на частоте датчика (Invensense v1/v2 по SPI) обе половины — сырые, до фильтров, на остальных бит 1 даёт обе " +
+                  "после фильтров: «до» и «после» на шаге 1 не различаются"
             add("pre_post", "warn", "До/после фильтров", "Batch-лог с INS_LOG_BAT_OPT = " + opt + ": бит 2 (до и после) вместе с " + others.join(" и ") + " — " + reason,
-                post ? fix_post : fix)
+                fix_post)
         } else if (prepost) {
-            add("pre_post", "ok", "До/после фильтров", "Batch-лог до и после фильтров: оценку «станет» можно сверить с реальными данными")
+            add("pre_post", "ok", "До/после фильтров", prepost_ok)
         } else if (post) {
             add("pre_post", "warn", "До/после фильтров", "Batch-лог только после фильтров: спектра до фильтров и оценки «станет» не будет", fix_post)
         } else {
@@ -142,19 +304,44 @@ function run_checks(info, params, vibe) {
             "Если регуляторы умеют телеметрию или двунаправленный DShot — включите, это точнее")
     }
 
-    // Полёт
-    if (info.flight == null) {
-        if (info.throttle_source == null) {
-            add("flight", "fail", "Полёт", "Газ не определить: в логе нет CTUN и RATE")
+    // Полёт: окно log_flight (core/log.js) по газу профиля (profile.throttle — ряды по порядку), у QuadPlane — самое длинное
+    // окно участков VTOL-режимов (profile.vtol_modes), остальные называются («ещё VTOL»); в логе нет MODE — окно по газу за
+    // весь лог с предупреждением [решение пользователя 30.10.2026, дизайн этапа 9, раздел 4]
+    if (profile != null) {
+        const flight = info.flight
+        const vtol = profile.vtol_modes != null
+        const mode_names = (modes) => modes.map((n) => profile.modes[n] ?? ("режим " + n)).join(", ")
+        const span = (w) => w.start + "–" + w.end + " с"
+        if (flight == null) {
+            if (info.throttle_source == null) {
+                add("flight", "fail", "Полёт", "Газ не определить: в логе нет " + profile.throttle.map(([name]) => name).join(" и "))
+            } else if (!vtol) {
+                // Окно полёта схлопывается, если ненулевой газ короче отступов throttle_window
+                add("flight", "fail", "Полёт", "Ненулевого газа нет или он короче 3 с: полёта в логе нет")
+            } else if (m.mode) {
+                add("flight", "fail", "Полёт", "Участков VTOL-режимов (Q-режимов) с ненулевым газом дольше 3 с нет: VTOL-полёта в логе нет")
+            } else {
+                add("flight", "fail", "Полёт", "Ненулевого газа VTOL-моторов нет или он короче 3 с: VTOL-полёта в логе нет")
+            }
         } else {
-            // Окно полёта схлопывается, если ненулевой газ короче отступов throttle_window
-            add("flight", "fail", "Полёт", "Ненулевого газа нет или он короче 3 с: полёта в логе нет")
+            const where = vtol ? " (" + span(flight) + ((flight.modes != null) ? ", " + mode_names(flight.modes) : "") + ")" : ""
+            const others = (vtol && (flight.segments.length > 0))
+                ? "; ещё VTOL: " + flight.segments.map((s) => span(s) + " (" + mode_names(s.modes) + ")").join(", ") : ""
+            const text = profile.flight_title + " " + Math.round(flight.duration_s) + " с" + where
+            const mean_text = (flight.mean_throttle != null) ? ", средний газ " + flight.mean_throttle.toFixed(2) : ""
+            // Окно VTOL без MODE взято по газу: оговорка — и у короткого окна (ревью задачи 1 этапа 9)
+            const no_mode = vtol && (flight.modes == null)
+            if (flight.duration_s < r.hover_min_s) {
+                add("flight", "warn", "Полёт", text + ": мало для усреднения спектра" + others +
+                    (no_mode ? "; в логе нет MODE — в окно мог попасть самолётный полёт; проверьте интервал по графику" : ""),
+                    "Висение не меньше " + r.hover_min_s + " с без ввода")
+            } else if (no_mode) {
+                add("flight", "warn", "Полёт", text + mean_text + ": в логе нет MODE — окно взято по газу, в него мог попасть самолётный полёт",
+                    "Проверьте окно по графику полёта и при необходимости задайте интервал вручную")
+            } else {
+                add("flight", "ok", "Полёт", text + mean_text + others)
+            }
         }
-    } else if (info.flight.duration_s < r.hover_min_s) {
-        add("flight", "warn", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с: мало для усреднения спектра", "Висение не меньше " + r.hover_min_s + " с без ввода")
-    } else {
-        const mean_text = (info.flight.mean_throttle != null) ? ", средний газ " + info.flight.mean_throttle.toFixed(2) : ""
-        add("flight", "ok", "Полёт", "Полёт с газом " + Math.round(info.flight.duration_s) + " с" + mean_text)
     }
 
     // Вибрации
@@ -181,26 +368,33 @@ function run_checks(info, params, vibe) {
         }
     }
 
-    // Газ висения против MOT_THST_HOVER. Расхождение считается не к самому среднему газу, а к тому значению,
-    // которое обучение вообще может дать: ArduPilot зажимает MOT_THST_HOVER в пределах hover_learn_min…hover_learn_max
-    const hover = params.get("MOT_THST_HOVER")
+    // Газ висения против <mot>THST_HOVER (MOT_ у Copter, Q_M_ у QuadPlane — тот же AP_MotorsMulticopter; средний газ — окна
+    // полёта, у QuadPlane — VTOL-окна). Расхождение считается не к самому среднему газу, а к тому значению, которое обучение
+    // вообще может дать: ArduPilot зажимает THST_HOVER в пределах hover_learn_min…hover_learn_max. Где газ висения учится —
+    // profile.hover_learn_modes (у QuadPlane — только с регулятором высоты: не в QSTABILIZE и QACRO, profile.hover_learn_note)
+    const hover_name = (profile != null) ? profile.mot + "THST_HOVER" : null
+    const hover = (hover_name != null) ? params.get(hover_name) : null
     const mean = info.flight?.mean_throttle ?? null
     if ((hover != null) && (mean != null)) {
+        const learn_name = profile.mot + "HOVER_LEARN"
         const target = Math.min(Math.max(mean, r.hover_learn_min), r.hover_learn_max)
         const diff = Math.abs(hover - target)
         // Пояснение, почему значение не совпадёт с газом даже после обучения — в обеих ветках
         const limit_note = (mean < r.hover_learn_min)
             ? " (обучение ограничено снизу значением " + r.hover_learn_min + " — для очень мощного аппарата это нормально)"
             : ""
-        let text = "MOT_THST_HOVER " + hover.toFixed(2) + ", средний газ в полёте " + mean.toFixed(2)
+        let text = hover_name + " " + hover.toFixed(2) + ", " + profile.hover_throttle_text + " " + mean.toFixed(2)
         if (diff > r.hover_throttle_tolerance) {
-            const learning = params.get("MOT_HOVER_LEARN") == 2
+            const learning = params.get(learn_name) == 2
+            const modes = profile.hover_learn_modes
+            const note = (profile.hover_learn_note != null) ? ": " + profile.hover_learn_note : ""
             text += ": расхождение " + diff.toFixed(2) + limit_note
             if (learning) {
-                text += " (обучение включено: большое расхождение значит, что висения в AltHold было мало)"
+                text += " (обучение включено: большое расхождение значит, что висения в " + modes + " было мало)"
             }
-            add("hover_throttle", "warn", "Газ висения", text,
-                learning ? "Повисите не меньше " + r.hover_learn_s + " с в AltHold, чтобы значение обучилось" : "MOT_HOVER_LEARN = 2 (обучение с сохранением)")
+            add("hover_throttle", "warn", "Газ висения", text, learning
+                ? "Повисите не меньше " + r.hover_learn_s + " с в " + modes + ", чтобы значение обучилось" + note
+                : learn_name + " = 2 (обучение с сохранением)" + ((note != "") ? " и висение не меньше " + r.hover_learn_s + " с в " + modes + note : ""))
         } else {
             add("hover_throttle", "ok", "Газ висения", text + limit_note)
         }
@@ -220,5 +414,5 @@ function checks_summary(checks) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { check_rules, run_checks, checks_summary }
+    module.exports = { check_rules, check_gyro_id_param, check_gyro_sensor_rate, check_plane_pid_rate_text, check_sensor_rate_prepost, run_checks, checks_summary }
 }

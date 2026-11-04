@@ -47,9 +47,10 @@ globalThis.step4_param_names = () => Object.values(pidtune_axes).flatMap((axis) 
 
 // В порядке index.html: core/summary.js и то, что ему нужно (Param_Helpers.js, filters.js, pid.js и pidtune.js,
 // params.js), lowpass.js (ему при загрузке — candidates.js), core/passmem.js (passmem_depends4_names — список имён,
-// от которых зависит шаг 4, у страницы и памяти один), затем общий модуль шагов
-for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js', 'TuneWizard/core/lowpass.js',
-                    'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
+// от которых зависит шаг 4, у страницы и памяти один), затем общий модуль шагов; core/vehicle.js — профили аппаратов
+// (lowpass.js и описания параметров Q_A_* в step_find_metadata)
+for (const file of ['Libraries/Param_Helpers.js', 'TuneWizard/core/vehicle.js', 'TuneWizard/core/filters.js', 'TuneWizard/core/candidates.js',
+                    'TuneWizard/core/lowpass.js', 'TuneWizard/core/pid.js', 'TuneWizard/core/pidtune.js', 'TuneWizard/core/params.js', 'TuneWizard/core/summary.js',
                     'TuneWizard/core/passmem.js', 'TuneWizard/steps/common.js']) {
     const full = path.join(repo, file)
     vm.runInThisContext(fs.readFileSync(full, 'utf8'), { filename: full })

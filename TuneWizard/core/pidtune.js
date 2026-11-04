@@ -37,9 +37,9 @@
 // (тестовый полёт) — до 0.2 пункта и 0.6°, при редких манёврах и сильной турбулентности — до 2.9 пункта и 3°.
 //
 // Нужны глобалы страницы: FFTJS (modules/fft.js), Libraries/fft.js (hanning), Libraries/Array_Math.js (exp_jw,
-// complex_inverse, complex_square), US2S (core/log.js), find_start_index и find_end_index (core/gyro.js), load_filters
-// и filter_transfer (core/filters.js), candidate_key (core/candidates.js), pid_lowpass_response (core/lowpass.js),
-// PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN (core/pid.js).
+// complex_inverse, complex_square), log_mode_segments (core/log.js), find_start_index и find_end_index
+// (core/gyro.js), load_filters и filter_transfer (core/filters.js), candidate_key (core/candidates.js),
+// pid_lowpass_response (core/lowpass.js), PID_STEP_MIN_RATE и PID_STEP_RATE_MARGIN (core/pid.js).
 
 const pidtune_rules = {
     target_min_dps: 20,           // окно — |цель·Ханн| не меньше 20 °/с [PIDReview, redraw_step]
@@ -758,48 +758,11 @@ function pidtune_param_values(params, name, range) {
     return values
 }
 
-// Участки режимов полёта в интервале range = [t0, t1] по сообщениям MODE (поле Mode): действующий на t0 (последний
-// MODE не позже t0) — с t0, каждый MODE внутри (t0 < t < t1) открывает новый участок, последний — до t1; подряд один
-// и тот же режим (повторная запись ACRO) — один участок. Режим до первого MODE неизвестен — участка нет. MODE ровно
-// на t1 участка не даёт: его длительность в интервале нулевая (и кнопка «Интервал — участок ACRO» шага 4 ставит
-// конец интервала на целую секунду не позже смены режима). → [{ mode (номер), start, end (с) }] по времени; [] — нет MODE
+// Участки режимов полёта в интервале range = [t0, t1] по сообщениям MODE → [{ mode (номер), start, end (с) }] по времени;
+// [] — нет MODE. Обёртка: функция перенесена в core/log.js (log_mode_segments — там описание), окно VTOL шага 0 берёт её
+// без ядра шага 4
 function pidtune_mode_segments(log, range) {
-    if ((log == null) || !("MODE" in log.messageTypes)) {
-        return []
-    }
-    const time = log.get("MODE", "TimeUS")
-    const mode = log.get("MODE", "Mode")
-    if ((time == null) || (mode == null)) {
-        return []
-    }
-    let current = null
-    const inner = []
-    for (let i = 0; i < time.length; i++) {
-        const t = time[i] * US2S
-        if (t <= range[0]) {
-            current = mode[i]
-        } else if (t < range[1]) {
-            inner.push([mode[i], t])
-        }
-    }
-    const segments = []
-    const open = (m, t) => {
-        const last = segments[segments.length - 1]
-        if (last != null) {
-            if (last.mode == m) {
-                return
-            }
-            last.end = t
-        }
-        segments.push({ mode: m, start: t, end: range[1] })
-    }
-    if (current != null) {
-        open(current, range[0])
-    }
-    for (const [m, t] of inner) {
-        open(m, t)
-    }
-    return segments
+    return log_mode_segments(log, range)
 }
 
 // Номера режимов полёта в интервале range (pidtune_mode_segments): без повторов, в порядке появления. [] — нет MODE

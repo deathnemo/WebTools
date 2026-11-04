@@ -26,15 +26,16 @@ function spec_trace_index(s, t, a) {
 }
 
 // Значения параметров фильтров из лога; отсутствующих в логе — умолчания формы FilterReview (reset, FR 461–483,
-// и поля INS_GYRO_FILTER = 20, SCHED_LOOP_RATE = 400 в его index.html). ESCMSK обнуляется, если его нет у аппарата
-// (escmsk_present: не записан в лог и версия фильтра ниже 4) — FilterReview (update_hidden_params) смотрит только на
-// версию, а мастер ещё и на запись в логе: тем же правилом живут форма, файл и варианты шага 2, notch-база шага 3 и
-// память прохода. 8-битная HMNCS (hmncs_bits) — без знака, как её читает parameter_get_value в FilterReview:
-// int8 −128 (гармоника 8) → 128, иначе load_filters включил бы гармоники 8–16
+// и поля INS_GYRO_FILTER = 20, SCHED_LOOP_RATE = 400 в его index.html), кроме SCHED_LOOP_RATE аппарата: его заводское —
+// из профиля (loop_rate_default, core/vehicle.js: у QuadPlane 300; без профиля — 400, как FilterReview). ESCMSK
+// обнуляется, если его нет у аппарата (escmsk_present: не записан в лог и версия фильтра ниже 4) — FilterReview
+// (update_hidden_params) смотрит только на версию, а мастер ещё и на запись в логе: тем же правилом живут форма, файл и
+// варианты шага 2, notch-база шага 3 и память прохода. 8-битная HMNCS (hmncs_bits) — без знака, как её читает
+// parameter_get_value в FilterReview: int8 −128 (гармоника 8) → 128, иначе load_filters включил бы гармоники 8–16
 function values_from_log() {
     const values = {
         INS_GYRO_FILTER: state.params.get("INS_GYRO_FILTER") ?? 20,
-        SCHED_LOOP_RATE: state.params.get("SCHED_LOOP_RATE") ?? 400,
+        SCHED_LOOP_RATE: state.params.get("SCHED_LOOP_RATE") ?? state.profile?.loop_rate_default ?? 400,
     }
     const defaults = { FREQ: 80, BW: 40, ATT: 40, HMNCS: 3, MODE: 1, FM_RAT: 1 }
     const with_escmsk = escmsk_present(state.params, state.env.filter_version)
@@ -194,7 +195,7 @@ function step1_reset() {
     step1.error = null
     step1.fft_warnings = []
     // Поле «Окон на пакет» — только для batch-лога, до загрузки лога скрыто (аудит, M9)
-    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note", "spec_wpb_hint", "spec_batch_field", "spec_sg_note"]) {
+    for (const id of ["verdict1", "warnings1", "peaks1", "peaks1_note", "spec_raw_note", "spec_wpb_hint", "spec_batch_field", "spec_sg_note", "spec_axes_note"]) {
         document.getElementById(id).hidden = true
     }
     document.getElementById("spec_info").textContent = ""
@@ -539,11 +540,29 @@ function step1_prepare() {
     return step1_ready()
 }
 
+// Заметка об осях под средним спектром: у tailsitter регулятор VTOL работает в виде, повёрнутом на 90° по тангажу, и
+// оси гироскопа (платы) — не крен и тангаж VTOL (vehicle_gyro_axes, core/vehicle.js; дизайн этапа 9, раздел 2) →
+// «Tailsitter: ось Z гироскопа — крен VTOL, Y — тангаж, X — рыскание (со знаком минус).»; не tailsitter — null
+function step1_axes_note() {
+    if (!(state.info?.tailsitter ?? false)) {
+        return null
+    }
+    const axes = vehicle_gyro_axes(state.profile, state.params)
+    const names = { roll: "крен VTOL", pitch: "тангаж", yaw: "рыскание" }
+    const parts = ["roll", "pitch", "yaw"].map((key, i) =>
+        ((i == 0) ? "ось " + axes[key].toUpperCase() + " гироскопа" : axes[key].toUpperCase()) + " — " + names[key] +
+        ((axes.sign[key] < 0) ? " (со знаком минус)" : ""))
+    return "Tailsitter: " + parts.join(", ") + "."
+}
+
 // Посчитать недостающее и перерисовать всё
 function compute_and_redraw_step1() {
     step1_prepare()
     fill_step1_panel()
     fill_step1_info()
+    const axes_note = document.getElementById("spec_axes_note")
+    axes_note.textContent = step1_axes_note() ?? ""
+    axes_note.hidden = axes_note.textContent === ""
     redraw_step1()
 }
 
