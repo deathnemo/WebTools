@@ -264,6 +264,8 @@ function summary_lower_first(text) {
 //   берёт их из принятого шага 4 или из посчитанного: совет нужен и тогда, когда менять нечего и «Принять» на шаге 4
 //   не нажимали [наше];
 // - test_flight — совет тестового полёта (step4_test_flight_short);
+// - axis_advice — совет по осям { roll, pitch, yaw: строка | null } (step4_axis_advice; нет или null у оси — общий
+//   test_flight);
 // - available — шаги мастера, доступные аппарату (profile.steps: у QuadPlane без шага 4); нет (null, undefined) — все,
 //   как у Copter.
 // Пункты:
@@ -279,8 +281,9 @@ function summary_lower_first(text) {
 //    summary_notch_enable_hint;
 // 5. "reboot" — изменённые строки из reboot_names, одним пунктом в порядке строк; reboot_names null, а изменённые
 //    есть — общий пункт: после записи перезагрузить полётный контроллер — так надёжнее [наше];
-// 6. "test_flight" — есть оси из unreliable_axes: «Оси — test_flight», оси — pidtune_axes[ось].title через запятую
-//    в порядке pidtune_axes, первая с заглавной;
+// 6. "test_flight" — есть оси из unreliable_axes: «Оси — совет», совет — axis_advice[ось] или test_flight; оси с одним
+//    советом — одним пунктом, группы по порядку pidtune_axes, оси — pidtune_axes[ось].title через запятую, первая с
+//    заглавной;
 // 7. "repeat" — последним, только если есть изменённые строки: слетать тем же профилем и загрузить лог; шаги, которые
 //    покажут, сбылся ли прогноз, — те из 2–4, что доступны аппарату (summary_steps_text: у Copter «шаги 2–4», у
 //    QuadPlane «шаги 2–3» — дизайн этапа 9, раздел 8). Без изменений проверять нечего, и список может быть пустым [наше]
@@ -335,9 +338,20 @@ function summary_refly(ctx) {
     }
 
     const axes = Object.keys(pidtune_axes).filter((axis) => (ctx.unreliable_axes ?? []).includes(axis))
-    if (axes.length > 0) {
-        const titles = axes.map((axis) => pidtune_axes[axis].title).join(", ")
-        add("test_flight", titles[0].toUpperCase() + titles.slice(1) + " — " + ctx.test_flight)
+    // Оси с одним и тем же советом — один пункт; группы — по порядку первой оси [дизайн этапа 10, раздел 3.6]
+    const groups = []
+    for (const axis of axes) {
+        const advice = ctx.axis_advice?.[axis] ?? ctx.test_flight
+        const group = groups.find((g) => g.advice === advice)
+        if (group != null) {
+            group.axes.push(axis)
+        } else {
+            groups.push({ advice: advice, axes: [axis] })
+        }
+    }
+    for (const group of groups) {
+        const titles = group.axes.map((axis) => pidtune_axes[axis].title).join(", ")
+        add("test_flight", titles[0].toUpperCase() + titles.slice(1) + " — " + group.advice)
     }
 
     if (changed.length > 0) {

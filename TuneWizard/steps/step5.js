@@ -49,10 +49,15 @@ function step5_axes_titles(axes) {
 }
 
 // Оси шага 4 без надёжного измерения словами: «оси шага 4 без надёжного измерения: крен, тангаж — нужен тестовый
-// полёт» (одна ось — «ось шага 4 …»)
-function step5_unreliable_text(axes) {
+// полёт» (одна ось — «ось шага 4 …»); rate_only — лог «Rate Loop Only», тестового полёта не нужно: «— см. советы по осям»
+function step5_unreliable_text(axes, rate_only = false) {
     return ((axes.length == 1) ? "ось шага 4 без надёжного измерения: " : "оси шага 4 без надёжного измерения: ") +
-        step5_axes_titles(axes) + " — нужен тестовый полёт"
+        step5_axes_titles(axes) + (rate_only ? " — см. советы по осям" : " — нужен тестовый полёт")
+}
+
+// Все ли оси из axes посчитаны на логе «Rate Loop Only» при актуальном расчёте шага 4 (axes не пусто)
+function step5_rate_only(axes) {
+    return (axes.length > 0) && step4_ready() && !step4_stale() && axes.every((axis) => step4.calc[axis]?.mode?.rate_only === true)
 }
 
 // ---------- Данные сводки ----------
@@ -356,7 +361,7 @@ function step5_render_heads() {
 // готово или «совпадает с логом». summary — summary_rows(…), bits — размер маски HMNCS контекста
 function step5_render_verdict(summary, bits, changed, accepted, stale, unreliable) {
     if ((accepted.length == 0) || (state.profile == null)) {
-        const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable)) + " (ниже)." : ""
+        const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable, step5_rate_only(unreliable))) + " (ниже)." : ""
         step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов " + step5_steps_range() + " не принят." + tail)
         return
     }
@@ -387,7 +392,7 @@ function step5_render_verdict(summary, bits, changed, accepted, stale, unreliabl
         issues.push("у шага 4 отметки прогноза: " + step5_axes_titles(flagged4))
     }
     if (unreliable.length > 0) {
-        issues.push(step5_unreliable_text(unreliable))
+        issues.push(step5_unreliable_text(unreliable, step5_rate_only(unreliable)))
     }
     const count = step_plural(changed.length, step5_param_forms)
     if (issues.length > 0) {
@@ -456,6 +461,17 @@ function step5_render_changes(rows, conflicts) {
     details.hidden = unchanged.length == 0
 }
 
+// Совет по каждой оси из axes (step4_axis_advice) при актуальном расчёте шага 4, иначе {}
+function step5_axis_advice(axes) {
+    const advice = {}
+    if (step4_ready() && !step4_stale()) {
+        for (const axis of axes) {
+            advice[axis] = step4_axis_advice(axis)
+        }
+    }
+    return advice
+}
+
 // «Что перелететь» (summary_refly): пустой список — блок скрыт вместе с заголовком
 function step5_render_refly(rows, unreliable) {
     const items = summary_refly({
@@ -466,6 +482,8 @@ function step5_render_refly(rows, unreliable) {
         reboot_names: step5_reboot_names(rows),
         unreliable_axes: unreliable,
         test_flight: step4_test_flight_short,
+        // Советы по осям шага 4 (на логе «Rate Loop Only» — сколько ещё манёвров); расчёт устарел — общий test_flight
+        axis_advice: step5_axis_advice(unreliable),
         // Шаги, доступные аппарату (у QuadPlane без шага 4): пункт «повторить проход»; вид не поддержан — все
         available: state.profile?.steps ?? null,
     })
