@@ -435,8 +435,8 @@ function pidtune_rng(seed) {
 }
 
 // Устойчивый разброс: половина размаха между 16-м и 84-м процентилями (у нормального — СКО). Процентиль — линейная
-// интерполяция по позиции q·(n − 1) отсортированных значений; нечисловые и бесконечные пропускаются [наше: у пика по
-// 32 суррогатам СКО гуляет от зерна в 2 раза, раздел 3.1 дизайна этапа 10]. → число | NaN (меньше двух конечных)
+// интерполяция по позиции q·(n − 1) отсортированных значений; нечисловые и бесконечные пропускаются [наше: довод — выбросы
+// суррогатов не раздувают оценку; от зерна она гуляет так же, как СКО (в 1.4–1.75 раза), раздел 11.3 дизайна этапа 10]. → число | NaN (меньше двух конечных)
 function pidtune_spread(values) {
     const v = values.filter((x) => (typeof x === "number") && Number.isFinite(x)).sort((a, b) => a - b)
     if (v.length < 2) {
@@ -645,7 +645,7 @@ function pidtune_noise_margins(noise, c_log, rate_hz, rules = pidtune_rules) {
 }
 
 // Порог размаха колебаний на плато: max(osc_min_pp, osc_sigma_k × σ отклика quality.noise.sigma_step) — колебание
-// не больше трёх σ неотличимо от шума КИХ [наше, раздел 3.4 дизайна этапа 10]. Без noise — osc_min_pp. Страница передаёт
+// не больше osc_sigma_k (4) σ неотличимо от шума КИХ [наше, раздел 3.4 дизайна этапа 10]. Без noise — osc_min_pp. Страница передаёт
 // его в pidtune_step_metrics как rules.osc_min_pp
 function pidtune_osc_min_pp(quality, rules = pidtune_rules) {
     const sigma = quality?.noise?.sigma_step
@@ -746,7 +746,8 @@ function pidtune_coherence(segments, rate_hz, freq_hz, rules = pidtune_rules) {
 //       выше порога — режим или объект менялись в интервале, или данных мало. Порог — halves_rms_max, а в Acro «Rate Loop
 //       Only» (options.rate_only) — max(halves_rms_max, halves_ratio_max × шум (б) лога), шум — среднее (б) суррогатов
 //       (pidtune_noise): при настоящем шуме (б) без смены объекта выше 0.035, а смену K ×0.6 / ×1.5 это отношение ловит
-//       [синтетика, лог4, раздел 3.2 дизайна этапа 10]. Шум не посчитался (нет суррогатов) — (б) не пройдена: отказ при сомнении;
+//       на синтетике REAL_NOISE (с остатком модели как у настоящего лога; на шуме лога 4 — только грубую смену, раздел 11.2
+//       дизайна этапа 10). Шум не посчитался (нет суррогатов) — (б) не пройдена: отказ при сомнении;
 //   (в) outer — наибольшее |T_H1| («цель → факт» по усреднённым спектрам отобранных окон) на outer_band_hz; выше
 //       порога — цель формирует угловой контур из факта (Acro без Rate Loop Only при ATC_RATE_FF_ENAB = 0).
 //       В Acro «Rate Loop Only» (options.rate_only, pidtune_log_mode) не применяется: угловой контур там выключен
@@ -1331,7 +1332,7 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         return keep(d_skipped)
     }
     if (os < rules.overshoot_low_pct - margin) {
-        return pidtune_change_p(gains, axis, 1, os_text(rules.overshoot_low_pct) + " меньше " + rules.overshoot_low_pct + " %" + margin_text + ", колебаний нет — отклик вялый, запас есть → P +" +
+        return pidtune_change_p(gains, axis, 1, os_text(rules.overshoot_low_pct) + ((noisy && (metrics.peak < 1)) ? " — меньше " : " меньше ") + rules.overshoot_low_pct + " %" + margin_text + ", колебаний нет — отклик вялый, запас есть → P +" +
                                 Math.round(rules.gain_step * 100) + " %", rules)
     }
     if ((os < rules.overshoot_low_pct + margin) || (os > rules.overshoot_high_pct - margin)) {

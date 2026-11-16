@@ -2067,6 +2067,23 @@ test('pidtune_quality, Rate Loop Only, реальный шум, объект K �
     }
 })
 
+test('pidtune_quality, Rate Loop Only: исход не зависит от зерна суррогатов 1–5 (раздел 6 дизайна) — реальный шум: (б) и (г) пройдены; K ×0.6: (б) нет; TOO_NOISY: (г) нет', () => {
+    // Полёты считаются один раз (noise_flight), зерно 1 — готовое качество, остальные зёрна — только pidtune_quality
+    const cases = [
+        { what: 'REAL_NOISE без смены', flight: noise_flight(REAL_NOISE, 3), check: (q) => [q.checks.halves.ok === true, q.checks.precision.ok === true] },
+        { what: 'REAL_NOISE, K ×0.6 с середины', flight: noise_flight(REAL_NOISE, 3, 0.6), check: (q) => [q.checks.halves.ok === false] },
+        { what: 'TOO_NOISY', flight: noise_flight(TOO_NOISY, 3), check: (q) => [q.checks.precision.ok === false] },
+    ]
+    for (const { what, flight, check } of cases) {
+        for (const seed of [1, 2, 3, 4, 5]) {
+            const q = (seed == 1) ? flight.rate_only
+                : pidtune_quality(flight.seg.segments, flight.seg.rate_hz, flight.fir, { rate_only: true, seed })
+            assert.ok(check(q).every(Boolean), what + ', зерно суррогатов ' + seed + ': (б) ' + q.checks.halves.value + ' при шуме ' + q.checks.halves.noise +
+                      ', (г) ' + q.checks.precision.value)
+        }
+    }
+})
+
 test('pidtune_quality, Rate Loop Only, малый шум (синтетика тестов, 150 с): нижняя граница — limit 0.035, (б) и (г) пройдены', () => {
     const m = rate_only_flight(PLANT_NORMAL)
     const q = m.quality
@@ -2169,6 +2186,26 @@ test('pidtune_osc_min_pp: max(osc_min_pp, osc_sigma_k·σ); без шума — 
     assert.equal(pidtune_osc_min_pp({ noise: { sigma_step: NaN } }), pidtune_rules.osc_min_pp)
 })
 
+test('pidtune_step_metrics с порогом pidtune_osc_min_pp: колебания размахом ниже 4σ не находятся, выше — находятся', () => {
+    // σ отклика 0.05 → порог размаха max(0.08, 4 × 0.05) = 0.2
+    const limit = pidtune_osc_min_pp({ noise: { sigma_step: 0.05 } })
+    close_to(limit, 0.2, 1e-12, 'порог')
+    for (const [a, expect_osc] of [[0.08, false], [0.15, true]]) {
+        const f = (t) => 1 - Math.exp(-t / 0.02) + ((t >= 0.15) ? a * Math.sin(2 * Math.PI * 30 * (t - 0.15)) : 0)
+        const { time, y } = sampled(f)
+        const m = pidtune_step_metrics(time, y, { ...pidtune_rules, osc_min_pp: limit })
+        if (expect_osc) {
+            assert.ok(m.osc != null, 'размах ' + 2 * a + ' выше порога ' + limit + ': колебания должны найтись')
+            close_to(m.osc.amplitude_pp, 2 * a, 0.01, 'размах')
+        } else {
+            assert.equal(m.osc, null, 'размах ' + 2 * a + ' ниже порога ' + limit)
+        }
+    }
+    // С прежним порогом 0.08 колебания размахом 0.16 находятся: порог от σ их и отсекает
+    const weak = sampled((t) => 1 - Math.exp(-t / 0.02) + ((t >= 0.15) ? 0.08 * Math.sin(2 * Math.PI * 30 * (t - 0.15)) : 0))
+    assert.ok(pidtune_step_metrics(weak.time, weak.y).osc != null)
+})
+
 test('pidtune_rule с шумом: выше 20 + σ — P −10 %, ниже 5 − σ — P +10 %, между — менять нечего, у порогов — на границе', () => {
     const q = (sp) => ({ ok: true, precise: true, checks: {}, reasons: [], noise: { sigma: { peak: sp } } })
     const b = pidtune_rule(ROLL, 'roll', metrics_of(20.8), 10, q(0.018))
@@ -2183,14 +2220,14 @@ test('pidtune_rule с шумом: выше 20 + σ — P −10 %, ниже 5 −
     const low = pidtune_rule(ROLL, 'roll', metrics_of(6), 10, q(0.018))
     assert.deepEqual([low.change, low.borderline], [null, 5])
     assert.ok(low.reason.includes('на границе 5 %'), low.reason)
-    // Пики сразу внутри запаса: 18.5 (до 20 − σ = 18.2 не доходит) — менять нечего, 21.5 (меньше 20 + σ = 21.8) — на границе
+    // Пики сразу внутри запаса: 18 (до 20 − σ = 18.2 не доходит) — менять нечего, 21.5 (меньше 20 + σ = 21.8) — на границе
     assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(18), 10, q(0.018)).borderline, null)
     assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(21.5), 10, q(0.018)).borderline, 20)
     // Пик 0.916 ± 0.086: перерегулирования нет, ниже 5 − 8.6 → P +10 %
     const sluggish = pidtune_rule(ROLL, 'roll', { ...metrics_of(0), peak: 0.916 }, 10, q(0.086))
     assert.equal(sluggish.change, 'P+')
     assert.equal(sluggish.borderline, null)
-    assert.ok(sluggish.reason.startsWith('перерегулирования нет (пик 0.916 ± 0.086)'), sluggish.reason)
+    assert.ok(sluggish.reason.startsWith('перерегулирования нет (пик 0.916 ± 0.086) — меньше 5 % с запасом 1σ, колебаний нет — отклик вялый, запас есть → P +10 %'), sluggish.reason)
     // Пик 0.916 при σ 0.15 (запас 15 п. накрывает −8.4 %) — «на границе 5 %», текст про пик
     const edge = pidtune_rule(ROLL, 'roll', { ...metrics_of(0), peak: 0.916 }, 10, q(0.15))
     assert.deepEqual([edge.change, edge.borderline], [null, 5])

@@ -249,7 +249,7 @@ function summary_lower_first(text) {
 }
 
 // «Что перелететь»: пункты [{ source, text }] по порядку, каждый текст — фраза с точкой (summary_period)
-// [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight }:
+// [решение пользователя 25.10.2026]. ctx = { checks, prep, rows, reboot_names, unreliable_axes, test_flight, axis_advice, available }:
 // - checks — проверки шага 0 (state.checks: { id, status, title, fix }; null — проверок нет);
 // - prep — подготовка к следующему полёту, всё готовое от страницы (prep0_summary(); ядро prep_* не зовёт): null — нет
 //   (нет источника параметров, отказ подготовки — вид не поддержан или файл и лог разных видов, блок подготовки не

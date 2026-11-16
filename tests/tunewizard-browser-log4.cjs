@@ -1,7 +1,8 @@
 // Прогон мастера настройки на четвёртом логе — настоящем тестовом полёте Acro «Rate Loop Only» (ArduCopter 4.7.2, ACRO 289–370 с,
 // интервал по умолчанию 282–370 с захватывает соседний режим). Проверяется шаг 4 этапа 10: на интервале по умолчанию режимы
 // смешаны — «ненадёжно (б)» у всех осей без «±» и строки (г), кнопка «Интервал — участок ACRO»; на участке ACRO — крен и
-// тангаж «надёжно» с запасом 1σ у правил (оба «на границе 20 %», крен — у границы по зерну суррогатов), рыскание — «мало
+// тангаж «надёжно» с запасом 1σ у правил (тангаж — «на границе 20 %», у крена допустимы оба исхода: «на границе 20 %» или
+// «менять нечего» — по зерну суррогатов), рыскание — «мало
 // точности (г)» с советом «ещё ≈ N с»; плитки с «±», строка (г) в таблице качества, пометка раннего отклика у «Нарастания»
 // крена, сводка и шаг 5 без «нужен тестовый полёт». Отдельный скрипт, чтобы не удлинять основной прогон
 // (tests/tunewizard-browser.cjs).
@@ -61,7 +62,7 @@ function read4(page) {
             const c = step4.calc[axis]
             const p = c.quality?.checks?.precision ?? null
             return { status: c.status, change: c.rule?.change ?? null, borderline: c.rule?.borderline ?? null, noise: c.quality?.noise != null,
-                     need_s: p?.need_s ?? null, applied: p?.applied ?? null, halves_null: c.quality?.checks?.halves?.value == null }
+                     need_s: p?.need_s ?? null, applied: p?.applied ?? null, halves_null: c.quality?.noise?.halves_null ?? null, sigma_step: c.quality?.noise?.sigma_step ?? null }
         }
         return {
             calc: Object.fromEntries(['roll', 'pitch', 'yaw'].map((axis) => [axis, calc(axis)])),
@@ -177,8 +178,12 @@ async function main() {
         await page.waitForFunction(() => (step4.calc != null) && (step4.calc !== window.__calc_before) && (step4.calc.yaw?.status != null) &&
                                          (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
         const again = await read4(page)
-        assert.deepEqual([again.calc.yaw.need_s, again.calc.roll.halves_null, again.calc.pitch.halves_null, again.calc.yaw.halves_null],
-                         [need, a4.calc.roll.halves_null, a4.calc.pitch.halves_null, a4.calc.yaw.halves_null], 'повторный расчёт даёт те же числа')
+        assert.equal(again.calc.yaw.need_s, need, 'повторный расчёт: ещё N с')
+        for (const axis of axes) {
+            assert.ok(Number.isFinite(a4.calc[axis].halves_null) && Number.isFinite(a4.calc[axis].sigma_step), axis + ': шум (б) и σ отклика посчитаны: ' + JSON.stringify(a4.calc[axis]))
+            assert.equal(again.calc[axis].halves_null, a4.calc[axis].halves_null, axis + ': повторный расчёт — шум (б) тот же')
+            assert.equal(again.calc[axis].sigma_step, a4.calc[axis].sigma_step, axis + ': повторный расчёт — σ отклика та же')
+        }
 
         // Шаг 5 на участке ACRO, ничего не принято: вердикт «см. советы по осям», в списке — совет по рысканию
         await page.click('#wizbar button:nth-child(6)')
@@ -204,6 +209,14 @@ async function main() {
             assert.ok(!Object.values(t.tiles).some(([v]) => v.includes(' ± ')), axis + ': «±» нет')
             assert.ok(!t.quality.some((title) => title.includes('(г)')), axis + ': строки (г) нет')
         }
+
+        // Шаг 5 на интервале по умолчанию: вердикт и список «Что перелететь» не расходятся — советы по осям, а не «нужен тестовый полёт»
+        await page.click('#wizbar button:nth-child(6)')
+        const back5 = await page.evaluate(() => ({ verdict: document.getElementById('verdict5').textContent,
+                                                    refly: [...document.querySelectorAll('#refly5 li')].map((li) => li.textContent) }))
+        assert.match(back5.verdict, /см\. советы по осям/, back5.verdict)
+        assert.ok(!/нужен тестовый полёт/.test(back5.verdict), 'в вердикте шага 5 нет «нужен тестовый полёт»: ' + back5.verdict)
+        assert.ok(back5.refly.some((t) => t.includes('сузьте интервал анализа до участка ACRO (289–370 с)')), 'в списке — сузить интервал: ' + back5.refly.join(' | '))
 
         assert.deepEqual(problems, [], 'ошибки консоли')
         console.log('tunewizard-browser-log4: шаги 0, 1, 4, 5 пройдены на ' + path.basename(log_path) + ' (' + info.board + ', ' + info.fw + '); шаг 4 на ACRO 289–370 с: ' + line4 +

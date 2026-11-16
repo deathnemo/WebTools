@@ -12,7 +12,8 @@
 // вариантов — с FLTE/FLTD, принятыми на шаге 3 (иначе лога); notch шага 2 и INS_GYRO_FILTER шага 3 входят в прогноз
 // поправкой pidtune_gyro_ratio (нужен расчёт шага 1; без данных гироскопа — без поправки, с пометкой в вердикте).
 // На оси без надёжного измерения (проверки качества, мало манёвров, редкий лог) правил и прогноза нет: в таблице —
-// только «Как в логе» и «Свой», вердикт советует тестовый полёт (решение пользователя 25.10.2026).
+// только «Как в логе» и «Свой», вердикт советует тестовый полёт (решение пользователя 25.10.2026); на логе «Rate Loop Only» —
+// что именно не хватает по оси (step4_axis_advice: сколько ещё манёвров), а не тестовый полёт.
 // Графики оси открытой вкладки и выбранной строки (задача 8 плана): отклик на ступеньку (измеренный КИХ, прогноз
 // выбранного варианта, отклик PIDReview для сравнения), цель и факт во времени, спектр D-составляющей и выхода, бодэ
 // разомкнутого контура L (только при достоверном прогнозе) — раздел «Графики».
@@ -137,7 +138,7 @@ function step4_acro_hint(capital = false) {
         return null
     }
     const text = "лог тестового полёта: сузьте интервал анализа до участка ACRO (" + interval.start + "–" + interval.end + " с) — кнопка " +
-        "«Интервал — участок ACRO» под сводкой шага"
+        "«Интервал — участок ACRO» под сводкой шага 4"
     return capital ? text[0].toUpperCase() + text.slice(1) : text
 }
 
@@ -1215,11 +1216,11 @@ function step4_axis_advice(axis) {
     switch (res.status) {
         case "imprecise":
         case "little": {
-            // Сколько ещё секунд — по погрешности (г); нет её — до min_data_s с округлением вверх до кратного 5 с
-            let need = res.quality?.checks?.precision?.need_s
-            if (!(need > 0)) {
-                need = Math.max(5, Math.ceil((pidtune_rules.min_data_s - (res.seg?.data_s ?? 0)) / 5 - 1e-9) * 5)
-            }
+            // Сколько ещё секунд: наибольшее из нужного по погрешности (г) (need_s суррогатов; у «little» они тоже считаются) и
+            // остатка до min_data_s, каждое — вверх до кратного 5 с, не меньше 5
+            const up5 = (seconds) => Math.ceil(seconds / 5 - 1e-9) * 5
+            const need_precision = res.quality?.checks?.precision?.need_s
+            const need = Math.max(5, (need_precision > 0) ? up5(need_precision) : 0, up5(pidtune_rules.min_data_s - (res.seg?.data_s ?? 0)))
             return "ещё ≈ " + need + " с резких манёвров по " + dat + " в Acro «Rate Loop Only»" + ((axis === "yaw") ? ", полными отклонениями стика" : "")
         }
         case "unreliable":
@@ -1228,6 +1229,16 @@ function step4_axis_advice(axis) {
                 : "ещё резких манёвров по " + dat + " в Acro «Rate Loop Only»: отклик держится на регуляризации"
     }
     return null
+}
+
+// Перерегулирование оси с шумом (Rate Loop Only) для сводки: «5.3 ± 1.2 %»; пик меньше 1 — «перерегулирования нет
+// (пик 0.987 ± 0.012)» (отрицательного процента нет). Знак минус — «−» (U+2212). Требует res.quality.noise
+function step4_overshoot_text(res) {
+    const sigma = res.quality.noise.sigma.peak
+    if (res.metrics.peak < 1) {
+        return "перерегулирования нет (пик " + res.metrics.peak.toFixed(3) + " ± " + sigma.toFixed(3) + ")"
+    }
+    return ((res.metrics.peak - 1) * 100).toFixed(1) + " ± " + (sigma * 100).toFixed(1) + " %"
 }
 
 // Короткое состояние оси для вкладки и сводки: { text, cls: "bad" | "warn" | "ok", reason, all } — у оси без правил
@@ -1379,11 +1390,11 @@ function step4_render_summary() {
             status = "warn"
             continue
         }
-        // Rate Loop Only, у порога в пределах запаса 1σ: решения по правилам нет — сравнить варианты по прогнозу, лететь не нужно
+        // Rate Loop Only, у порога в пределах запаса 1σ: решения по правилам нет — сравнить варианты по прогнозу, лететь не
+        // нужно; прогноз недостоверен — сравнивать не по чему, остаются значения лога
         if ((res.rule.borderline != null) && (res.quality.noise != null)) {
-            const os = (res.metrics.peak - 1) * 100
-            parts.push(name + " — на границе " + res.rule.borderline + " % (" + os.toFixed(1) + " ± " + (res.quality.noise.sigma.peak * 100).toFixed(1) +
-                       " %), сравните варианты по прогнозу")
+            parts.push(name + " — на границе " + res.rule.borderline + " % (" + step4_overshoot_text(res) + "), " +
+                       (res.predict_ok ? "сравните варианты по прогнозу" : "прогноз недостоверен — оставьте значения лога"))
             status = "warn"
             continue
         }
@@ -1601,11 +1612,13 @@ function step4_render_axis_verdict() {
             if (rule.change != null) {
                 parts.push("Предлагается «По правилам»: " + step4_changes_text(axis, rule.values) + " — " + rule.reason + ".")
             } else {
-                parts.push("По правилам: " + rule.reason + ".")
+                // «На границе» без достоверного прогноза: хвост «сравните варианты по прогнозу» не нужен — сравнивать не по чему
+                const rule_reason = ((rule.borderline != null) && !res.predict_ok) ? rule.reason.replace(/, сравните варианты по прогнозу$/, "") : rule.reason
+                parts.push("По правилам: " + rule_reason + ".")
             }
             if (!res.predict_ok) {
                 warn()
-                parts.push("Прогноз недостоверен: " + res.validity.reasons.join("; ") + " — остаются только правила.")
+                parts.push("Прогноз недостоверен: " + res.validity.reasons.join("; ") + ((rule.borderline != null) ? " — по правилам решения нет, оставьте значения лога." : " — остаются только правила."))
             } else if (recommended != null) {
                 parts.push("Прогноз «" + recommended.title + "»: " + step4_prediction_text(recommended, res.pred_log) + ".")
                 if (recommended.flags?.flagged) {
@@ -1777,12 +1790,14 @@ function step4_render_metrics() {
         "нарастание 10–90 % смещено" : null
     const rise_text = Number.isFinite(m?.rise_s) ? step4_with_sigma((m.rise_s * 1000).toFixed(1), (sigma?.rise_s ?? NaN) * 1000, 1) + " мс" : "—"
     tiles.push(step_tile("Нарастание 10–90 %", rise_text, unreliable ?? early_text ?? (Number.isFinite(m?.bandwidth_hz) ? "полоса ≈ " + m.bandwidth_hz.toFixed(1) + " Гц" : null), null))
-    tiles.push(step_tile("Перерегулирование", Number.isFinite(m?.overshoot_pct) ? step4_with_sigma(m.overshoot_pct.toFixed(1), (sigma?.peak ?? NaN) * 100, 1) + " %" : "—",
-                         unreliable ?? "от 1", null))
+    // Пик меньше 1 с шумом: перерегулирования нет — «0 %» и пик с погрешностью (а не 0 ± σ %, которое читается как «возможно есть»)
+    const no_overshoot = Number.isFinite(m?.peak) && (m.peak < 1) && Number.isFinite(sigma?.peak)
+    tiles.push(step_tile("Перерегулирование", Number.isFinite(m?.overshoot_pct) ? (no_overshoot ? "0 %" : step4_with_sigma(m.overshoot_pct.toFixed(1), (sigma?.peak ?? NaN) * 100, 1) + " %") : "—",
+                         unreliable ?? (no_overshoot ? "перерегулирования нет: пик " + m.peak.toFixed(3) + " ± " + sigma.peak.toFixed(3) : "от 1"), null))
     tiles.push(step_tile("Плато " + rules.plateau_s.join("–") + " с", step4_with_sigma(step4_fixed(m?.plateau, 3), sigma?.plateau, 3), unreliable ?? "среднее отклика", null))
     tiles.push(step_tile("Установление ±" + Math.round(rules.settle_band * 100) + " %", (m == null) ? "—" : ((m.settle_s != null) ? step4_ms(m.settle_s) : "не установился"),
                          unreliable ?? "от плато", null))
-    const osc_sub = (m?.osc != null) ? "размах " + m.osc.amplitude_pp.toFixed(2) : "порог размаха " + rules.osc_min_pp
+    const osc_sub = (m?.osc != null) ? "размах " + m.osc.amplitude_pp.toFixed(2) : "порог размаха " + pidtune_osc_min_pp(res.quality).toFixed(2)
     tiles.push(step_tile("Колебания на плато", (m == null) ? "—" : ((m.osc != null) ? m.osc.freq_hz.toFixed(1) + " Гц" : "нет"),
                          (unreliable != null) ? unreliable + ", " + osc_sub : osc_sub, null))
     // Шум D — только по окнам интервала (step4_d_noise_in): без них плитка «—», а не число из окна за интервалом

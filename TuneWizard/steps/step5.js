@@ -13,7 +13,7 @@
 // steps/common.js (step_summary_context, step_accepted_stale, step_tile, step_verdict, step_value_text, step_signed,
 // step_plural, step_try, step_metadata, step_metadata_failed, step_load_metadata, step_find_metadata), steps/step2.js
 // (step2_flagged, step2_accepted_flags_text), steps/step3.js (step3_summary_text, step3_flagged, step3_flags_text),
-// steps/step4.js (step4, step4_axis_list, step4_ready, step4_stale, step4_fixed, step4_test_flight_short) и
+// steps/step4.js (step4, step4_axis_list, step4_axis_advice, step4_ready, step4_stale, step4_fixed, step4_test_flight_short) и
 // steps/memory.js (memory_save). Все они нужны только при вызове.
 
 // Внутреннее состояние шага
@@ -49,15 +49,19 @@ function step5_axes_titles(axes) {
 }
 
 // Оси шага 4 без надёжного измерения словами: «оси шага 4 без надёжного измерения: крен, тангаж — нужен тестовый
-// полёт» (одна ось — «ось шага 4 …»); rate_only — лог «Rate Loop Only», тестового полёта не нужно: «— см. советы по осям»
-function step5_unreliable_text(axes, rate_only = false) {
+// полёт» (одна ось — «ось шага 4 …»); advice — у оси есть совет шага 4, тестовый полёт не нужен: «— см. советы по осям»
+function step5_unreliable_text(axes, advice = false) {
     return ((axes.length == 1) ? "ось шага 4 без надёжного измерения: " : "оси шага 4 без надёжного измерения: ") +
-        step5_axes_titles(axes) + (rate_only ? " — см. советы по осям" : " — нужен тестовый полёт")
+        step5_axes_titles(axes) + (advice ? " — см. советы по осям" : " — нужен тестовый полёт")
 }
 
-// Все ли оси из axes посчитаны на логе «Rate Loop Only» при актуальном расчёте шага 4 (axes не пусто)
-function step5_rate_only(axes) {
-    return (axes.length > 0) && step4_ready() && !step4_stale() && axes.every((axis) => step4.calc[axis]?.mode?.rate_only === true)
+// Есть ли у оси из axes конкретный совет шага 4 (step5_axis_advice): строка, не равная общему тестовому полёту
+// (step4_test_flight_short). Тогда вердикт отсылает к списку «Что перелететь» — «— см. советы по осям», иначе — «нужен
+// тестовый полёт». Так хвост вердикта и список советов не расходятся (лог «Rate Loop Only», широкий интервал лога
+// тестового полёта). axes не пусто; расчёт шага 4 устарел или не открывался — советов нет, false
+function step5_has_advice(axes) {
+    const advice = step5_axis_advice(axes)
+    return axes.some((axis) => (typeof advice[axis] === "string") && (advice[axis] !== step4_test_flight_short))
 }
 
 // ---------- Данные сводки ----------
@@ -361,7 +365,7 @@ function step5_render_heads() {
 // готово или «совпадает с логом». summary — summary_rows(…), bits — размер маски HMNCS контекста
 function step5_render_verdict(summary, bits, changed, accepted, stale, unreliable) {
     if ((accepted.length == 0) || (state.profile == null)) {
-        const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable, step5_rate_only(unreliable))) + " (ниже)." : ""
+        const tail = (unreliable.length > 0) ? " " + step5_capital(step5_unreliable_text(unreliable, step5_has_advice(unreliable))) + " (ниже)." : ""
         step_verdict("verdict5", "warn", "Менять нечего: ни один из шагов " + step5_steps_range() + " не принят." + tail)
         return
     }
@@ -392,7 +396,7 @@ function step5_render_verdict(summary, bits, changed, accepted, stale, unreliabl
         issues.push("у шага 4 отметки прогноза: " + step5_axes_titles(flagged4))
     }
     if (unreliable.length > 0) {
-        issues.push(step5_unreliable_text(unreliable, step5_rate_only(unreliable)))
+        issues.push(step5_unreliable_text(unreliable, step5_has_advice(unreliable)))
     }
     const count = step_plural(changed.length, step5_param_forms)
     if (issues.length > 0) {
