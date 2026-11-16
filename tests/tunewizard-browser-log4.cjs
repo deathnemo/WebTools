@@ -168,11 +168,14 @@ async function main() {
         const line4 = JSON.stringify(Object.fromEntries(axes.map((axis) => [axis, a4.calc[axis].status])))
 
         // Повторный расчёт — те же числа (зёрна суррогатов фиксированы)
+        // Запоминаем прежний объект расчёта и ждём новый: иначе ожидание оверлея могло бы завершиться сразу и сравнить расчёт с самим собой
         await page.evaluate(() => {
+            window.__calc_before = step4.calc
             step4.key = null
             step4_show()
         })
-        await wait_overlay(page)
+        await page.waitForFunction(() => (step4.calc != null) && (step4.calc !== window.__calc_before) && (step4.calc.yaw?.status != null) &&
+                                         (document.getElementById('loading').style.visibility === 'hidden'), null, { timeout: 180000 })
         const again = await read4(page)
         assert.deepEqual([again.calc.yaw.need_s, again.calc.roll.halves_null, again.calc.pitch.halves_null, again.calc.yaw.halves_null],
                          [need, a4.calc.roll.halves_null, a4.calc.pitch.halves_null, a4.calc.yaw.halves_null], 'повторный расчёт даёт те же числа')
