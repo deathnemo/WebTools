@@ -1272,7 +1272,9 @@ async function main() {
                 }
                 quality.checks.ridge.ok = true
                 quality.checks.halves.ok = true
-                return { ...quality, ok: true, reasons: [] }
+                // Этап 10: подмена проверяет варианты и прогноз без шума суррогатов — (г) не применяется
+                quality.checks.precision = { value: null, ok: null, applied: false, need_s: null, reason: null }
+                return { ...quality, ok: true, precise: true, noise: null, reasons: [] }
             }
             step4.key = null
             step4_show()
