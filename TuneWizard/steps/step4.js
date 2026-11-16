@@ -1261,6 +1261,11 @@ function step4_axis_state(axis) {
     const change = { "P+": "P +", "P-": "P −", "D-": "D −" }[res.rule.change]
     let text = (change != null) ? change + Math.round(pidtune_rules.gain_step * 100) + " %" : "без изменений"
     let cls = "ok"
+    // Rate Loop Only, у порога в пределах запаса 1σ: правил нет, варианты сравнивают по прогнозу
+    if (res.rule.borderline != null) {
+        text = "на границе " + res.rule.borderline + " %"
+        cls = "warn"
+    }
     const recommended = step4_rows(axis).find((r) => r.id === step4_recommended_id(axis))
     if (!res.predict_ok) {
         text += " · без прогноза"
@@ -1588,6 +1593,9 @@ function step4_render_axis_verdict() {
             rate_note()
             mixed_note()
             const rule = res.rule
+            if (rule.borderline != null) {
+                warn()
+            }
             const recommended_id = step4_recommended_id(axis)
             const recommended = step4_rows(axis).find((r) => r.id === recommended_id) ?? null
             if (rule.change != null) {

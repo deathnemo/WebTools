@@ -430,6 +430,8 @@ test('Этап 10: «Rate Loop Only» — зерно оси, «±» в плит�
     step4_render_metrics()
     assert.ok(element('metrics4').innerHTML.includes(' ± '), element('metrics4').innerHTML)
     assert.ok(element('metrics4').innerHTML.includes('Rate Loop Only: (а), (б), (г)'), element('metrics4').innerHTML)
+    step4_render_axis_verdict()
+    assert.ok(element('axis_verdict4').textContent.includes('Лог тестового полёта Acro «Rate Loop Only»: угловой контур выключен устройством режима, погрешность «±» — по шуму этого лога.'), element('axis_verdict4').textContent)
     step4_render_quality()
     const tbody = element('quality4').querySelector('tbody').innerHTML
     assert.ok(tbody.includes('(г) точность отклика'), tbody)
@@ -514,9 +516,14 @@ test('Этап 10: на границе — сводка «тангаж — на 
     const pitch = clone_axis('pitch')
     pitch.metrics = { ...roll.metrics, peak: 1.208, overshoot_pct: 20.8 }
     pitch.quality.noise.sigma.peak = 0.018
-    pitch.rule = { ...roll.rule, change: null, borderline: 20, reason: 'на границе 20 %' }
+    pitch.rule = { ...roll.rule, change: null, borderline: 20, reason: 'перерегулирование 20.8 ± 1.8 % — на границе 20 %: по правилам решения нет, сравните варианты по прогнозу' }
     step4_render_summary()
     assert.ok(element('verdict4').textContent.includes('тангаж — на границе 20 % (20.8 ± 1.8 %), сравните варианты по прогнозу'), element('verdict4').textContent)
+    assert.deepEqual(step4_axis_state('pitch'), { text: 'на границе 20 %' + (pitch.predict_ok ? '' : ' · без прогноза'), cls: 'warn', reason: null, all: null })
+    step4.axis = 'pitch'
+    step4_render_axis_verdict()
+    assert.ok(element('axis_verdict4').textContent.includes('на границе 20 %: по правилам решения нет, сравните варианты по прогнозу'), element('axis_verdict4').textContent)
+    assert.equal(element('axis_verdict4').className, 'verdict verdict--warn')
 })
 
 test('Этап 10: не «Rate Loop Only» — без (г) и «±», совет тестового полёта с «около минуты резких отклонений стиков на каждую ось»', () => {
