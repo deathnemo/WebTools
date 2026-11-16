@@ -62,7 +62,9 @@ const step4_edits = step_edit_controller(step4, { delay_ms: step4_edit_delay_ms,
 
 // Оси шага по порядку вкладок; названия — именительный и родительный падежи
 const step4_axis_list = ["roll", "pitch", "yaw"]
-const step4_axis_names = { roll: { nom: "Крен", gen: "крена" }, pitch: { nom: "Тангаж", gen: "тангажа" }, yaw: { nom: "Рыскание", gen: "рыскания" } }
+// и дательный (совет «по крену»)
+const step4_axis_names = { roll: { nom: "Крен", gen: "крена", dat: "крену" }, pitch: { nom: "Тангаж", gen: "тангажа", dat: "тангажу" },
+                           yaw: { nom: "Рыскание", gen: "рыскания", dat: "рысканию" } }
 // Индекс оси в load_pid().axes: PIDR/PIDP/PIDY; RATE R/P/Y — на 3 дальше
 const step4_pid_index = { roll: 0, pitch: 1, yaw: 2 }
 // Коэффициенты шага у оси
@@ -70,8 +72,9 @@ const step4_gain_keys = ["P", "I", "D"]
 // Компоненты, по которым шагу нужен FFT (pid_run_batch_fft): Tar и Act — отклик PIDReview на графике (pid_step_response),
 // D — шум D и спектр, Out — спектр выхода; P, I, FF, DFF, Err шагу не нужны (их спектры — в PIDReview) [аудит области D, M-8]
 const step4_fft_keys = ["Tar", "Act", "D", "Out"]
-// Проверки качества по буквам дизайна
-const step4_check_letters = { ridge: "(а)", halves: "(б)", outer: "(в)" }
+// Проверки качества по буквам дизайна; (г) — точность отклика, только в Rate Loop Only и вне «ненадёжно» (отдельный статус
+// "imprecise"), поэтому step4_failed_checks её не перечисляет
+const step4_check_letters = { ridge: "(а)", halves: "(б)", outer: "(в)", precision: "(г)" }
 // Лучший неотмеченный вариант: перерегулирования, отличающиеся от лучшего не больше чем на столько пунктов, считаются
 // равными (step4_best_unflagged) [наше, решение координатора по ревью задачи 7]
 const step4_best_tie_pct = 0.5
@@ -81,10 +84,10 @@ const step4_best_tie_pct = 0.5
 // (mode_acro.cpp, get_pilot_desired_rates_rads) [аудит области D]
 const step4_test_flight = "Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only» (значение 2, или 3 вместе с Air-mode) и " +
     "ACRO_TRAINER = 0 — угловой контур выключен, цель — прямая команда пилота (тренер при ACRO_TRAINER ≠ 0 подмешивал бы в неё " +
-    "выравнивание по углу); 2–3 минуты резких отклонений стиков по каждой оси; в LOG_BITMASK включены ATTITUDE_FAST и PID. Такой лог " +
-    "мастер считает точно."
+    "выравнивание по углу); около минуты резких отклонений стиков на каждую ось, рыскание — полными отклонениями стика; в LOG_BITMASK " +
+    "включены ATTITUDE_FAST и PID. По такому логу мастер измеряет сам контур скорости."
 const step4_test_flight_short = "нужен тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only» (2, или 3 с Air-mode) и ACRO_TRAINER = 0, " +
-    "2–3 минуты резких отклонений стиков по каждой оси, в LOG_BITMASK — ATTITUDE_FAST и PID"
+    "около минуты резких отклонений стиков на каждую ось, в LOG_BITMASK — ATTITUDE_FAST и PID"
 
 // ---------- Подписи ----------
 
@@ -169,7 +172,7 @@ function step4_failed_checks(quality) {
     if (checks == null) {
         return []
     }
-    return Object.keys(step4_check_letters).filter((k) => (checks[k].applied !== false) && !checks[k].ok).map((k) => step4_check_letters[k])
+    return Object.keys(step4_check_letters).filter((k) => (k !== "precision") && (checks[k].applied !== false) && !checks[k].ok).map((k) => step4_check_letters[k])
 }
 
 // ---------- Инициализация и сброс ----------
@@ -728,7 +731,8 @@ function step4_batch_rate(source, set_index) {
 // считает step4_compute (после поправки фильтров гироскопа).
 // status — почему нет правил, по порядку отказов (раздел 3 дизайна, pidtune_rule): "low_rate" (лог PID реже 99 Гц —
 // и когда отрезков нет вовсе), "nodata" (нет данных оси или набора), "missing" (P или I нет в логе), "little" (мало
-// манёвров), "noresp" (нет отклика), "unreliable" (проверки качества не пройдены), "ok" — правила есть.
+// манёвров), "noresp" (нет отклика), "unreliable" (проверки качества не пройдены), "imprecise" (только Rate Loop Only: (а), (б)
+// пройдены, а точности отклика (г) не хватает), "ok" — правила есть.
 // "noresp" — раньше "unreliable", не как в pidtune_rule (там «ненадёжно» раньше «нет отклика»): без КИХ проверки
 // качества не считаются и pidtune_quality даёт ok false с причиной «нет отклика», — «измерение ненадёжно» было бы
 // неправдой, а совет тестового полёта не помог бы (КИХ не решился на тех же данных)
@@ -738,7 +742,7 @@ function step4_compute_axis(axis, range, ctx) {
         fltt: null, slew: null, seg: null, rate_hz: null, mode: null, fir: null, quality: null, metrics: null, d_noise: null, rule: null,
         status: "nodata", cc: null, grid: null, c_log: null, pred_log: null, coherence: null, validity: null, predict_ok: false,
         loop_rate: ctx.loop_rate, ratio: null, ratio_note: null, candidates: null, predictions: null, flags: null, custom: null,
-        pidreview: null,
+        pidreview: null, pred_sigma: null,
     }
     const source = res.source
     if (source != null) {
@@ -764,8 +768,9 @@ function step4_compute_axis(axis, range, ctx) {
     res.rate_hz = res.seg?.rate_hz ?? step4_batch_rate(source, res.set_index)
     res.mode = pidtune_log_mode(state.log, state.params, state.version, range, axis, res.rate_hz)
     res.fir = (res.seg != null) ? pidtune_fir(res.seg.segments, res.seg.rate_hz) : null
-    res.quality = pidtune_quality(res.seg?.segments ?? [], res.rate_hz, res.fir, { rate_only: res.mode.rate_only })
-    res.metrics = (res.fir != null) ? pidtune_step_metrics(res.fir.time, res.fir.step) : null
+    res.quality = pidtune_quality(res.seg?.segments ?? [], res.rate_hz, res.fir,
+                                 { rate_only: res.mode.rate_only, seed: step4_pid_index[axis] + 1 })
+    res.metrics = (res.fir != null) ? pidtune_step_metrics(res.fir.time, res.fir.step, { ...pidtune_rules, osc_min_pp: pidtune_osc_min_pp(res.quality) }) : null
     res.d_noise = pidtune_d_noise(source, res.set_index, range)
     // Отклик PIDReview для графика — здесь, под оверлеем расчёта, а не при первом показе оси (≈ 0.2 с на ось)
     res.pidreview = stepresp4_pidreview(res)
@@ -783,6 +788,8 @@ function step4_compute_axis(axis, range, ctx) {
         res.status = "noresp"
     } else if (!res.quality.ok) {
         res.status = "unreliable"
+    } else if (res.quality.precise === false) {
+        res.status = "imprecise"
     } else {
         res.status = "ok"
     }
@@ -800,6 +807,10 @@ function step4_compute_axis(axis, range, ctx) {
     res.coherence = pidtune_coherence(res.seg.segments, res.rate_hz, res.pred_log?.crossover_hz)
     res.validity = pidtune_validity(res.quality, res.cc, res.coherence)
     res.predict_ok = res.validity.valid
+    // Разброс среза и запаса фазы лога по суррогатам (только Rate Loop Only: есть quality.noise)
+    if (res.predict_ok && (res.quality.noise != null)) {
+        res.pred_sigma = pidtune_noise_margins(res.quality.noise, res.c_log, res.rate_hz)
+    }
     return res
 }
 
@@ -1189,6 +1200,36 @@ function step4_redraw_all() {
     step4_render_axis()
 }
 
+// Совет оси без правил (сводка шага 4 и шага 5): строчными, без точки; null — совета нет (ось с правилами, или вердикт сам
+// говорит, что делать: нет данных, редкий лог, нет коэффициента; в Rate Loop Only и нет отклика). Не в Rate Loop Only — тестовый полёт или
+// сужение интервала до участка ACRO (как раньше); в Rate Loop Only — сколько ещё манёвров по оси и какие
+function step4_axis_advice(axis) {
+    const res = step4.calc[axis]
+    if (["ok", "nodata", "low_rate", "missing"].includes(res.status)) {
+        return null
+    }
+    if (!res.mode?.rate_only) {
+        return step4_acro_hint() ?? step4_test_flight_short
+    }
+    const dat = step4_axis_names[axis].dat
+    switch (res.status) {
+        case "imprecise":
+        case "little": {
+            // Сколько ещё секунд — по погрешности (г); нет её — до min_data_s с округлением вверх до кратного 5 с
+            let need = res.quality?.checks?.precision?.need_s
+            if (!(need > 0)) {
+                need = Math.max(5, Math.ceil((pidtune_rules.min_data_s - (res.seg?.data_s ?? 0)) / 5 - 1e-9) * 5)
+            }
+            return "ещё ≈ " + need + " с резких манёвров по " + dat + " в Acro «Rate Loop Only»" + ((axis === "yaw") ? ", полными отклонениями стика" : "")
+        }
+        case "unreliable":
+            return (res.quality?.checks?.halves?.ok === false)
+                ? "отклик менялся по ходу полёта: сузьте интервал к однородному участку или слетайте ещё раз в тех же условиях (газ, батарея)"
+                : "ещё резких манёвров по " + dat + " в Acro «Rate Loop Only»: отклик держится на регуляризации"
+    }
+    return null
+}
+
 // Короткое состояние оси для вкладки и сводки: { text, cls: "bad" | "warn" | "ok", reason, all } — у оси без правил
 // reason — причина словами для сводки, all — она же фразой «на всех осях» (сводка, если причина у осей одна)
 function step4_axis_state(axis) {
@@ -1207,6 +1248,9 @@ function step4_axis_state(axis) {
             return { text: "мало манёвров", cls: "warn", reason: "мало манёвров", all: "Мало манёвров на всех осях" }
         case "noresp":
             return { text: "нет отклика", cls: "bad", reason: "нет отклика", all: "Нет отклика на всех осях" }
+        case "imprecise":
+            return { text: "мало точности (г)", cls: "warn", reason: "точности не хватает (не пройдена проверка (г))",
+                     all: "Точности не хватает на всех осях (не пройдена проверка (г))" }
         case "unreliable": {
             const failed = step4_failed_checks(res.quality)
             const checks = (failed.length == 1) ? "не пройдена проверка " + failed[0] : "не пройдены проверки " + failed.join(", ")
@@ -1294,6 +1338,18 @@ function step4_render_summary() {
     const reliable = step4_axis_list.filter((axis) => step4.calc[axis].status === "ok")
     // Лог тестового полёта с интервалом шире участка ACRO — сузить интервал, а не лететь снова
     const flight_advice = step4_acro_hint() ?? step4_test_flight_short
+    // В Rate Loop Only — советы по осям вместо общего (одинаковые объединяются: «крен, рыскание — …»); null — совет общий
+    let advice_groups = null
+    if (step4_axis_list.some((axis) => step4.calc[axis].mode?.rate_only)) {
+        const groups = new Map()
+        for (const axis of step4_axis_list) {
+            const advice = step4_axis_advice(axis)
+            if (advice != null) {
+                groups.set(advice, [...(groups.get(advice) ?? []), step4_axis_names[axis].nom.toLowerCase()])
+            }
+        }
+        advice_groups = [...groups].map(([advice, names]) => names.join(", ") + " — " + advice).join("; ")
+    }
     if (reliable.length == 0) {
         if (step4_axis_list.every((axis) => step4.calc[axis].status === "nodata")) {
             step_verdict("verdict4", "fail", "Нет данных PID ни по одной оси в интервале анализа — выберите другой интервал на шаге 0.")
@@ -1303,7 +1359,8 @@ function step4_render_summary() {
         const reasons = [...new Set(step4_axis_list.map((axis) => states[axis].reason))]
         const what = (reasons.length == 1) ? states.roll.all
             : "Надёжного измерения нет ни на одной оси: " + step4_axis_list.map((axis) => step4_axis_names[axis].nom.toLowerCase() + " — " + states[axis].reason).join(", ")
-        step_verdict("verdict4", "warn", what + " — правил и прогноза нет; " + flight_advice + " (подробности — во вкладках осей)." + after_note)
+        const advice = (advice_groups == null) ? flight_advice : advice_groups
+        step_verdict("verdict4", "warn", what + " — правил и прогноза нет" + ((advice === "") ? "" : "; " + advice) + " (подробности — во вкладках осей)." + after_note)
         return
     }
 
@@ -1314,6 +1371,14 @@ function step4_render_summary() {
         const name = step4_axis_names[axis].nom.toLowerCase()
         if (res.status !== "ok") {
             parts.push(name + " — " + states[axis].reason)
+            status = "warn"
+            continue
+        }
+        // Rate Loop Only, у порога в пределах запаса 1σ: решения по правилам нет — сравнить варианты по прогнозу, лететь не нужно
+        if ((res.rule.borderline != null) && (res.quality.noise != null)) {
+            const os = (res.metrics.peak - 1) * 100
+            parts.push(name + " — на границе " + res.rule.borderline + " % (" + os.toFixed(1) + " ± " + (res.quality.noise.sigma.peak * 100).toFixed(1) +
+                       " %), сравните варианты по прогнозу")
             status = "warn"
             continue
         }
@@ -1330,7 +1395,9 @@ function step4_render_summary() {
         parts.push(name + " — " + text)
     }
     const unreliable = step4_axis_list.filter((axis) => step4.calc[axis].status !== "ok")
-    const tail = (unreliable.length > 0) ? " По осям без надёжного измерения " + flight_advice + "." : ""
+    const tail = (unreliable.length == 0) ? ""
+        : ((advice_groups == null) ? " По осям без надёжного измерения " + flight_advice + "."
+            : ((advice_groups === "") ? "" : " По осям без надёжного измерения: " + advice_groups + "."))
     step_verdict("verdict4", (after_note === "") ? status : "warn", "Предлагается: " + parts.join("; ") + "." + tail + after_note)
 }
 
@@ -1457,7 +1524,10 @@ function step4_render_axis_verdict() {
     }
     // Совет тестового полёта; у лога тестового полёта — подсказка сузить интервал (один раз)
     const flight_note = () => {
-        if (acro_hint == null) {
+        const advice = res.mode?.rate_only ? step4_axis_advice(axis) : null
+        if (advice != null) {
+            parts.push(advice[0].toUpperCase() + advice.slice(1) + ".")
+        } else if (acro_hint == null) {
             parts.push(step4_test_flight)
         } else if (!hinted) {
             parts.push(acro_hint + ".")
@@ -1493,6 +1563,14 @@ function step4_render_axis_verdict() {
             status = "fail"
             parts.push("Нет отклика: " + ((res.quality.reasons.length > 0) ? res.quality.reasons.join("; ") : "КИХ не решился") + " — предложений нет.")
             break
+        case "imprecise":
+            warn()
+            parts.push("Точности не хватает — правил и прогноза нет: погрешность отклика " + step4_fixed(res.quality.checks.precision.value, 3) + " (порог " +
+                       rules.step_sigma_max + ").")
+            parts.push(response + " Отклик показан с пометкой: по нему не судят.")
+            rate_note()
+            flight_note()
+            break
         case "unreliable":
             warn()
             parts.push("Измерение ненадёжно — правил и прогноза нет" + (res.mode.rate_only ? ", хотя это лог тестового полёта Acro «Rate Loop Only»" : "") +
@@ -1505,7 +1583,7 @@ function step4_render_axis_verdict() {
         case "ok": {
             parts.push(response)
             if (res.mode.rate_only) {
-                parts.push("Лог тестового полёта Acro «Rate Loop Only» — измерение точное (угловой контур выключен устройством режима).")
+                parts.push("Лог тестового полёта Acro «Rate Loop Only»: угловой контур выключен устройством режима, погрешность «±» — по шуму этого лога.")
             }
             rate_note()
             mixed_note()
@@ -1644,7 +1722,23 @@ function step4_render_warnings() {
 
 // Пометка у метрик измеренного отклика оси без правил (плитки): по ним не судят; null — измерение надёжно
 function step4_unreliable_mark(res) {
-    return (res.status === "ok") ? null : ((res.status === "little") ? "мало данных" : "измерение ненадёжно")
+    return { ok: null, little: "мало данных", imprecise: "точности не хватает" }[res.status] ?? ((res.status === "ok") ? null : "измерение ненадёжно")
+}
+
+// Значение с погрешностью «±» (Rate Loop Only, quality.noise): text — само значение, sigma — погрешность (уже в единицах
+// значения), digits — знаков; погрешность не посчиталась или значения нет — text как есть
+function step4_with_sigma(text, sigma, digits) {
+    return ((text !== "—") && Number.isFinite(sigma)) ? text + " ± " + sigma.toFixed(digits) : text
+}
+
+// Раннее начало отклика (раздел 11.6 дизайна этапа 10): у КИХ на 5 мс отклик не меньше 0.05 — за два такта настоящий отклик
+// до 5 % ступеньки не доходит, начало размазано, нарастание 10–90 % смещено. Только Rate Loop Only. → значение или null
+function step4_early_response(res) {
+    if (!res.mode?.rate_only || (res.fir == null) || !(res.rate_hz > 0)) {
+        return null
+    }
+    const value = res.fir.step[Math.round(0.005 * res.rate_hz)]
+    return (Math.abs(value) >= 0.05) ? value : null
 }
 
 // Плитки метрик оси: измерение, нарастание, перерегулирование, плато, установление, колебания, шум D, данные,
@@ -1664,12 +1758,20 @@ function step4_render_metrics() {
         little: ["мало данных", "нужно не меньше " + rules.min_data_s + " с", "bad"],
         noresp: ["нет отклика", null, "bad"],
         unreliable: ["ненадёжно", "не пройдены " + failed.join(", "), "bad"],
-        ok: ["надёжно", res.mode?.rate_only ? "Rate Loop Only: (а), (б)" : "пройдены (а)–(в)", "good"],
+        imprecise: ["мало точности", "(г): погрешность " + step4_fixed(res.quality?.checks?.precision?.value, 3) + " > " + rules.step_sigma_max, "bad"],
+        ok: ["надёжно", res.mode?.rate_only ? "Rate Loop Only: (а), (б), (г)" : "пройдены (а)–(в)", "good"],
     }[res.status]
     tiles.push(step_tile("Измерение", measure[0], measure[1], measure[2]))
-    tiles.push(step_tile("Нарастание 10–90 %", step4_ms(m?.rise_s), unreliable ?? (Number.isFinite(m?.bandwidth_hz) ? "полоса ≈ " + m.bandwidth_hz.toFixed(1) + " Гц" : null), null))
-    tiles.push(step_tile("Перерегулирование", Number.isFinite(m?.overshoot_pct) ? m.overshoot_pct.toFixed(1) + " %" : "—", unreliable ?? "от 1", null))
-    tiles.push(step_tile("Плато " + rules.plateau_s.join("–") + " с", step4_fixed(m?.plateau, 3), unreliable ?? "среднее отклика", null))
+    // Rate Loop Only: «±» — погрешность по суррогатам (quality.noise)
+    const sigma = res.quality?.noise?.sigma ?? null
+    const early = step4_early_response(res)
+    const early_text = (early != null) ? "начало отклика не определено: КИХ даёт " + early.toFixed(2) + " уже на 5 мс (цель сглажена пределом ускорения), " +
+        "нарастание 10–90 % смещено" : null
+    const rise_text = Number.isFinite(m?.rise_s) ? step4_with_sigma((m.rise_s * 1000).toFixed(1), (sigma?.rise_s ?? NaN) * 1000, 1) + " мс" : "—"
+    tiles.push(step_tile("Нарастание 10–90 %", rise_text, unreliable ?? early_text ?? (Number.isFinite(m?.bandwidth_hz) ? "полоса ≈ " + m.bandwidth_hz.toFixed(1) + " Гц" : null), null))
+    tiles.push(step_tile("Перерегулирование", Number.isFinite(m?.overshoot_pct) ? step4_with_sigma(m.overshoot_pct.toFixed(1), (sigma?.peak ?? NaN) * 100, 1) + " %" : "—",
+                         unreliable ?? "от 1", null))
+    tiles.push(step_tile("Плато " + rules.plateau_s.join("–") + " с", step4_with_sigma(step4_fixed(m?.plateau, 3), sigma?.plateau, 3), unreliable ?? "среднее отклика", null))
     tiles.push(step_tile("Установление ±" + Math.round(rules.settle_band * 100) + " %", (m == null) ? "—" : ((m.settle_s != null) ? step4_ms(m.settle_s) : "не установился"),
                          unreliable ?? "от плато", null))
     const osc_sub = (m?.osc != null) ? "размах " + m.osc.amplitude_pp.toFixed(2) : "порог размаха " + rules.osc_min_pp
@@ -1693,13 +1795,16 @@ function step4_render_metrics() {
                          ((seg != null) && (seg.data_s < rules.min_data_s)) ? "bad" : null))
     const pl = res.pred_log
     const pm_sub = (pl?.pm_note != null) ? pl.pm_note : "по амплитуде " + (Number.isFinite(pl?.gm_db) ? pl.gm_db.toFixed(1) + " дБ" : "—")
-    tiles.push(step_tile("Срез · запас фазы (лог)", res.predict_ok ? step4_fixed(pl?.crossover_hz, 2) + " Гц · " + step4_pm_text(pl) : "—",
+    const ps = res.pred_sigma
+    const pm_shown = (Number.isFinite(pl?.pm_deg) && Number.isFinite(ps?.pm_deg)) ? pl.pm_deg.toFixed(1) + " ± " + ps.pm_deg.toFixed(1) + "°" : step4_pm_text(pl)
+    tiles.push(step_tile("Срез · запас фазы (лог)", res.predict_ok ? step4_with_sigma(step4_fixed(pl?.crossover_hz, 2), ps?.crossover_hz, 2) + " Гц · " + pm_shown : "—",
                          res.predict_ok ? pm_sub : "только при достоверном прогнозе", null))
     box.innerHTML = tiles.join("")
     box.hidden = false
 }
 
-// Таблица качества измерения: (а)–(в), значение, порог, итог; в Rate Loop Only (в) — «не применяется»
+// Таблица качества измерения: (а)–(в), значение, порог, итог; в Rate Loop Only (в) — «не применяется», (б) — с шумом
+// лога и порогом от него, добавлена строка (г) точность отклика
 function step4_render_quality() {
     const res = step4.calc[step4.axis]
     const box = document.getElementById("quality4")
@@ -1716,6 +1821,17 @@ function step4_render_quality() {
         ["outer", "(в) подпись углового контура", "наибольшее |цель → факт| на " + q.outer_band_hz.join("–") + " Гц",
          step4_fixed(checks.outer.value, 2) + (Number.isFinite(checks.outer.freq_hz) ? " на " + checks.outer.freq_hz.toFixed(1) + " Гц" : ""), "≤ " + q.outer_t_max],
     ]
+    if (res.mode?.rate_only) {
+        const h = checks.halves
+        if ((h.noise != null) && (h.ratio != null)) {
+            rows[1][3] = step4_fixed(h.value, 3) + " · шум " + h.noise.toFixed(3) + " (×" + h.ratio.toFixed(1) + ")"
+            rows[1][4] = "≤ " + pidtune_rules.halves_ratio_max + " × шум, не меньше " + q.halves_rms_max
+        }
+        if (checks.precision?.applied) {
+            rows.push(["precision", "(г) точность отклика", "погрешность отклика КИХ по суррогатам — RMS на 0–0.5 с", step4_fixed(checks.precision.value, 3),
+                       "≤ " + pidtune_rules.step_sigma_max])
+        }
+    }
     let body = ""
     for (const [key, title, what, value, limit] of rows) {
         const check = checks[key]
