@@ -8,6 +8,7 @@
     "test:tunewizard": "node tests/tunewizard-browser.cjs",
     "test:tunewizard-log2": "node tests/tunewizard-browser-log2.cjs",
     "test:tunewizard-log3": "node tests/tunewizard-browser-log3.cjs",
+    "test:tunewizard-log4": "node tests/tunewizard-browser-log4.cjs",
     "test:tunewizard-prep": "node tests/tunewizard-prep-browser.cjs",
     "test:tunewizard-serve": "node tests/tunewizard-serve.cjs",
     "test:tunewizard-compare": "node tests/tunewizard-compare.cjs",

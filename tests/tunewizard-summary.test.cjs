@@ -807,6 +807,14 @@ test('summary_refly: тексты пунктов — законченные фр
             'перезагрузки: после записи перезагрузите полётный контроллер — так надёжнее.' }])
 })
 
+test('summary_refly: советы по осям — одинаковые объединяются, разные — отдельными пунктами по порядку осей; без совета оси — общий test_flight', () => {
+    const texts = (ctx) => of_source(summary_refly(ctx), 'test_flight').map((item) => item.text)
+    const base = refly_ctx({ unreliable_axes: ['roll', 'pitch', 'yaw'] })
+    assert.deepEqual(texts({ ...base, axis_advice: { roll: 'A', pitch: 'B', yaw: 'A' } }), ['Крен, рыскание — A.', 'Тангаж — B.'])
+    assert.deepEqual(texts({ ...refly_ctx({ unreliable_axes: ['roll'] }), axis_advice: { roll: null } }), ['Крен — ' + TEST_FLIGHT + '.'])
+    assert.deepEqual(texts(refly_ctx({ unreliable_axes: ['roll', 'yaw'] })), ['Крен, рыскание — ' + TEST_FLIGHT + '.'])
+})
+
 test('summary_refly: ничего не изменено, проверок и ненадёжных осей нет — список пуст; checks null — как пустой', () => {
     assert.deepEqual(summary_refly(refly_ctx()), [])
     assert.deepEqual(summary_refly({ ...refly_ctx(), checks: null }), [])

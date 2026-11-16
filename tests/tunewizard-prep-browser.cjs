@@ -224,7 +224,7 @@ async function main() {
         assert.equal(both.plan.length, 5, 'пунктов плана: ' + both.plan.join(' | '))
         assert.match(both.plan[0], /^Взлёт в STABILIZE или ALT_HOLD, висение не меньше/, both.plan[0])
         assert.equal(both.plan[1], 'После висения наберите безопасную высоту и включите ACRO положением 6 (PWM от 1750).')
-        assert.match(both.plan[2], /^2–3 минуты резких отклонений стиков/, both.plan[2])
+        assert.match(both.plan[2], /^Около минуты резких отклонений стиков/, both.plan[2])
         assert.equal(both.plan[3], 'Выход из ACRO — положением 1 (PWM до 1230): в Acro аппарат сам не выравнивается.')
         assert.equal(both.plan[4], 'Посадка; загрузите лог в мастер, на шаге 4 — «Интервал — участок ACRO».')
 

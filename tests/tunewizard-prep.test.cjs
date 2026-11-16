@@ -743,6 +743,15 @@ test('prep_flight_plan: фильтры — висение, без Acro; PID — 
     }
 })
 
+test('prep_flight_plan: Copter — «около минуты на каждую ось», QuadPlane — прежние «2–3 минуты»', () => {
+    const plan = prep_flight_plan('pid', { acro_slot: 6, exit_slot: 1, checks: null })
+    assert.equal(plan[1], 'Около минуты резких отклонений стиков с возвратом на каждую ось, по одной оси за раз — крен, тангаж, рыскание — ' +
+        'с разной амплитудой, рыскание — полными отклонениями стика: мастеру нужно не меньше 10 с участков с целью скорости от 20 °/с, ' +
+        'а точность для уверенного вердикта набирается примерно за минуту.')
+    const qp = prep_flight_plan('pid', { acro_slot: 6, exit_slot: 1, checks: null, profile: vehicle_profiles.quadplane })
+    assert.match(qp[1], /^2–3 минуты резких отклонений стиков/)
+})
+
 test('prep_flight_plan: положение ACRO не выбрано — подсказка на месте включения ACRO', () => {
     const plan = prep_flight_plan('pid', { acro_slot: null, exit_slot: 1, checks: [] })
     assert.equal(plan.length, 4)

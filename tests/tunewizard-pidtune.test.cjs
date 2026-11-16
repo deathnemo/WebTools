@@ -1911,3 +1911,429 @@ test('pidtune_predict: снятие notch третьей гармоники вы
         }
     }
 })
+
+// ---------------------------------------------------------------- этап 10: суррогаты, (б) по шуму, (г), правила с запасом
+
+// Полёты Rate Loop Only с шумом как у настоящего лога [синтетика, дизайн этапа 10, раздел 11.1]: REAL_NOISE — остаток
+// 6–8 % дисперсии факта, TOO_NOISY — шум, при котором отклик тонет (σ отклика 0.11–0.16). Объект PLANT_NORMAL, регулятор G0
+const REAL_NOISE = { dur_s: 80, turb_dps2: 3000, dist_dps2: 500 }
+const TOO_NOISY = { dur_s: 20, turb_dps2: 3000, dist_dps2: 2500 }
+
+// Полёт, его измерение и проверки качества — один раз на сочетание (шум, зерно полёта, смена K с середины); качество
+// считается с { rate_only: true } и зерном суррогатов 1, шум по другому зерну — noise_of
+const noise_flights = new Map()
+function noise_flight(noise, seed, k_ratio = null) {
+    const key = JSON.stringify([noise, seed, k_ratio])
+    if (!noise_flights.has(key)) {
+        const plant2 = (k_ratio != null) ? { ...PLANT_NORMAL, K: PLANT_NORMAL.K * k_ratio } : undefined
+        const m = measure(simulate(G0, { ...noise, seed, plant: PLANT_NORMAL, plant2 }), G0)
+        m.rate_only = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true, seed: 1 })
+        m.noises = new Map()
+        noise_flights.set(key, m)
+    }
+    return noise_flights.get(key)
+}
+function noise_of(m, seed = 1) {
+    if (!m.noises.has(seed)) {
+        m.noises.set(seed, pidtune_noise(m.seg.segments, m.seg.rate_hz, m.fir, seed))
+    }
+    return m.noises.get(seed)
+}
+
+test('pidtune_rules: пороги этапа 10 — значения и источники', () => {
+    assert.equal(pidtune_rules.surrogate_count, 32)
+    assert.equal(pidtune_rules.surrogate_block, 512)
+    assert.equal(pidtune_rules.halves_ratio_max, 2.5)
+    assert.equal(pidtune_rules.step_sigma_max, 0.08)
+    assert.equal(pidtune_rules.step_sigma_goal, 0.05)
+    assert.equal(pidtune_rules.rule_margin_sigma, 1)
+    assert.equal(pidtune_rules.osc_sigma_k, 4)
+    // Прежние пороги не тронуты
+    assert.equal(pidtune_rules.quality.halves_rms_max, 0.035)
+    assert.equal(pidtune_rules.osc_min_pp, 0.08)
+})
+
+test('pidtune_rng: mulberry32 — числа в [0, 1), одно зерно — одна последовательность, зёрна различаются, среднее около 0.5', () => {
+    const a = pidtune_rng(1)
+    const b = pidtune_rng(1)
+    const c = pidtune_rng(2)
+    let sum = 0
+    let differ = 0
+    for (let i = 0; i < 2000; i++) {
+        const x = a()
+        assert.ok((x >= 0) && (x < 1), 'число ' + x)
+        assert.equal(b(), x)
+        differ += (c() != x) ? 1 : 0
+        sum += x
+    }
+    assert.ok(differ > 1990, 'зерно 2 совпало с зерном 1 в ' + (2000 - differ) + ' числах')
+    close_to(sum / 2000, 0.5, 0.03, 'среднее')
+})
+
+test('pidtune_spread: половина размаха 16–84 процентилей, нечисловые пропускаются, меньше двух чисел — NaN', () => {
+    close_to(pidtune_spread([1, 2, 3, 4, 5]), 1.36, 1e-12, '[1…5]')            // 1.64 и 4.36
+    close_to(pidtune_spread([NaN, 2, null, 4, Infinity]), 0.68, 1e-12, '[2, 4]') // 2.32 и 3.68
+    assert.ok(Number.isNaN(pidtune_spread([1])))
+    assert.ok(Number.isNaN(pidtune_spread([])))
+    assert.ok(Number.isNaN(pidtune_spread([NaN, 3, null])))
+})
+
+test('pidtune_need_s: до σ 0.05, вверх до 5 с; σ не больше цели — 0', () => {
+    assert.equal(pidtune_need_s(0.124, 16.4), 85)
+    assert.equal(pidtune_need_s(0.051, 10), 5)
+    assert.equal(pidtune_need_s(0.05, 10), 0)
+    assert.equal(pidtune_need_s(0.03, 10), 0)
+})
+
+test('pidtune_toeplitz_factor и apply — то же, что pidtune_toeplitz_solve', () => {
+    const col = Float64Array.from([4, 1, 0.5, 0.2])
+    const factor = pidtune_toeplitz_factor(col, 0.1)
+    assert.ok(factor instanceof Float64Array)
+    for (const rhs of [Float64Array.from([1, -2, 0.5, 3]), Float64Array.from([0.3, 0.1, -0.7, 2])]) {
+        const x = pidtune_toeplitz_apply(factor, rhs)
+        const y = pidtune_toeplitz_solve(col, rhs, 0.1)
+        assert.equal(x.length, 4)
+        for (let i = 0; i < 4; i++) {
+            close_to(x[i], y[i], 1e-12, 'x[' + i + ']')
+        }
+        // И это действительно решение: (T + 0.1·E)·x = rhs
+        for (let i = 0; i < 4; i++) {
+            let s = 0.1 * x[i]
+            for (let j = 0; j < 4; j++) s += col[Math.abs(i - j)] * x[j]
+            close_to(s, rhs[i], 1e-12, 'невязка ' + i)
+        }
+    }
+    // Не положительно определённая — null
+    assert.equal(pidtune_toeplitz_factor(Float64Array.from([1, 2, 3]), 0), null)
+})
+
+test('pidtune_noise: одно зерно — одинаковые числа; другое зерно — другие: halves_null и sigma_step в пределах ×1.5, sigma.peak — ×2', () => {
+    const m = noise_flight(REAL_NOISE, 3)
+    const a = noise_of(m, 1)
+    const b = pidtune_noise(m.seg.segments, m.seg.rate_hz, m.fir, 1)
+    const of = (n) => [n.halves_null, n.sigma_step, n.sigma.peak]
+    assert.deepEqual(of(a), of(b))
+    assert.deepEqual(of(pidtune_noise(m.seg.segments, m.seg.rate_hz, m.fir)), of(a), 'зерно по умолчанию — 1')
+    assert.equal(a.count, 32)
+    assert.equal(a.valid, 32)
+    assert.equal(a.firs.length, a.valid)
+    assert.equal(a.firs[0].corr, undefined, 'КИХ суррогатов — без сумм')
+    assert.equal(a.firs[0].h.length, m.fir.h.length)
+    const c = noise_of(m, 2)
+    assert.notDeepEqual(of(c), of(a), 'другое зерно — другие числа')
+    const within = (x, y, k) => (x / y <= k) && (y / x <= k)
+    assert.ok(within(c.halves_null, a.halves_null, 1.5), 'шум (б) ' + c.halves_null + ' и ' + a.halves_null)
+    assert.ok(within(c.sigma_step, a.sigma_step, 1.5), 'σ отклика ' + c.sigma_step + ' и ' + a.sigma_step)
+    assert.ok(within(c.sigma.peak, a.sigma.peak, 2), 'σ пика ' + c.sigma.peak + ' и ' + a.sigma.peak)
+    // Порядок величин на REAL_NOISE [синтетика, раздел 11.1]: σ отклика 0.015–0.020, шум (б) 0.031–0.038
+    assert.ok((a.sigma_step > 0.008) && (a.sigma_step < 0.035), 'σ отклика ' + a.sigma_step)
+    assert.ok((a.halves_null > 0.015) && (a.halves_null < 0.07), 'шум (б) ' + a.halves_null)
+    assert.ok(Number.isFinite(a.sigma.peak) && Number.isFinite(a.sigma.rise_s) && Number.isFinite(a.sigma.plateau))
+    // null: нет КИХ
+    assert.equal(pidtune_noise(m.seg.segments, m.seg.rate_hz, null), null)
+})
+
+test('pidtune_quality, Rate Loop Only, реальный шум без смены объекта: (б) пройдена при любом зерне, хотя прежний порог 0.035 — нет', () => {
+    let above_old = 0
+    for (const seed of [3, 5, 7, 11, 13]) {
+        const q = noise_flight(REAL_NOISE, seed).rate_only
+        const h = q.checks.halves
+        assert.equal(h.ok, true, 'зерно ' + seed + ': (б) ' + h.value + ' при шуме ' + h.noise + ', порог ' + h.limit)
+        assert.ok(h.ratio < pidtune_rules.halves_ratio_max, 'зерно ' + seed + ': отношение ' + h.ratio)
+        assert.ok(h.noise > 0)
+        close_to(h.ratio, h.value / h.noise, 1e-12, 'отношение')
+        close_to(h.limit, Math.max(pidtune_rules.quality.halves_rms_max, pidtune_rules.halves_ratio_max * h.noise), 1e-12, 'порог')
+        assert.equal(q.ok, true, q.reasons.join('; '))
+        above_old += (h.value > pidtune_rules.quality.halves_rms_max) ? 1 : 0
+    }
+    assert.ok(above_old >= 1, 'прежний порог 0.035 отказал бы хотя бы одному зерну')
+})
+
+test('pidtune_quality, Rate Loop Only, реальный шум, объект K ×0.6 и ×1.5 с середины: (б) не пройдена, причина «раза сильнее, чем даёт шум»', () => {
+    // K ×0.75 и ×1.25 при реальном шуме (б) ловит не всегда — раздел 11.2 дизайна
+    for (const k of [0.6, 1.5]) {
+        for (const seed of [3, 5, 7]) {
+            const q = noise_flight(REAL_NOISE, seed, k).rate_only
+            const h = q.checks.halves
+            assert.equal(h.ok, false, 'K ×' + k + ', зерно ' + seed + ': (б) ' + h.value + ' при шуме ' + h.noise)
+            assert.ok(h.ratio > pidtune_rules.halves_ratio_max, 'K ×' + k + ', зерно ' + seed + ': отношение ' + h.ratio)
+            assert.equal(q.ok, false)
+            const reason = q.reasons.find((r) => /раза сильнее, чем даёт шум этого лога/.test(r))
+            assert.ok(reason != null, q.reasons.join('; '))
+            assert.equal(reason, 'половины данных расходятся в ' + pidtune_beyond(h.ratio, pidtune_rules.halves_ratio_max, 1) +
+                         ' раза сильнее, чем даёт шум этого лога (RMS ' + h.value.toFixed(3) + ' при шуме ' + h.noise.toFixed(3) +
+                         ', порог — 2.5 × шум): режим или аппарат менялись по ходу полёта')
+        }
+    }
+})
+
+test('pidtune_quality, Rate Loop Only: исход не зависит от зерна суррогатов 1–5 (раздел 6 дизайна) — реальный шум: (б) и (г) пройдены; K ×0.6: (б) нет; TOO_NOISY: (г) нет', () => {
+    // Полёты считаются один раз (noise_flight), зерно 1 — готовое качество, остальные зёрна — только pidtune_quality
+    const cases = [
+        { what: 'REAL_NOISE без смены', flight: noise_flight(REAL_NOISE, 3), check: (q) => [q.checks.halves.ok === true, q.checks.precision.ok === true] },
+        { what: 'REAL_NOISE, K ×0.6 с середины', flight: noise_flight(REAL_NOISE, 3, 0.6), check: (q) => [q.checks.halves.ok === false] },
+        { what: 'TOO_NOISY', flight: noise_flight(TOO_NOISY, 3), check: (q) => [q.checks.precision.ok === false] },
+    ]
+    for (const { what, flight, check } of cases) {
+        for (const seed of [1, 2, 3, 4, 5]) {
+            const q = (seed == 1) ? flight.rate_only
+                : pidtune_quality(flight.seg.segments, flight.seg.rate_hz, flight.fir, { rate_only: true, seed })
+            assert.ok(check(q).every(Boolean), what + ', зерно суррогатов ' + seed + ': (б) ' + q.checks.halves.value + ' при шуме ' + q.checks.halves.noise +
+                      ', (г) ' + q.checks.precision.value)
+        }
+    }
+})
+
+test('pidtune_quality, Rate Loop Only, малый шум (синтетика тестов, 150 с): нижняя граница — limit 0.035, (б) и (г) пройдены', () => {
+    const m = rate_only_flight(PLANT_NORMAL)
+    const q = m.quality
+    assert.equal(q.ok, true, q.reasons.join('; '))
+    assert.ok(q.noise != null)
+    assert.ok(q.noise.halves_null < 0.01, 'шум (б) ' + q.noise.halves_null)
+    assert.equal(q.checks.halves.limit, pidtune_rules.quality.halves_rms_max)
+    assert.equal(q.checks.halves.ok, true)
+    assert.ok(q.checks.halves.value <= 0.035)
+    assert.equal(q.checks.precision.applied, true)
+    assert.equal(q.checks.precision.ok, true)
+    assert.ok(q.checks.precision.value <= pidtune_rules.step_sigma_max)
+    assert.equal(q.checks.precision.need_s, 0)
+    assert.equal(q.checks.precision.reason, null)
+    assert.equal(q.precise, true)
+    // Зерно суррогатов — из options.seed, по умолчанию 1
+    const again = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true })
+    assert.equal(again.noise.sigma_step, q.noise.sigma_step)
+})
+
+test('pidtune_quality без Rate Loop Only: прежний порог 0.035, noise null, precise true, (г) не применяется', () => {
+    const m = noise_flight(REAL_NOISE, 3)
+    const q = m.quality
+    assert.equal(q.noise, null)
+    assert.equal(q.precise, true)
+    assert.equal(q.checks.halves.noise, null)
+    assert.equal(q.checks.halves.ratio, null)
+    assert.equal(q.checks.halves.limit, pidtune_rules.quality.halves_rms_max)
+    assert.deepEqual(q.checks.precision, { value: null, ok: null, applied: false, need_s: null, reason: null })
+    // С options без rate_only — то же
+    const plain = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { seed: 5 })
+    assert.equal(plain.noise, null)
+    assert.equal(plain.precise, true)
+    // (б) — по-прежнему по значению против 0.035
+    assert.equal(q.checks.halves.ok, q.checks.halves.value <= 0.035)
+    // Те же значения (а) и (б), что в Rate Loop Only
+    assert.equal(q.checks.ridge.value, m.rate_only.checks.ridge.value)
+    assert.equal(q.checks.halves.value, m.rate_only.checks.halves.value)
+})
+
+test('pidtune_quality, Rate Loop Only, TOO_NOISY, зерно полёта 3: (а) пройдена, precise false, (г) value > 0.08, need_s = pidtune_need_s(value, данных), кратно 5', () => {
+    const m = noise_flight(TOO_NOISY, 3)
+    const q = m.rate_only
+    assert.equal(q.checks.ridge.ok, true, 'проверка (а) ' + q.checks.ridge.value)
+    const p = q.checks.precision
+    assert.ok(p.value > pidtune_rules.step_sigma_max, 'σ отклика ' + p.value)
+    assert.equal(p.ok, false)
+    assert.equal(p.applied, true)
+    assert.equal(q.precise, false)
+    assert.equal(p.need_s, pidtune_need_s(p.value, m.seg.data_s))
+    assert.ok(p.need_s > 0)
+    assert.equal(p.need_s % 5, 0)
+    assert.equal(p.reason, 'точности не хватает: погрешность отклика ' + pidtune_beyond(p.value, 0.08, 3) + ' (порог 0.08)')
+    // (г) не входит в ok: измерение «надёжно» по (а)–(б)
+    assert.equal(q.ok, q.checks.ridge.ok && q.checks.halves.ok)
+    assert.ok(q.checks.halves.ok, '(б) при шуме TOO_NOISY: ' + q.checks.halves.ratio)
+})
+
+test('pidtune_quality, Rate Loop Only, короткие данные (12 с): без исключений, need_s — число, в причинах нет NaN и undefined', () => {
+    const m = measure(simulate(G0, { dur_s: 12, turb_dps2: 3000, dist_dps2: 500, seed: 3, plant: PLANT_NORMAL }), G0)
+    const q = pidtune_quality(m.seg.segments, m.seg.rate_hz, m.fir, { rate_only: true })
+    const texts = [...q.reasons, q.checks.precision.reason ?? '']
+    for (const text of texts) {
+        assert.ok(!/NaN|undefined|null|Infinity/.test(text), text)
+    }
+    assert.equal(typeof q.checks.precision.need_s, 'number')
+    assert.ok(Number.isFinite(q.checks.precision.need_s))
+    assert.equal(q.checks.precision.need_s % 5, 0)
+    assert.equal(typeof q.precise, 'boolean')
+})
+
+test('pidtune_quality, Rate Loop Only, пул остатков пуст (один отрезок 300 отсчётов): noise null, (б) и (г) не пройдены с причинами', () => {
+    const segs = [noise_segment(300, 21, (tar, k) => (k > 0) ? 0.5 * tar[k - 1] : 0)]
+    const fir = pidtune_fir(segs, RATE_HZ)
+    assert.ok(fir != null)
+    assert.equal(pidtune_noise(segs, RATE_HZ, fir), null)
+    const q = pidtune_quality(segs, RATE_HZ, fir, { rate_only: true })
+    assert.equal(q.noise, null)
+    assert.equal(q.checks.halves.ok, false)
+    assert.equal(q.checks.precision.ok, false)
+    assert.equal(q.checks.precision.applied, true)
+    assert.equal(q.checks.precision.value, null)
+    assert.equal(q.checks.precision.need_s, null)
+    assert.equal(q.precise, false)
+    assert.equal(q.ok, false)
+    assert.equal(q.checks.precision.reason, 'погрешность отклика не посчиталась (суррогаты) — отказ при сомнении')
+    assert.ok(q.reasons.includes('шум лога не посчитался (суррогаты): проверка (б) не пройдена — отказ при сомнении'), q.reasons.join('; '))
+})
+
+test('pidtune_osc_min_pp: max(osc_min_pp, osc_sigma_k·σ); без шума — osc_min_pp', () => {
+    assert.equal(pidtune_osc_min_pp(null), pidtune_rules.osc_min_pp)
+    assert.equal(pidtune_osc_min_pp({ noise: null }), pidtune_rules.osc_min_pp)
+    assert.equal(pidtune_osc_min_pp({ ok: true, checks: {}, reasons: [] }), pidtune_rules.osc_min_pp)
+    assert.equal(pidtune_osc_min_pp({ noise: { sigma_step: 0.01 } }), 0.08)
+    close_to(pidtune_osc_min_pp({ noise: { sigma_step: 0.05 } }), 0.2, 1e-12, 'σ 0.05')
+    close_to(pidtune_osc_min_pp({ noise: { sigma_step: 0.02 } }, { ...pidtune_rules, osc_sigma_k: 10 }), 0.2, 1e-12, 'другое k')
+    // На настоящем шуме — нижняя граница
+    assert.equal(pidtune_osc_min_pp(noise_flight(REAL_NOISE, 3).rate_only), pidtune_rules.osc_min_pp)
+    // Нечисловое σ — нижняя граница
+    assert.equal(pidtune_osc_min_pp({ noise: { sigma_step: NaN } }), pidtune_rules.osc_min_pp)
+})
+
+test('pidtune_step_metrics с порогом pidtune_osc_min_pp: колебания размахом ниже 4σ не находятся, выше — находятся', () => {
+    // σ отклика 0.05 → порог размаха max(0.08, 4 × 0.05) = 0.2
+    const limit = pidtune_osc_min_pp({ noise: { sigma_step: 0.05 } })
+    close_to(limit, 0.2, 1e-12, 'порог')
+    for (const [a, expect_osc] of [[0.08, false], [0.15, true]]) {
+        const f = (t) => 1 - Math.exp(-t / 0.02) + ((t >= 0.15) ? a * Math.sin(2 * Math.PI * 30 * (t - 0.15)) : 0)
+        const { time, y } = sampled(f)
+        const m = pidtune_step_metrics(time, y, { ...pidtune_rules, osc_min_pp: limit })
+        if (expect_osc) {
+            assert.ok(m.osc != null, 'размах ' + 2 * a + ' выше порога ' + limit + ': колебания должны найтись')
+            close_to(m.osc.amplitude_pp, 2 * a, 0.01, 'размах')
+        } else {
+            assert.equal(m.osc, null, 'размах ' + 2 * a + ' ниже порога ' + limit)
+        }
+    }
+    // С прежним порогом 0.08 колебания размахом 0.16 находятся: порог от σ их и отсекает
+    const weak = sampled((t) => 1 - Math.exp(-t / 0.02) + ((t >= 0.15) ? 0.08 * Math.sin(2 * Math.PI * 30 * (t - 0.15)) : 0))
+    assert.ok(pidtune_step_metrics(weak.time, weak.y).osc != null)
+})
+
+test('pidtune_rule с шумом: выше 20 + σ — P −10 %, ниже 5 − σ — P +10 %, между — менять нечего, у порогов — на границе', () => {
+    const q = (sp) => ({ ok: true, precise: true, checks: {}, reasons: [], noise: { sigma: { peak: sp } } })
+    const b = pidtune_rule(ROLL, 'roll', metrics_of(20.8), 10, q(0.018))
+    assert.deepEqual([b.change, b.borderline], [null, 20])
+    assert.equal(b.reason, 'перерегулирование 20.8 ± 1.8 % — на границе 20 %: по правилам решения нет, сравните варианты по прогнозу')
+    assert.deepEqual(b.values, ROLL)
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(23), 10, q(0.018)).change, 'P-')
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(23), 10, q(0.018)).borderline, null)
+    const mid = pidtune_rule(ROLL, 'roll', metrics_of(14.3), 10, q(0.018))
+    assert.deepEqual([mid.change, mid.borderline], [null, null])
+    assert.ok(mid.reason.startsWith('перерегулирование 14.3 ± 1.8 %') && mid.reason.includes('менять нечего'), mid.reason)
+    const low = pidtune_rule(ROLL, 'roll', metrics_of(6), 10, q(0.018))
+    assert.deepEqual([low.change, low.borderline], [null, 5])
+    assert.ok(low.reason.includes('на границе 5 %'), low.reason)
+    // Пики сразу внутри запаса: 18 (до 20 − σ = 18.2 не доходит) — менять нечего, 21.5 (меньше 20 + σ = 21.8) — на границе
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(18), 10, q(0.018)).borderline, null)
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(21.5), 10, q(0.018)).borderline, 20)
+    // Пик 0.916 ± 0.086: перерегулирования нет, ниже 5 − 8.6 → P +10 %
+    const sluggish = pidtune_rule(ROLL, 'roll', { ...metrics_of(0), peak: 0.916 }, 10, q(0.086))
+    assert.equal(sluggish.change, 'P+')
+    assert.equal(sluggish.borderline, null)
+    assert.ok(sluggish.reason.startsWith('перерегулирования нет (пик 0.916 ± 0.086) — меньше 5 % с запасом 1σ, колебаний нет — отклик вялый, запас есть → P +10 %'), sluggish.reason)
+    // Пик 0.916 при σ 0.15 (запас 15 п. накрывает −8.4 %) — «на границе 5 %», текст про пик
+    const edge = pidtune_rule(ROLL, 'roll', { ...metrics_of(0), peak: 0.916 }, 10, q(0.15))
+    assert.deepEqual([edge.change, edge.borderline], [null, 5])
+    assert.ok(edge.reason.startsWith('перерегулирования нет (пик 0.916 ± 0.150) — на границе 5 %'), edge.reason)
+    // Перерегулирование считается по пику без обрезки снизу, а не по overshoot_pct
+    const clamped = pidtune_rule(ROLL, 'roll', { ...metrics_of(0), peak: 0.97, overshoot_pct: 0 }, 10, q(0.01))
+    assert.equal(clamped.change, 'P+', clamped.reason)
+    // Без noise — как раньше: нет «±», нет границы
+    const old = pidtune_rule(ROLL, 'roll', metrics_of(20.8), 10, QUALITY_OK)
+    assert.equal(old.change, 'P-')
+    assert.ok(!old.reason.includes('±'), old.reason)
+    assert.ok(!old.borderline)
+    // Не посчитанное σ — отказ при сомнении, не правило
+    const nan = pidtune_rule(ROLL, 'roll', metrics_of(23), 10, q(NaN))
+    assert.equal(nan.change, null)
+    assert.ok(nan.reason.includes('правил нет') && !/NaN/.test(nan.reason), nan.reason)
+})
+
+test('pidtune_rule: precise false — «точности не хватает … — правил нет»; pidtune_validity — та же причина', () => {
+    const reason = 'точности не хватает: погрешность отклика 0.124 (порог 0.08)'
+    const q = { ok: true, precise: false, checks: { precision: { value: 0.124, ok: false, applied: true, need_s: 85, reason } }, reasons: [],
+                noise: { sigma: { peak: 0.05 } } }
+    const r = pidtune_rule(ROLL, 'roll', metrics_of(30), 10, q)
+    assert.equal(r.change, null)
+    assert.deepEqual(r.values, ROLL)
+    assert.equal(r.reason, reason + ' — правил нет')
+    // Порядок: «мало манёвров» и «измерение ненадёжно» — раньше точности
+    assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), 5, q).reason.startsWith('мало манёвров'))
+    assert.ok(pidtune_rule(ROLL, 'roll', metrics_of(30), 10, { ...q, ok: false, reasons: ['причина'] }).reason.startsWith('измерение ненадёжно'))
+    // Нет precise (прежние качества) — правило работает
+    assert.equal(pidtune_rule(ROLL, 'roll', metrics_of(30), 10, QUALITY_OK).change, 'P-')
+    // Достоверность прогноза — та же причина
+    const cc = { ok: true, max_mag_err: 0.01, max_phase_err_deg: 1, worst_hz: 5 }
+    const v = pidtune_validity(q, cc, 0.9)
+    assert.equal(v.valid, false)
+    assert.deepEqual(v.reasons, [reason])
+    assert.equal(pidtune_validity({ ...q, precise: true }, cc, 0.9).valid, true)
+    assert.equal(pidtune_validity(QUALITY_OK, cc, 0.9).valid, true)
+})
+
+test('pidtune_noise_margins: разброс частоты среза и запаса фазы — конечные числа; одно зерно — одинаковые', () => {
+    const m = noise_flight(REAL_NOISE, 3)
+    const grid = pidtune_predict_grid(m.seg.rate_hz)
+    const c_log = pidtune_controller(LOG_GAINS, FILTERS0, RATE_HZ, grid.freq)
+    const noise = noise_of(m, 1)
+    const a = pidtune_noise_margins(noise, c_log, m.seg.rate_hz)
+    assert.ok(Number.isFinite(a.crossover_hz) && (a.crossover_hz > 0), 'срез ' + a.crossover_hz)
+    assert.ok(Number.isFinite(a.pm_deg) && (a.pm_deg > 0), 'запас фазы ' + a.pm_deg)
+    assert.ok(a.crossover_hz < 2 && a.pm_deg < 20, 'разброс правдоподобен: ' + a.crossover_hz + ' Гц, ' + a.pm_deg + '°')
+    const b = pidtune_noise_margins(pidtune_noise(m.seg.segments, m.seg.rate_hz, m.fir, 1), c_log, m.seg.rate_hz)
+    assert.deepEqual(b, a)
+})
+
+test('pidtune_noise: правые части через разрез (половины + pidtune_cross_cut) = честные суммы всех данных; КИХ суррогатов = pidtune_fir суррогата и его половин', () => {
+    // Три отрезка разной длины, середина (3400 из 6800) — внутри второго (разрез на отсчёте 1400)
+    const mk = (n, seed) => noise_segment(n, seed, (tar, k) => 0.6 * ((k > 0) ? tar[k - 1] : 0) + 0.3 * ((k > 1) ? tar[k - 2] : 0) + 8 * Math.sin(k * 0.37 + seed))
+    const segs = [mk(2000, 31), mk(3300, 32), mk(1500, 33)]
+    const taps = Math.round(pidtune_rules.fir_length_s * RATE_HZ)
+    const parts = pidtune_halves(segs, pidtune_rules.window)
+    assert.equal(parts[0].length + parts[1].length, segs.length + 1, 'разрез внутри отрезка')
+    const cut = parts[0][parts[0].length - 1].tar.length
+    assert.equal(cut, 1400)
+    // Суррогатная «факт» — произвольная, не равная исходной
+    const sur = segs.map((s, k) => ({ ...s, act: Float64Array.from(s.act, (v, i) => v * 0.8 + Math.cos(i * 0.11 + k)) }))
+    const sp = pidtune_halves(sur, pidtune_rules.window)
+    const first = pidtune_cross_sums(sp[0], taps)
+    const second = pidtune_cross_sums(sp[1], taps)
+    const cross = pidtune_cross_cut(sur[1], cut, taps)
+    const honest = pidtune_correlations(sur, taps).cry
+    const honest_first = pidtune_correlations(sp[0], taps).cry
+    const honest_second = pidtune_correlations(sp[1], taps).cry
+    for (let m = 0; m < taps; m++) {
+        close_to(first[m], honest_first[m], 1e-9 * Math.max(1, Math.abs(honest_first[m])), 'первая половина, отвод ' + m)
+        close_to(second[m], honest_second[m], 1e-9 * Math.max(1, Math.abs(honest_second[m])), 'вторая половина, отвод ' + m)
+        close_to(first[m] + second[m] + cross[m], honest[m], 1e-9 * Math.max(1, Math.abs(honest[m])), 'все данные, отвод ' + m)
+    }
+    assert.ok(cross.some((v) => v != 0), 'слагаемые через разрез не нулевые')
+
+    // КИХ суррогатов из pidtune_noise — против pidtune_fir, собранного вручную тем же генератором и порядком блоков
+    const fir = pidtune_fir(segs, RATE_HZ)
+    const noise = pidtune_noise(segs, RATE_HZ, fir, 7)
+    const block = pidtune_rules.surrogate_block
+    const models = segs.map((s) => pidtune_model(fir.h, s.tar))
+    const pool = []
+    segs.forEach((s, k) => {
+        const e = Float64Array.from(s.act, (v, i) => v - models[k][i])
+        for (let from = 0; from + block <= e.length; from += block) pool.push(e.subarray(from, from + block))
+    })
+    const rng = pidtune_rng(7)
+    const halves = []
+    for (let rep = 0; rep < pidtune_rules.surrogate_count; rep++) {
+        const hand = segs.map((s, k) => {
+            const act = new Float64Array(s.tar.length)
+            for (let from = 0; from < act.length; from += block) {
+                const b = pool[Math.floor(rng() * pool.length)]
+                for (let m = 0; (m < block) && (from + m < act.length); m++) act[from + m] = models[k][from + m] + b[m]
+            }
+            return { ...s, act }
+        })
+        const f = pidtune_fir(hand, RATE_HZ, fir.ridge)
+        const hp = pidtune_halves(hand, pidtune_rules.window)
+        const f1 = pidtune_fir(hp[0], RATE_HZ, fir.ridge)
+        const f2 = pidtune_fir(hp[1], RATE_HZ, fir.ridge)
+        halves.push(pidtune_rms_diff(f1.step, f2.step))
+        for (let i = 0; i < f.step.length; i++) close_to(noise.firs[rep].step[i], f.step[i], 1e-9, 'КИХ суррогата ' + rep + ', отсчёт ' + i)
+        for (let i = 0; i < taps; i++) close_to(noise.firs[rep].h[i], f.h[i], 1e-9, 'h суррогата ' + rep + ', отвод ' + i)
+    }
+    close_to(noise.halves_null, halves.reduce((a, b) => a + b, 0) / halves.length, 1e-9, 'шум (б): среднее по половинам суррогатов')
+})

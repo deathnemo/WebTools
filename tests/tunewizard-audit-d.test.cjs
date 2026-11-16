@@ -2,7 +2,8 @@
 // интервала анализа (I-2: «Набор интервала», подписи «в наборе интервала», предупреждения, set_values принятого),
 // кнопка «Интервал — участок ACRO» (I-3: целые секунды внутри участка, подсказка в сводке и вердикте), «Применить
 // вариант» одним step_run (M-5), плитка «Шум D» без окон в интервале (M-6), заметки NTF и PDMX (M-7), FFT только нужных
-// компонент (M-8), отказ «не заполнены или не числа» (M-10).
+// компонент (M-8), отказ «не заполнены или не числа» (M-10) и этап 10: страница шага 4 на логе «Rate Loop Only» («±», (г),
+// «на границе», советы по осям, ранний отклик, перерегулирования нет).
 // Скрипты классические (общая глобальная область) — загружаются как на странице через vm.runInThisContext (как в
 // tests/tunewizard-common.test.cjs); DOM, оверлей, память, шаги 0–1 и 5 — заглушки ниже. Лог — поддельный PIDR
 // (первый порядок с запаздыванием, цель — две синусоиды) с двумя наборами PARM: смена P и I после последних данных.
@@ -277,7 +278,7 @@ test('I-3: «Интервал — участок ACRO» — целые секу�
     // Участок 20.3–300.7 с → 21–300; ровно на секундах — как есть; короче секунды после округления — нет
     res.mode.rate_only_segment = { start: 20.3, end: 300.7 }
     assert.deepEqual(step4_acro_interval(), { start: 21, end: 300 })
-    assert.equal(step4_acro_hint(), 'лог тестового полёта: сузьте интервал анализа до участка ACRO (21–300 с) — кнопка «Интервал — участок ACRO» под сводкой шага')
+    assert.equal(step4_acro_hint(), 'лог тестового полёта: сузьте интервал анализа до участка ACRO (21–300 с) — кнопка «Интервал — участок ACRO» под сводкой шага 4')
     assert.match(step4_acro_hint(true), /^Лог тестового полёта: /)
     res.mode.rate_only_segment = { start: 20, end: 300 }
     assert.deepEqual(step4_acro_interval(), { start: 20, end: 300 })
@@ -390,4 +391,243 @@ test('M-10: отказ «Принять» — «не заполнены или �
     assert.equal(step4_accept_refusal({ ...values, ATC_RAT_RLL_P: NaN }), 'Принять нельзя — не заполнены или не числа поля: ATC_RAT_RLL_P.')
     assert.equal(step4_accept_refusal({ ...values, ATC_RAT_PIT_I: NaN, ATC_RAT_YAW_D: -1 }),
                  'Принять нельзя — не заполнены или не числа поля: ATC_RAT_PIT_I; отрицательные значения: ATC_RAT_YAW_D.')
+})
+
+// ---------------------------------------------------------------- этап 10: «Rate Loop Only» на странице шага 4
+
+// Ось axis — копия расчёта крена (quality и mode копируются): страница показывает её как посчитанную
+function clone_axis(axis, patch = {}) {
+    const roll = step4.calc.roll
+    const quality = { ...roll.quality, checks: structuredClone(roll.quality.checks), noise: { ...roll.quality.noise, sigma: { ...roll.quality.noise.sigma } } }
+    step4.calc[axis] = { ...roll, axis, quality, mode: { ...roll.mode }, ...patch }
+    return step4.calc[axis]
+}
+
+// Ось без точности: (г) не пройдена, правил и прогноза нет
+function make_imprecise(axis, need_s = 85) {
+    const roll = step4.calc.roll
+    const res = clone_axis(axis, { status: 'imprecise', predict_ok: false, rule: { ...roll.rule, change: null, borderline: null } })
+    res.quality.precise = false
+    res.quality.checks.precision = { value: 0.124, ok: false, applied: true, need_s, reason: 'точности не хватает: погрешность отклика 0.124 (порог 0.08)' }
+    return res
+}
+
+test('Этап 10: «Rate Loop Only» — зерно оси = номер оси + 1, «±» в плитках, строка (г); повторный расчёт даёт те же числа', () => {
+    load(make_log(60, 100), [10, 50])
+    const axes = step4_axis_list.filter((a) => step4.calc[a].fir != null)
+    assert.ok(axes.length > 0, 'есть ось с откликом')
+    const first = Object.fromEntries(axes.map((a) => [a, step4.calc[a].quality.noise]))
+    for (const axis of axes) {
+        assert.equal(step4.calc[axis].quality.checks.precision.applied, true, axis)
+        assert.ok(first[axis] != null, axis)
+        // Зерно суррогатов — номер оси + 1: шум оси совпадает с pidtune_noise по её отрезкам с этим зерном и не совпадает с чужим
+        const res = step4.calc[axis]
+        const own = pidtune_noise(res.seg.segments, res.rate_hz, res.fir, step4_pid_index[axis] + 1)
+        assert.equal(first[axis].halves_null, own.halves_null, 'зерно оси ' + axis + ': halves_null')
+        assert.equal(first[axis].sigma_step, own.sigma_step, 'зерно оси ' + axis + ': sigma_step')
+        const other = pidtune_noise(res.seg.segments, res.rate_hz, res.fir, step4_pid_index[axis] + 2)
+        assert.notEqual(first[axis].halves_null, other.halves_null, 'зерно оси ' + axis + ': другое зерно даёт другое число')
+    }
+    step4_compute()
+    for (const axis of axes) {
+        const again = step4.calc[axis].quality.noise
+        assert.equal(again.halves_null, first[axis].halves_null, 'halves_null ' + axis)
+        assert.equal(again.sigma_step, first[axis].sigma_step, 'sigma_step ' + axis)
+    }
+    step4.axis = 'roll'
+    step4_render_metrics()
+    assert.ok(element('metrics4').innerHTML.includes(' ± '), element('metrics4').innerHTML)
+    assert.ok(element('metrics4').innerHTML.includes('Rate Loop Only: (а), (б), (г)'), element('metrics4').innerHTML)
+    step4_render_axis_verdict()
+    assert.ok(element('axis_verdict4').textContent.includes('Лог тестового полёта Acro «Rate Loop Only»: угловой контур выключен устройством режима, погрешность «±» — по шуму этого лога.'), element('axis_verdict4').textContent)
+    step4_render_quality()
+    const tbody = element('quality4').querySelector('tbody').innerHTML
+    assert.ok(tbody.includes('(г) точность отклика'), tbody)
+    assert.ok(tbody.includes('погрешность отклика КИХ по суррогатам — RMS на 0–0.5 с'), tbody)
+    assert.ok(tbody.includes('≤ 2.5 × шум, не меньше 0.035'), tbody)
+    assert.ok(tbody.includes('≤ 0.08'), tbody)
+    assert.match(tbody, / · шум \d\.\d{3} \(×\d+\.\d\)/)
+})
+
+test('Этап 10: точности не хватает — вкладка «мало точности (г)», вердикт и сводка с советом по рысканию, без «Слетайте тестовый лог» и «нужен тестовый полёт»', () => {
+    load(make_log(60, 100), [10, 50])
+    const yaw = make_imprecise('yaw')
+    assert.equal(step4.calc.yaw.status, 'imprecise')
+    assert.equal(yaw.quality.precise, false)
+    assert.deepEqual({ ...yaw.quality.checks.precision, reason: null }, { value: 0.124, ok: false, applied: true, need_s: 85, reason: null })
+    assert.deepEqual(step4_axis_state('yaw'), { text: 'мало точности (г)', cls: 'warn', reason: 'точности не хватает (не пройдена проверка (г))',
+                                                 all: 'Точности не хватает на всех осях (не пройдена проверка (г))' })
+    assert.equal(step4_axis_advice('roll'), null)
+    step4.axis = 'yaw'
+    step4_render_axis_verdict()
+    const verdict = element('axis_verdict4').textContent
+    assert.ok(verdict.startsWith('Точности не хватает — правил и прогноза нет: погрешность отклика 0.124 (порог 0.08).'), verdict)
+    assert.ok(verdict.includes('Отклик показан с пометкой: по нему не судят.'), verdict)
+    assert.ok(verdict.includes('Ещё ≈ 85 с резких манёвров по рысканию в Acro «Rate Loop Only», полными отклонениями стика.'), verdict)
+    assert.ok(!verdict.includes('Слетайте тестовый лог'), verdict)
+    step4_render_metrics()
+    const tiles = element('metrics4').innerHTML
+    assert.ok(tiles.includes('мало точности') && tiles.includes('(г): погрешность 0.124 &gt; 0.08') && tiles.includes('точности не хватает'), tiles)
+    step4_render_summary()
+    const summary = element('verdict4').textContent
+    assert.ok(summary.includes('рыскание — точности не хватает (не пройдена проверка (г))'), summary)
+    assert.ok(summary.includes(' По осям без надёжного измерения: рыскание — ещё ≈ 85 с резких манёвров по рысканию в Acro «Rate Loop Only», полными отклонениями стика.'), summary)
+    assert.ok(!summary.includes('нужен тестовый полёт'), summary)
+    // Одинаковые советы объединяются
+    make_imprecise('pitch', 40)
+    assert.equal(step4_axis_advice('pitch'), 'ещё ≈ 40 с резких манёвров по тангажу в Acro «Rate Loop Only»')
+    make_imprecise('yaw', 40)
+    step4_render_summary()
+    assert.ok(element('verdict4').textContent.includes('тангаж — ещё ≈ 40 с резких манёвров по тангажу'), element('verdict4').textContent)
+    // Надёжных осей нет — общая фраза
+    clone_axis('roll', { status: 'imprecise', predict_ok: false })
+    step4_render_summary()
+    assert.ok(element('verdict4').textContent.startsWith('Точности не хватает на всех осях (не пройдена проверка (г)) — правил и прогноза нет; '), element('verdict4').textContent)
+    assert.ok(element('verdict4').textContent.includes('(подробности — во вкладках осей)'))
+})
+
+test('Этап 10: «Rate Loop Only», (б) не пройдена — «Отклик менялся по ходу полёта: …»', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    roll.status = 'unreliable'
+    roll.quality.ok = false
+    roll.quality.checks.halves.ok = false
+    roll.quality.reasons = ['половины данных расходятся в 3.1 раза сильнее, чем даёт шум этого лога']
+    assert.equal(step4_axis_advice('roll'), 'отклик менялся по ходу полёта: сузьте интервал к однородному участку или слетайте ещё раз в тех же условиях (газ, батарея)')
+    step4.axis = 'roll'
+    step4_render_axis_verdict()
+    const verdict = element('axis_verdict4').textContent
+    assert.ok(verdict.includes('Отклик менялся по ходу полёта: сузьте интервал к однородному участку или слетайте ещё раз в тех же условиях (газ, батарея).'), verdict)
+    assert.ok(!verdict.includes('Слетайте тестовый лог'), verdict)
+    // (б) пройдена, не пройдена (а)
+    roll.quality.checks.halves.ok = true
+    roll.quality.checks.ridge.ok = false
+    assert.equal(step4_axis_advice('roll'), 'ещё резких манёвров по крену в Acro «Rate Loop Only»: отклик держится на регуляризации')
+    // little без need_s — до кратного 5 вверх от min_data_s − data_s
+    roll.status = 'little'
+    roll.quality.checks.precision.need_s = null
+    roll.seg = { ...roll.seg, data_s: 3.2 }
+    assert.equal(step4_axis_advice('roll'), 'ещё ≈ 10 с резких манёвров по крену в Acro «Rate Loop Only»')
+    for (const status of ['nodata', 'low_rate', 'missing', 'noresp']) {
+        roll.status = status
+        assert.equal(step4_axis_advice('roll'), null, status)
+    }
+    // не Rate Loop Only — совет как сейчас
+    roll.status = 'unreliable'
+    roll.mode = { ...roll.mode, rate_only: false }
+    assert.equal(step4_axis_advice('roll'), step4_acro_hint() ?? step4_test_flight_short)
+})
+
+test('Этап 10: на границе — сводка «тангаж — на границе 20 % (20.8 ± 1.8 %)»: с прогнозом «сравните варианты по прогнозу», без него «прогноз недостоверен — оставьте значения лога»', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    const pitch = clone_axis('pitch')
+    pitch.metrics = { ...roll.metrics, peak: 1.208, overshoot_pct: 20.8 }
+    pitch.quality.noise.sigma.peak = 0.018
+    pitch.rule = { ...roll.rule, change: null, borderline: 20, reason: 'перерегулирование 20.8 ± 1.8 % — на границе 20 %: по правилам решения нет, сравните варианты по прогнозу' }
+    pitch.validity = { ...pitch.validity, ok: false, reasons: ['запас по фазе вне диапазона'] }
+    // Прогноз достоверен: сравнить варианты
+    pitch.predict_ok = true
+    step4_render_summary()
+    assert.ok(element('verdict4').textContent.includes('тангаж — на границе 20 % (20.8 ± 1.8 %), сравните варианты по прогнозу'), element('verdict4').textContent)
+    assert.deepEqual(step4_axis_state('pitch'), { text: 'на границе 20 %', cls: 'warn', reason: null, all: null })
+    step4.axis = 'pitch'
+    step4_render_axis_verdict()
+    assert.ok(element('axis_verdict4').textContent.includes('на границе 20 %: по правилам решения нет, сравните варианты по прогнозу'), element('axis_verdict4').textContent)
+    assert.equal(element('axis_verdict4').className, 'verdict verdict--warn')
+    // Прогноз недостоверен: сравнивать не по чему — оставить значения лога
+    pitch.predict_ok = false
+    step4_render_summary()
+    assert.ok(element('verdict4').textContent.includes('тангаж — на границе 20 % (20.8 ± 1.8 %), прогноз недостоверен — оставьте значения лога'), element('verdict4').textContent)
+    assert.ok(!element('verdict4').textContent.includes('сравните варианты по прогнозу'), element('verdict4').textContent)
+    step4_render_axis_verdict()
+    const verdict = element('axis_verdict4').textContent
+    assert.ok(verdict.includes('По правилам: перерегулирование 20.8 ± 1.8 % — на границе 20 %: по правилам решения нет.'), verdict)
+    assert.ok(verdict.includes('Прогноз недостоверен: запас по фазе вне диапазона — по правилам решения нет, оставьте значения лога.'), verdict)
+    assert.ok(!verdict.includes('сравните варианты по прогнозу'), verdict)
+    assert.ok(!verdict.includes('остаются только правила'), verdict)
+    assert.equal(element('axis_verdict4').className, 'verdict verdict--warn')
+})
+
+test('Этап 10: перерегулирования нет (пик меньше 1) — сводка и плитка без отрицательного процента', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    roll.metrics = { ...roll.metrics, peak: 0.987, overshoot_pct: 0 }
+    roll.quality.noise.sigma.peak = 0.012
+    roll.rule = { ...roll.rule, change: null, borderline: 5, reason: 'x' }
+    roll.predict_ok = true
+    step4_render_summary()
+    assert.ok(element('verdict4').textContent.includes('крен — на границе 5 % (перерегулирования нет (пик 0.987 ± 0.012)), сравните варианты по прогнозу'), element('verdict4').textContent)
+    step4.axis = 'roll'
+    step4_render_metrics()
+    const tiles = element('metrics4').innerHTML
+    assert.ok(tiles.includes('перерегулирования нет: пик 0.987 ± 0.012'), tiles)
+})
+
+test('Этап 10: не «Rate Loop Only» — без (г) и «±», совет тестового полёта с «около минуты резких отклонений стиков на каждую ось»', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    roll.mode = { ...roll.mode, rate_only: false }
+    roll.quality = { ...roll.quality, noise: null, precise: true,
+                     checks: { ...roll.quality.checks, precision: { value: null, ok: null, applied: false, need_s: null, reason: null },
+                               halves: { ...roll.quality.checks.halves, noise: null, ratio: null, limit: 0.035 } } }
+    roll.pred_sigma = null
+    step4.axis = 'roll'
+    step4_render_metrics()
+    assert.ok(!element('metrics4').innerHTML.includes(' ± '))
+    assert.ok(element('metrics4').innerHTML.includes('пройдены (а)–(в)'))
+    step4_render_quality()
+    const tbody = element('quality4').querySelector('tbody').innerHTML
+    assert.ok(!tbody.includes('(г)'), tbody)
+    assert.ok(!tbody.includes('шум'), tbody)
+    assert.ok(step4_test_flight.includes('около минуты резких отклонений стиков на каждую ось'))
+    assert.ok(step4_test_flight.endsWith('По такому логу мастер измеряет сам контур скорости.'))
+    assert.ok(step4_test_flight_short.includes('около минуты резких отклонений стиков на каждую ось'))
+    roll.status = 'unreliable'
+    roll.quality.ok = false
+    step4_render_axis_verdict()
+    assert.ok(element('axis_verdict4').textContent.includes(step4_test_flight))
+    assert.equal(step4_axis_advice('roll'), step4_test_flight_short)
+})
+
+test('Этап 10: источник RATE в «Rate Loop Only» — «±» у метрик, у запаса фазы «—», без исключений', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    roll.is_rate = true
+    roll.pred_log = { ...roll.pred_log, crossover_hz: 4.31, pm_deg: NaN, pm_note: null }
+    roll.pred_sigma = { crossover_hz: 0.46, pm_deg: 8.5 }
+    roll.predict_ok = true
+    step4.axis = 'roll'
+    step4_render_metrics()
+    const tiles = element('metrics4').innerHTML
+    assert.ok(tiles.includes(' ± '), tiles)
+    assert.ok(tiles.includes('4.31 ± 0.46 Гц · —<'), tiles)
+    assert.doesNotThrow(() => { step4_render_axis_verdict(); step4_render_quality(); step4_render_summary() })
+    // Так даёт код (pidtune_validity): по RATE прогноз не считается — достоверности нет, у среза и запаса фазы «—», исключений нет
+    roll.predict_ok = false
+    roll.validity = { ...roll.validity, ok: false, reasons: ['по RATE прогноз не считается: цель записана до фильтра FLTT, выход — с FF'] }
+    step4_render_metrics()
+    assert.ok(element('metrics4').innerHTML.includes('Срез · запас фазы (лог)</span><span class="stat__v">—</span>'), element('metrics4').innerHTML)
+    assert.doesNotThrow(() => { step4_render_axis_verdict(); step4_render_quality(); step4_render_summary() })
+})
+
+test('Этап 10: ранний отклик — у «Нарастания» пометка «начало отклика не определено: КИХ даёт 0.16 уже на 5 мс …» при |отклик на 5 мс| ≥ 0.05; меньше 0.05 и без «Rate Loop Only» — пометки нет', () => {
+    load(make_log(60, 100), [10, 50])
+    const roll = step4.calc.roll
+    const index = Math.round(0.005 * roll.rate_hz)
+    const step = Array.from(roll.fir.step)
+    step[index] = 0.16
+    roll.fir = { ...roll.fir, step }
+    step4.axis = 'roll'
+    step4_render_metrics()
+    assert.ok(element('metrics4').innerHTML.includes('начало отклика не определено: КИХ даёт 0.16 уже на 5 мс (цель сглажена пределом ускорения), нарастание 10–90 % смещено'), element('metrics4').innerHTML)
+    step[index] = 0.049
+    roll.fir = { ...roll.fir, step }
+    step4_render_metrics()
+    assert.ok(!element('metrics4').innerHTML.includes('начало отклика не определено'))
+    step[index] = 0.16
+    roll.fir = { ...roll.fir, step }
+    roll.mode = { ...roll.mode, rate_only: false }
+    step4_render_metrics()
+    assert.ok(!element('metrics4').innerHTML.includes('начало отклика не определено'))
 })
