@@ -2243,3 +2243,60 @@ test('pidtune_noise_margins: разброс частоты среза и зап�
     const b = pidtune_noise_margins(pidtune_noise(m.seg.segments, m.seg.rate_hz, m.fir, 1), c_log, m.seg.rate_hz)
     assert.deepEqual(b, a)
 })
+
+test('pidtune_noise: правые части через разрез (половины + pidtune_cross_cut) = честные суммы всех данных; КИХ суррогатов = pidtune_fir суррогата и его половин', () => {
+    // Три отрезка разной длины, середина (3400 из 6800) — внутри второго (разрез на отсчёте 1400)
+    const mk = (n, seed) => noise_segment(n, seed, (tar, k) => 0.6 * ((k > 0) ? tar[k - 1] : 0) + 0.3 * ((k > 1) ? tar[k - 2] : 0) + 8 * Math.sin(k * 0.37 + seed))
+    const segs = [mk(2000, 31), mk(3300, 32), mk(1500, 33)]
+    const taps = Math.round(pidtune_rules.fir_length_s * RATE_HZ)
+    const parts = pidtune_halves(segs, pidtune_rules.window)
+    assert.equal(parts[0].length + parts[1].length, segs.length + 1, 'разрез внутри отрезка')
+    const cut = parts[0][parts[0].length - 1].tar.length
+    assert.equal(cut, 1400)
+    // Суррогатная «факт» — произвольная, не равная исходной
+    const sur = segs.map((s, k) => ({ ...s, act: Float64Array.from(s.act, (v, i) => v * 0.8 + Math.cos(i * 0.11 + k)) }))
+    const sp = pidtune_halves(sur, pidtune_rules.window)
+    const first = pidtune_cross_sums(sp[0], taps)
+    const second = pidtune_cross_sums(sp[1], taps)
+    const cross = pidtune_cross_cut(sur[1], cut, taps)
+    const honest = pidtune_correlations(sur, taps).cry
+    const honest_first = pidtune_correlations(sp[0], taps).cry
+    const honest_second = pidtune_correlations(sp[1], taps).cry
+    for (let m = 0; m < taps; m++) {
+        close_to(first[m], honest_first[m], 1e-9 * Math.max(1, Math.abs(honest_first[m])), 'первая половина, отвод ' + m)
+        close_to(second[m], honest_second[m], 1e-9 * Math.max(1, Math.abs(honest_second[m])), 'вторая половина, отвод ' + m)
+        close_to(first[m] + second[m] + cross[m], honest[m], 1e-9 * Math.max(1, Math.abs(honest[m])), 'все данные, отвод ' + m)
+    }
+    assert.ok(cross.some((v) => v != 0), 'слагаемые через разрез не нулевые')
+
+    // КИХ суррогатов из pidtune_noise — против pidtune_fir, собранного вручную тем же генератором и порядком блоков
+    const fir = pidtune_fir(segs, RATE_HZ)
+    const noise = pidtune_noise(segs, RATE_HZ, fir, 7)
+    const block = pidtune_rules.surrogate_block
+    const models = segs.map((s) => pidtune_model(fir.h, s.tar))
+    const pool = []
+    segs.forEach((s, k) => {
+        const e = Float64Array.from(s.act, (v, i) => v - models[k][i])
+        for (let from = 0; from + block <= e.length; from += block) pool.push(e.subarray(from, from + block))
+    })
+    const rng = pidtune_rng(7)
+    const halves = []
+    for (let rep = 0; rep < pidtune_rules.surrogate_count; rep++) {
+        const hand = segs.map((s, k) => {
+            const act = new Float64Array(s.tar.length)
+            for (let from = 0; from < act.length; from += block) {
+                const b = pool[Math.floor(rng() * pool.length)]
+                for (let m = 0; (m < block) && (from + m < act.length); m++) act[from + m] = models[k][from + m] + b[m]
+            }
+            return { ...s, act }
+        })
+        const f = pidtune_fir(hand, RATE_HZ, fir.ridge)
+        const hp = pidtune_halves(hand, pidtune_rules.window)
+        const f1 = pidtune_fir(hp[0], RATE_HZ, fir.ridge)
+        const f2 = pidtune_fir(hp[1], RATE_HZ, fir.ridge)
+        halves.push(pidtune_rms_diff(f1.step, f2.step))
+        for (let i = 0; i < f.step.length; i++) close_to(noise.firs[rep].step[i], f.step[i], 1e-9, 'КИХ суррогата ' + rep + ', отсчёт ' + i)
+        for (let i = 0; i < taps; i++) close_to(noise.firs[rep].h[i], f.h[i], 1e-9, 'h суррогата ' + rep + ', отвод ' + i)
+    }
+    close_to(noise.halves_null, halves.reduce((a, b) => a + b, 0) / halves.length, 1e-9, 'шум (б): среднее по половинам суррогатов')
+})
