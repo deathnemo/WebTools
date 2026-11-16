@@ -39,7 +39,7 @@
 
 **Файлы:**
 - Изменить: `docs/plans/2026-11-16-tune-wizard-stage10-design.md` — новый раздел «11. Итог задачи 1»; значения разделов 3.2–3.4 и 10, если сдвинутся.
-- Скрипты — во временной папке сеанса, в git не идут. Исходные (можно брать за основу): `C:\Users\user\AppData\Local\Temp\claude\0e56b5549dfffe84\423d6110-5641-4ec2-9f8d-8752cd42e1fa\scratchpad\tw\` — `research.cjs`, `synth.cjs` (генератор `simulate` берётся из `tests/tunewizard-pidtune.test.cjs` как есть), `precision.cjs`, `precision3.cjs`. Четвёртый лог — `TuneWizard/logs/2 01.01.1970 2-00-00.bin`.
+- Скрипты — во временной папке сеанса (после задачи 1 их копия с выводами — в `docs/plans/2026-11-16-tune-wizard-stage10-research/`). Исходные (можно брать за основу): `C:\Users\user\AppData\Local\Temp\claude\0e56b5549dfffe84\423d6110-5641-4ec2-9f8d-8752cd42e1fa\scratchpad\tw\` — `research.cjs`, `synth.cjs` (генератор `simulate` берётся из `tests/tunewizard-pidtune.test.cjs` как есть), `precision.cjs`, `precision3.cjs`. Четвёртый лог — `TuneWizard/logs/2 01.01.1970 2-00-00.bin`.
 
 **Интерфейсы:**
 - Производит (в разделе 11 дизайна): `REAL_NOISE = { dur_s, turb_dps2, dist_dps2 }` — синтетика с остатком 5–9 % дисперсии факта (объект `PLANT_NORMAL`, регулятор `G0`); `TOO_NOISY = { dur_s, turb_dps2, dist_dps2 }` — синтетика, где σ отклика > 0.1; значения `halves_ratio_max`, `step_sigma_max`, `step_sigma_goal`, `osc_sigma_k`.
@@ -99,18 +99,20 @@ test('pidtune_need_s: до σ 0.05, вверх до 5 с; σ не больше �
     assert.equal(pidtune_need_s(0.05, 10), 0)
 })
 test('pidtune_toeplitz_factor и apply — то же, что pidtune_toeplitz_solve', () => { /* col [4, 1, 0.5, 0.2], diag 0.1, два rhs: разница ≤ 1e-12 */ })
-test('pidtune_noise: одно зерно — одинаковые числа; другое зерно — другие, в пределах ×1.5', () => {
-    // measure(simulate(G0, { ...REAL_NOISE, seed: 3, plant: PLANT_NORMAL }), G0); deepEqual [halves_null, sigma_step, sigma.peak] двух расчётов с зерном 1
+test('pidtune_noise: одно зерно — одинаковые числа; другое зерно — другие: halves_null и sigma_step в пределах ×1.5, sigma.peak — ×2', () => {
+    // measure(simulate(G0, { ...REAL_NOISE, seed: 3, plant: PLANT_NORMAL }), G0); deepEqual [halves_null, sigma_step, sigma.peak] двух расчётов с зерном 1;
+    // зерно 2 — другие числа; допуск sigma.peak ×2: от зерна он меняется до 1.75 раза (раздел 11.3 дизайна)
 })
 test('pidtune_quality, Rate Loop Only, реальный шум без смены объекта: (б) пройдена при любом зерне, хотя прежний порог 0.035 — нет', () => {
     // зёрна полёта 3, 5, 7, 11, 13: checks.halves.ok true, ratio < halves_ratio_max; хотя бы у одного value > 0.035
 })
-test('pidtune_quality, Rate Loop Only, реальный шум, объект K ×0.75 и ×1.25 с середины: (б) не пройдена, причина «раза сильнее, чем даёт шум»', () => {
+test('pidtune_quality, Rate Loop Only, реальный шум, объект K ×0.6 и ×1.5 с середины: (б) не пройдена, причина «раза сильнее, чем даёт шум»', () => {
     // зёрна 3, 5, 7: checks.halves.ok false, ratio > halves_ratio_max, reasons — /раза сильнее, чем даёт шум этого лога/
+    // (K ×0.75 и ×1.25 при реальном шуме (б) ловит не всегда — раздел 11.2 дизайна)
 })
 test('pidtune_quality, Rate Loop Only, малый шум (синтетика тестов, 150 с): нижняя граница — limit 0.035, (б) и (г) пройдены', () => {})
 test('pidtune_quality без Rate Loop Only: прежний порог 0.035, noise null, precise true, (г) не применяется', () => {})
-test('pidtune_quality, Rate Loop Only, TOO_NOISY: precise false, (г) value > 0.08, need_s = pidtune_need_s(value, данных), кратно 5', () => {})
+test('pidtune_quality, Rate Loop Only, TOO_NOISY, зерно полёта 3: (а) пройдена, precise false, (г) value > 0.08, need_s = pidtune_need_s(value, данных), кратно 5', () => {})
 test('pidtune_quality, Rate Loop Only, короткие данные (12 с): без исключений, need_s — число, в причинах нет NaN и undefined', () => {})
 test('pidtune_quality, Rate Loop Only, пул остатков пуст (один отрезок 300 отсчётов): noise null, (б) и (г) не пройдены с причинами', () => {})
 test('pidtune_osc_min_pp: max(osc_min_pp, osc_sigma_k·σ); без шума — osc_min_pp', () => {})
@@ -158,7 +160,7 @@ test('pidtune_noise_margins: разброс частоты среза и зап�
 - Плитки при `quality.noise`: «50.7 ± 4.3 мс», «17.3 ± 4.0 %», «1.098 ± 0.040», «4.31 ± 0.46 Гц · 66.5 ± 8.5°» (последняя — при `res.pred_sigma`); «Измерение» у `ok` при `rate_only` — подпись «Rate Loop Only: (а), (б), (г)», у `imprecise` — `["мало точности", "(г): погрешность " + σ.toFixed(3) + " > " + step_sigma_max, "bad"]`; `step4_unreliable_mark` у `imprecise` — «точности не хватает».
 - Таблица качества при `rate_only`: (б) — значение `v.toFixed(3) + " · шум " + null.toFixed(3) + " (×" + ratio.toFixed(1) + ")"`, порог `"≤ 2.5 × шум, не меньше 0.035"` (числа — из `pidtune_rules`); строка (г) — «(г) точность отклика», пояснение «погрешность отклика КИХ по суррогатам — RMS на 0–0.5 с», значение σ, порог «≤ 0.08»; без `rate_only` строки (г) нет.
 - `step4_test_flight`: `"Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only» (значение 2, или 3 вместе с Air-mode) и ACRO_TRAINER = 0 — угловой контур выключен, цель — прямая команда пилота (тренер при ACRO_TRAINER ≠ 0 подмешивал бы в неё выравнивание по углу); около минуты резких отклонений стиков на каждую ось, рыскание — полными отклонениями стика; в LOG_BITMASK включены ATTITUDE_FAST и PID. По такому логу мастер измеряет сам контур скорости."`; `step4_test_flight_short`: `"нужен тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only» (2, или 3 с Air-mode) и ACRO_TRAINER = 0, около минуты резких отклонений стиков на каждую ось, в LOG_BITMASK — ATTITUDE_FAST и PID"`.
-- Если задача 1 решила, что нужна пометка раннего отклика у плитки «Нарастание», — добавить её здесь (текст — из раздела 11 дизайна).
+- Пометка раннего отклика (раздел 11.6 дизайна): при `rate_only` и |`fir.step[Math.round(0.005 · rate_hz)]`| ≥ 0.05 подпись плитки «Нарастание» — `"начало отклика не определено: КИХ даёт " + v.toFixed(2) + " уже на 5 мс (цель сглажена пределом ускорения), нарастание 10–90 % смещено"` вместо подписи полосы; без `rate_only` пометки нет.
 
 - [ ] **Шаг 1: тесты (сначала падают)** в `tests/tunewizard-audit-d.test.cjs` (лог харнесса — «Rate Loop Only», после `load` у осей `quality.noise` есть):
   - `'Этап 10: «Rate Loop Only» — зерно оси, «±» в плитках, строка (г); повторный расчёт даёт те же числа'` — `res.quality.checks.precision.applied` true у всех осей; `step4_compute()` дважды → одинаковые `halves_null`, `sigma_step`; `metrics4.innerHTML` содержит « ± »; tbody `quality4` содержит «(г) точность отклика»;
@@ -166,7 +168,8 @@ test('pidtune_noise_margins: разброс частоты среза и зап�
   - `'Этап 10: «Rate Loop Only», (б) не пройдена — «Отклик менялся по ходу полёта: …»'`;
   - `'Этап 10: на границе — сводка «тангаж — на границе 20 % (20.8 ± 1.8 %), сравните варианты по прогнозу»'`;
   - `'Этап 10: не «Rate Loop Only» — без (г) и «±», совет тестового полёта с «около минуты резких отклонений стиков на каждую ось»'`;
-  - `'Этап 10: источник RATE в «Rate Loop Only» — «±» у метрик, у запаса фазы «—», без исключений'`.
+  - `'Этап 10: источник RATE в «Rate Loop Only» — «±» у метрик, у запаса фазы «—», без исключений'`;
+  - `'Этап 10: ранний отклик — у «Нарастания» пометка «начало отклика не определено: КИХ даёт 0.16 уже на 5 мс …» при |отклик на 5 мс| ≥ 0.05; меньше 0.05 и без «Rate Loop Only» — пометки нет'` (отклик КИХ на 5 мс задаётся в `res.fir.step`).
 - [ ] **Шаг 2.** `npm test` — новые падают.
 - [ ] **Шаг 3.** Реализовать по «Поведению и текстам».
 - [ ] **Шаг 4.** `npm test`, `npm run lint` — зелёные. Прежние тесты `-audit-d` и `-steps`, где сверяется начало `step4_test_flight*`, проходят без правки (меняется только хвост текста).
