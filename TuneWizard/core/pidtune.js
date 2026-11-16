@@ -25,6 +25,10 @@
 // растёт с частотой, фаза около −90°). Точно мастер считает тестовый полёт Acro с ACRO_OPTIONS «Rate Loop Only»
 // (pidtune_log_mode) — решение пользователя 25.10.2026.
 //
+// Этап 10 (дизайн 2026-11-16-tune-wizard-stage10-design.md, разделы 3.1–3.4 и 11): на интервале «Rate Loop Only» шум лога
+// считается суррогатами (pidtune_noise: модель КИХ + остатки блоками с возвращением), от него зависят проверка (б) (порог —
+// отношение к шуму), новая проверка (г) «точность отклика», «±» метрик и правила с запасом 1σ. Остальные интервалы — как раньше.
+//
 // Прогноз (раздел 4 дизайна) — из измеренной T («цель → факт», FFT импульсной характеристики КИХ), а не из оценки
 // объекта «выход → факт»: та по замкнутому контуру смещена (P_H1 = ρ·P − (1 − ρ)/C, ρ — когерентность «цель → ошибка»,
 // на логе пользователя 0.52–0.87, а для 10 % на частоте среза нужно ρ ≥ 0.9). Объект вместе с фильтрами гироскопа
@@ -68,6 +72,26 @@ const pidtune_rules = {
     // бы (а). В исследовании (половины по времени интервала, (в) окном 1024): без ошибок ≤ 0.018 / ≤ 0.026 / ≤ 1.51,
     // с ошибками 0.047–0.164 / 0.040–0.069 / 1.3–6.3
     quality: { ridge_rms_max: 0.03, halves_rms_max: 0.035, outer_t_max: 1.5, outer_band_hz: [4, 12] },
+    // Этап 10 — только на интервале Acro «Rate Loop Only» (дизайн этапа 10, разделы 3.1–3.4 и 11; калибровка — задача 1,
+    // скрипты docs/plans/2026-11-16-tune-wizard-stage10-research/task1/):
+    // суррогатов «модель КИХ + остатки блоками с возвращением» — 32 [наше: устойчивая оценка разброса, ≈ 1 с на 80 с данных]
+    surrogate_count: 32,
+    // блок остатков, отсчётов (окно отбора) [наше: блоки 256 и 1024 дают то же, раздел 11.3]
+    surrogate_block: 512,
+    // (б) пройдена, если RMS половин не больше max(quality.halves_rms_max, это число × шум (б) суррогатов): в просвете
+    // между «без смены» (синтетика ≤ 1.28, [лог4] ≤ 2.11) и сменой K ×0.6 / ×1.5 (≥ 2.60) [синтетика, лог4, раздел 11.2]
+    halves_ratio_max: 2.5,
+    // (г) пройдена, если σ отклика (RMS отклонения КИХ суррогатов от КИХ лога на 0–0.5 с) не больше: в просвете между
+    // осями [лог4] с точностью (крен и тангаж ≤ 0.054) и рысканием (≥ 0.105) [лог4, синтетика, раздел 11.4]
+    step_sigma_max: 0.08,
+    // «Ещё N с данных» — до σ отклика не больше этого: перерегулирование ± 2.2–4.2 п., полоса 5–20 % различима [лог4, наше]
+    step_sigma_goal: 0.05,
+    // Запас правил: перерегулирование сравнивается с порогами 5 и 20 % с запасом этого числа σ [наше: 1σ — шаг правил ±10 %,
+    // каждый проход меряет заново, а 2σ требует вчетверо больше данных]
+    rule_margin_sigma: 1,
+    // Колебания на плато — размах не меньше max(osc_min_pp, это число × σ отклика): наименьшее без ложных колебаний
+    // на синтетике при шуме как у [лог4] [синтетика, лог4, раздел 11.5]
+    osc_sigma_k: 4,
     gain_step: 0.10,              // ±10 % [wiki]
     yaw_i_ratio: 0.1,             // I рыскания = 0.1·P [код, AC_AutoTune_Multi.cpp, AUTOTUNE_YAW_PI_RATIO_FINAL]
     p_min: 0.01,                  // [код, AC_AutoTune_Multi.cpp, AUTOTUNE_RP_MIN]
@@ -247,10 +271,11 @@ function pidtune_correlations(segments, taps) {
     return { crr: crr, cry: cry, samples: samples, windows: windows }
 }
 
-// Решение симметричной тёплицевой системы (col[|i − j|] + diag_add·[i = j])·x = rhs разложением Холецкого.
-// → Float64Array x | null (матрица не положительно определена — данных нет)
-function pidtune_toeplitz_solve(col, rhs, diag_add) {
-    const n = rhs.length
+// Разложение Холецкого симметричной тёплицевой матрицы (col[|i − j|] + diag_add·[i = j]) = L·Lᵀ, n = col.length;
+// одно на набор данных — суррогатам (pidtune_noise) нужны только новые правые части и pidtune_toeplitz_apply.
+// → Float64Array L (n·n, нижний треугольник по строкам) | null (матрица не положительно определена — данных нет)
+function pidtune_toeplitz_factor(col, diag_add) {
+    const n = col.length
     const L = new Float64Array(n * n)
     for (let i = 0; i < n; i++) {
         const ri = i * n
@@ -270,24 +295,58 @@ function pidtune_toeplitz_solve(col, rhs, diag_add) {
             }
         }
     }
+    return L
+}
+
+// Решение L·Lᵀ·x = rhs по разложению pidtune_toeplitz_factor: два прохода по треугольным системам, O(n²).
+// → Float64Array x (rhs.length = n)
+function pidtune_toeplitz_apply(factor, rhs) {
+    const n = rhs.length
     // L·z = rhs, затем Lᵀ·x = z
     const z = new Float64Array(n)
     for (let i = 0; i < n; i++) {
         let s = rhs[i]
         for (let k = 0; k < i; k++) {
-            s -= L[i * n + k] * z[k]
+            s -= factor[i * n + k] * z[k]
         }
-        z[i] = s / L[i * n + i]
+        z[i] = s / factor[i * n + i]
     }
     const x = new Float64Array(n)
     for (let i = n - 1; i >= 0; i--) {
         let s = z[i]
         for (let k = i + 1; k < n; k++) {
-            s -= L[k * n + i] * x[k]
+            s -= factor[k * n + i] * x[k]
         }
-        x[i] = s / L[i * n + i]
+        x[i] = s / factor[i * n + i]
     }
     return x
+}
+
+// Решение симметричной тёплицевой системы (col[|i − j|] + diag_add·[i = j])·x = rhs разложением Холецкого — композиция
+// pidtune_toeplitz_factor и pidtune_toeplitz_apply; матрица — по первым rhs.length элементам col.
+// → Float64Array x | null (матрица не положительно определена — данных нет)
+function pidtune_toeplitz_solve(col, rhs, diag_add) {
+    const factor = pidtune_toeplitz_factor((col.length == rhs.length) ? col : col.slice(0, rhs.length), diag_add)
+    return (factor == null) ? null : pidtune_toeplitz_apply(factor, rhs)
+}
+
+// Отклик по решению нормальных уравнений x (h[1…taps − 1], h[0] = 0): h и накопленная сумма h на 0…step_length_s
+// → { h, time, step }
+function pidtune_fir_response(x, taps, rate_hz, rules = pidtune_rules) {
+    const h = new Float64Array(taps)
+    h.set(x, 1)
+
+    // Отклик на ступеньку — накопленная сумма h на 0…step_length_s
+    const n_out = Math.min(taps, Math.round(rules.step_length_s * rate_hz) + 1)
+    const time = new Array(n_out)
+    const step = new Array(n_out)
+    let sum = 0
+    for (let i = 0; i < n_out; i++) {
+        sum += h[i]
+        time[i] = i / rate_hz
+        step[i] = sum
+    }
+    return { h: h, time: time, step: step }
 }
 
 // КИХ по готовым суммам corr (pidtune_correlations) с гребнем ridge·c_rr(0) и h[0] = 0: прямой связи «цель → факт»
@@ -303,20 +362,8 @@ function pidtune_fir_from(corr, rate_hz, ridge, rules = pidtune_rules) {
     if ((x == null) || !x.every(Number.isFinite)) {
         return null
     }
-    const h = new Float64Array(taps)
-    h.set(x, 1)
-
-    // Отклик на ступеньку — накопленная сумма h на 0…step_length_s
-    const n_out = Math.min(taps, Math.round(rules.step_length_s * rate_hz) + 1)
-    const time = new Array(n_out)
-    const step = new Array(n_out)
-    let sum = 0
-    for (let i = 0; i < n_out; i++) {
-        sum += h[i]
-        time[i] = i / rate_hz
-        step[i] = sum
-    }
-    return { h: h, time: time, step: step, windows: corr.windows, samples: corr.samples, ridge: ridge, corr: corr }
+    const response = pidtune_fir_response(x, taps, rate_hz, rules)
+    return { h: response.h, time: response.time, step: response.step, windows: corr.windows, samples: corr.samples, ridge: ridge, corr: corr }
 }
 
 // КИХ МНК «цель → факт» по отрезкам (pidtune_segments): нормальные уравнения по автокорреляции цели и взаимной
@@ -372,6 +419,237 @@ function pidtune_halves(segments, window) {
         acc += n
     }
     return [first, second]
+}
+
+// Детерминированный генератор mulberry32: seed — целое, → функция без аргументов, числа в [0, 1). Один генератор на
+// набор суррогатов (pidtune_noise): то же зерно — те же числа [наше, тесты и ключ расчёта страницы]
+function pidtune_rng(seed) {
+    let a = seed >>> 0
+    return () => {
+        a = (a + 0x6D2B79F5) >>> 0
+        let t = a
+        t = Math.imul(t ^ (t >>> 15), t | 1)
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+}
+
+// Устойчивый разброс: половина размаха между 16-м и 84-м процентилями (у нормального — СКО). Процентиль — линейная
+// интерполяция по позиции q·(n − 1) отсортированных значений; нечисловые и бесконечные пропускаются [наше: у пика по
+// 32 суррогатам СКО гуляет от зерна в 2 раза, раздел 3.1 дизайна этапа 10]. → число | NaN (меньше двух конечных)
+function pidtune_spread(values) {
+    const v = values.filter((x) => (typeof x === "number") && Number.isFinite(x)).sort((a, b) => a - b)
+    if (v.length < 2) {
+        return NaN
+    }
+    const percentile = (q) => {
+        const pos = q * (v.length - 1)
+        const i = Math.floor(pos)
+        return (i + 1 < v.length) ? v[i] + (pos - i) * (v[i + 1] - v[i]) : v[i]
+    }
+    return (percentile(0.84) - percentile(0.16)) / 2
+}
+
+// Сколько ещё секунд данных до σ отклика step_sigma_goal при σ сейчас и data_s секундах данных: σ ∝ 1/√(данных),
+// ещё = data_s·((σ / goal)² − 1), вверх до кратного 5 с [наше]. σ не больше цели — 0
+function pidtune_need_s(sigma, data_s, rules = pidtune_rules) {
+    if (!(sigma > rules.step_sigma_goal)) {
+        return 0
+    }
+    return Math.ceil(data_s * ((sigma / rules.step_sigma_goal) ** 2 - 1) / 5 - 1e-9) * 5
+}
+
+// Свёртка модели: y[k] = Σ h[m]·x[k − m], m ≥ 1, за краями — нули (как pidtune_correlations; h[0] = 0)
+function pidtune_model(h, x) {
+    const y = new Float64Array(x.length)
+    for (let k = 0; k < x.length; k++) {
+        let s = 0
+        const m_max = Math.min(h.length - 1, k)
+        for (let m = 1; m <= m_max; m++) {
+            s += h[m] * x[k - m]
+        }
+        y[k] = s
+    }
+    return y
+}
+
+// Взаимная корреляция «факт ← цель» по отрезкам: cry[m] = Σ y[k]·r[k − m], m = 0…taps − 1 (как cry у
+// pidtune_correlations; автокорреляция цели у суррогатов та же, её считать не нужно)
+function pidtune_cross_sums(segments, taps) {
+    const cry = new Float64Array(taps)
+    for (const seg of segments) {
+        const r = seg.tar
+        const y = seg.act
+        const n = r.length
+        const lags = Math.min(taps, n)
+        // По четыре задержки за проход: y[k] читается один раз — в 1.5–2 раза быстрее (32 суррогата по 60 с при 1 кГц)
+        let lag = 0
+        for (; lag + 3 < lags; lag += 4) {
+            let b0 = 0
+            let b1 = 0
+            let b2 = 0
+            let b3 = 0
+            for (let k = lag + 3; k < n; k++) {
+                const v = y[k]
+                b0 += v * r[k - lag]
+                b1 += v * r[k - lag - 1]
+                b2 += v * r[k - lag - 2]
+                b3 += v * r[k - lag - 3]
+            }
+            // Начало (k до lag + 2), где не у всех четырёх задержек есть пара
+            for (let k = lag; k < lag + 3; k++) {
+                b0 += y[k] * r[k - lag]
+                b1 += (k >= lag + 1) ? y[k] * r[k - lag - 1] : 0
+                b2 += (k >= lag + 2) ? y[k] * r[k - lag - 2] : 0
+            }
+            cry[lag] += b0
+            cry[lag + 1] += b1
+            cry[lag + 2] += b2
+            cry[lag + 3] += b3
+        }
+        for (; lag < lags; lag++) {
+            let b = 0
+            for (let k = lag; k < n; k++) {
+                b += y[k] * r[k - lag]
+            }
+            cry[lag] += b
+        }
+    }
+    return cry
+}
+
+// Слагаемые взаимной корреляции отрезка seg, которые пропадают при разрезе на cut отсчёте (половины, pidtune_halves):
+// пары «факт после разреза ← цель до разреза», cross[m] = Σ y[k]·r[k − m] по k от max(cut, m) до min(cut + m, n) − 1.
+// Сумма по всем данным = сумма по первой половине + сумма по второй + эти слагаемые — так правые части КИХ всех данных
+// и двух половин считаются за один проход по данным, O(отсчёты·M + M²)
+function pidtune_cross_cut(seg, cut, taps) {
+    const cross = new Float64Array(taps)
+    const n = seg.tar.length
+    for (let m = 1; m < taps; m++) {
+        let s = 0
+        for (let k = Math.max(cut, m); k < Math.min(cut + m, n); k++) {
+            s += seg.act[k] * seg.tar[k - m]
+        }
+        cross[m] = s
+    }
+    return cross
+}
+
+// Шум лога по суррогатам (раздел 3.1 дизайна этапа 10): сколько проверка (б) и отклик дают сами по себе, из-за остатка
+// модели, без смены объекта. По отрезкам оси и КИХ всех данных fir (pidtune_fir):
+//   модель отрезка — свёртка fir.h с целью, остаток e = факт − модель; пул — все полные блоки по surrogate_block отсчётов
+//   из остатков всех отрезков (отрезки по порядку, в отрезке блоки с начала); суррогат — модель + блоки пула, выбранные
+//   случайно с возвращением (последний блок отрезка обрезается), цель и отрезки те же. Порядок выборок: суррогат →
+//   отрезок → блок, блок — pool[floor(rng()·длина пула)], rng — pidtune_rng(seed).
+//   По каждому из surrogate_count суррогатов — КИХ всех данных (тот же гребень fir.ridge) и КИХ двух половин
+//   (pidtune_halves). Разложение Холецкого — одно на набор данных (все, первая половина, вторая): суррогатам — только
+//   новые правые части и pidtune_toeplitz_apply.
+// Суррогаты считают остаток независимым от цели — это верно, когда цель — команда пилота (Acro «Rate Loop Only»); на
+// других интервалах цель строится из факта, и перемешивание блоков рвёт эту связь (раздел 3 дизайна), их шаг 4 не вызывает.
+// segments, rate_hz — pidtune_segments, seed — зерно (страница: номер оси + 1).
+// → { count (суррогатов), valid (у которых решились все три КИХ), halves_null (среднее (б) суррогатов), sigma_step
+// (√ среднего квадрата RMS отклонения отклика КИХ суррогата от fir.step), sigma: { peak, rise_s, plateau }
+// (pidtune_spread метрик pidtune_step_metrics суррогатов), firs: [{ h, time, step }] (КИХ суррогатов, без corr) } |
+// null — нет КИХ, пул остатков пуст (нет ни одного полного блока), valid меньше count / 2
+function pidtune_noise(segments, rate_hz, fir, seed = 1, rules = pidtune_rules) {
+    if ((fir == null) || (segments == null) || (segments.length == 0)) {
+        return null
+    }
+    const block = rules.surrogate_block
+    const count = rules.surrogate_count
+    const taps = fir.h.length
+    const models = segments.map((seg) => pidtune_model(fir.h, seg.tar))
+    const pool = []
+    for (let k = 0; k < segments.length; k++) {
+        const e = new Float64Array(models[k].length)
+        for (let i = 0; i < e.length; i++) {
+            e[i] = segments[k].act[i] - models[k][i]
+        }
+        for (let from = 0; from + block <= e.length; from += block) {
+            pool.push(e.subarray(from, from + block))
+        }
+    }
+    if (pool.length == 0) {
+        return null
+    }
+
+    // Разложения: все данные, первая и вторая половины (автокорреляция цели одна у лога и у каждого суррогата)
+    const parts = pidtune_halves(segments, rules.window)
+    const factor_of = (corr) => pidtune_toeplitz_factor(corr.crr.subarray(0, taps - 1), fir.ridge * corr.crr[0])
+    const factors = [factor_of(fir.corr ?? pidtune_correlations(segments, taps)), factor_of(pidtune_correlations(parts[0], taps)),
+                     factor_of(pidtune_correlations(parts[1], taps))]
+    if (factors.some((f) => f == null)) {
+        return null
+    }
+    // Отрезок, разрезанный пополам (если разрез не на границе отрезков) и номер отсчёта разреза в нём
+    const cut = (parts[0].length + parts[1].length > segments.length) ? { index: parts[0].length - 1, at: parts[0][parts[0].length - 1].tar.length } : null
+
+    const rng = pidtune_rng(seed)
+    const halves = []
+    const diffs = []
+    const metrics = []
+    const firs = []
+    for (let rep = 0; rep < count; rep++) {
+        const sur = segments.map((seg, k) => {
+            const act = new Float64Array(seg.tar.length)
+            for (let from = 0; from < act.length; from += block) {
+                const b = pool[Math.floor(rng() * pool.length)]
+                for (let m = 0; (m < block) && (from + m < act.length); m++) {
+                    act[from + m] = models[k][from + m] + b[m]
+                }
+            }
+            return { start_time: seg.start_time, tar: seg.tar, act: act, starts: seg.starts }
+        })
+        // Правые части: половины — по своим отрезкам, все данные — их сумма и слагаемые через разрез
+        const sur_parts = pidtune_halves(sur, rules.window)
+        const cry_first = pidtune_cross_sums(sur_parts[0], taps)
+        const cry_second = pidtune_cross_sums(sur_parts[1], taps)
+        const cry_all = new Float64Array(taps)
+        const cross = (cut != null) ? pidtune_cross_cut(sur[cut.index], cut.at, taps) : null
+        for (let m = 0; m < taps; m++) {
+            cry_all[m] = cry_first[m] + cry_second[m] + ((cross != null) ? cross[m] : 0)
+        }
+        const x = [cry_all, cry_first, cry_second].map((cry, i) => pidtune_toeplitz_apply(factors[i], cry.subarray(1)))
+        if (!x.every((v) => v.every(Number.isFinite))) {
+            continue
+        }
+        const f_all = pidtune_fir_response(x[0], taps, rate_hz, rules)
+        const f_first = pidtune_fir_response(x[1], taps, rate_hz, rules)
+        const f_second = pidtune_fir_response(x[2], taps, rate_hz, rules)
+        halves.push(pidtune_rms_diff(f_first.step, f_second.step))
+        diffs.push(pidtune_rms_diff(f_all.step, fir.step))
+        metrics.push(pidtune_step_metrics(f_all.time, f_all.step, rules))
+        firs.push(f_all)
+    }
+    if (firs.length < count / 2) {
+        return null
+    }
+    const pick = (key) => metrics.map((m) => (m == null) ? NaN : (m[key] ?? NaN))
+    const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length
+    return {
+        count: count,
+        valid: firs.length,
+        halves_null: mean(halves),
+        sigma_step: Math.sqrt(mean(diffs.map((d) => d * d))),
+        sigma: { peak: pidtune_spread(pick("peak")), rise_s: pidtune_spread(pick("rise_s")), plateau: pidtune_spread(pick("plateau")) },
+        firs: firs,
+    }
+}
+
+// Разброс запаса прогноза лога по суррогатам: частота среза и запас фазы прогноза для коэффициентов лога (c_log —
+// pidtune_controller с фильтрами лога на сетке pidtune_predict_grid) по КИХ каждого суррогата, pidtune_spread.
+// noise — pidtune_noise. → { crossover_hz, pm_deg } (NaN — меньше двух суррогатов с конечным значением)
+function pidtune_noise_margins(noise, c_log, rate_hz, rules = pidtune_rules) {
+    const predicted = noise.firs.map((fir) => pidtune_predict(fir, c_log, c_log, null, rate_hz, rules))
+    return { crossover_hz: pidtune_spread(predicted.map((p) => p?.crossover_hz)), pm_deg: pidtune_spread(predicted.map((p) => p?.pm_deg)) }
+}
+
+// Порог размаха колебаний на плато: max(osc_min_pp, osc_sigma_k × σ отклика quality.noise.sigma_step) — колебание
+// не больше трёх σ неотличимо от шума КИХ [наше, раздел 3.4 дизайна этапа 10]. Без noise — osc_min_pp. Страница передаёт
+// его в pidtune_step_metrics как rules.osc_min_pp
+function pidtune_osc_min_pp(quality, rules = pidtune_rules) {
+    const sigma = quality?.noise?.sigma_step
+    return Number.isFinite(sigma) ? Math.max(rules.osc_min_pp, rules.osc_sigma_k * sigma) : rules.osc_min_pp
 }
 
 // Суммы взаимных спектров по окнам: pieces — [{ [x_key], [y_key] (массивы отсчётов), starts: [начала окон] }], окно
@@ -465,23 +743,36 @@ function pidtune_coherence(segments, rate_hz, freq_hz, rules = pidtune_rules) {
 //   (а) ridge — RMS разницы откликов КИХ при fir.ridge (fir_ridge) и fir_ridge_check; выше порога — отклик держится
 //       на регуляризации, а не на данных;
 //   (б) halves — RMS разницы откликов КИХ по первой и второй половине отрезков (по числу отсчётов, pidtune_halves);
-//       выше порога — режим или объект менялись в интервале, или данных мало;
+//       выше порога — режим или объект менялись в интервале, или данных мало. Порог — halves_rms_max, а в Acro «Rate Loop
+//       Only» (options.rate_only) — max(halves_rms_max, halves_ratio_max × шум (б) лога), шум — среднее (б) суррогатов
+//       (pidtune_noise): при настоящем шуме (б) без смены объекта выше 0.035, а смену K ×0.6 / ×1.5 это отношение ловит
+//       [синтетика, лог4, раздел 3.2 дизайна этапа 10]. Шум не посчитался (нет суррогатов) — (б) не пройдена: отказ при сомнении;
 //   (в) outer — наибольшее |T_H1| («цель → факт» по усреднённым спектрам отобранных окон) на outer_band_hz; выше
 //       порога — цель формирует угловой контур из факта (Acro без Rate Loop Only при ATC_RATE_FF_ENAB = 0).
 //       В Acro «Rate Loop Only» (options.rate_only, pidtune_log_mode) не применяется: угловой контур там выключен
 //       устройством режима, а резонансный пик плохо задемпфированного контура скорости (ζ меньше ≈ 0.36 — пик |T|
 //       выше 1.5 на 4–12 Гц) проверка приняла бы за угловой контур [наше, ревью задачи 5: rate-only, перерегулирование
 //       правды 35.6 %, КИХ 35.5 %, (а) и (б) 0.003 и 0.002, а (в) 1.57]. Значение считается и показывается, в итог
-//       не входит: ok null, applied false, note — почему.
-// fir — pidtune_fir(segments, rate_hz) (его суммы используются для (а)); options = { rate_only }.
-// → { ok, checks: { ridge: { value, ok }, halves: { value, ok }, outer: { value, freq_hz, ok, applied, note } },
-// reasons: [текст] }; значение, которое не посчитать (нет отклика или окон), — null и проверка не пройдена
+//       не входит: ok null, applied false, note — почему;
+//   (г) precision — только в Acro «Rate Loop Only»: σ отклика (pidtune_noise, sigma_step) не больше step_sigma_max; выше
+//       порога — отклик тонет в шуме (точности не хватает), need_s — сколько ещё секунд данных до step_sigma_goal
+//       (pidtune_need_s). В ok не входит: не пройденная (г) — отдельный статус оси (precise false), а не «ненадёжно».
+// fir — pidtune_fir(segments, rate_hz) (его суммы используются для (а)); options = { rate_only, seed } — seed
+// (по умолчанию 1) — зерно суррогатов, страница передаёт номер оси + 1.
+// → { ok ((а)–(в)), precise ((г) в Rate Loop Only, иначе true), checks: { ridge: { value, ok },
+// halves: { value, ok, noise (шум (б) | null), ratio (value / noise | null), limit (порог) },
+// outer: { value, freq_hz, ok, applied, note }, precision: { value, ok, applied, need_s, reason } }, reasons: [текст],
+// noise (pidtune_noise при rate_only и fir, иначе null) }; значение, которое не посчитать (нет отклика, окон или
+// суррогатов), — null и проверка не пройдена. Без rate_only precision — { value: null, ok: null, applied: false,
+// need_s: null, reason: null }. Причина (г) — в checks.precision.reason, а не в reasons: (г) в ok не входит
 function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_rules) {
     const q = rules.quality
-    const outer_applied = !options.rate_only
+    const rate_only = Boolean(options.rate_only)
+    const outer_applied = !rate_only
     let ridge = null
     let halves = null
     let outer = null
+    let noise = null
     if (fir != null) {
         const check = pidtune_fir_from(fir.corr, rate_hz, rules.fir_ridge_check, rules)
         if (check != null) {
@@ -494,13 +785,33 @@ function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_r
             halves = pidtune_rms_diff(first.step, second.step)
         }
         outer = pidtune_outer_peak(segments, rate_hz, rules)
+        if (rate_only) {
+            noise = pidtune_noise(segments, rate_hz, fir, options.seed ?? 1, rules)
+        }
     }
+    const halves_noise = noise?.halves_null ?? null
+    const halves_limit = (halves_noise != null) ? Math.max(q.halves_rms_max, rules.halves_ratio_max * halves_noise) : q.halves_rms_max
+    const halves_ratio = ((halves != null) && (halves_noise != null) && (halves_noise > 0)) ? halves / halves_noise : null
+    const halves_ok = (halves != null) && (!rate_only || (noise != null)) && (halves <= halves_limit)
+    let data_s = 0
+    for (const seg of segments) {
+        data_s += seg.tar.length
+    }
+    data_s /= rate_hz
+    const sigma = noise?.sigma_step ?? null
+    const precision_ok = (sigma != null) && (sigma <= rules.step_sigma_max)
     const checks = {
         ridge: { value: ridge, ok: (ridge != null) && (ridge <= q.ridge_rms_max) },
-        halves: { value: halves, ok: (halves != null) && (halves <= q.halves_rms_max) },
+        halves: { value: halves, ok: halves_ok, noise: halves_noise, ratio: halves_ratio, limit: halves_limit },
         outer: { value: outer?.value ?? null, freq_hz: outer?.freq_hz ?? null,
                  ok: outer_applied ? ((outer != null) && (outer.value <= q.outer_t_max)) : null, applied: outer_applied,
                  note: outer_applied ? null : "не применяется (Rate Loop Only): угловой контур выключен устройством режима" },
+        precision: rate_only ? {
+            value: sigma, ok: precision_ok, applied: true,
+            need_s: (sigma != null) ? pidtune_need_s(sigma, data_s, rules) : null,
+            reason: (sigma == null) ? "погрешность отклика не посчиталась (суррогаты) — отказ при сомнении"
+                : (precision_ok ? null : "точности не хватает: погрешность отклика " + pidtune_beyond(sigma, rules.step_sigma_max, 3) + " (порог " + rules.step_sigma_max + ")"),
+        } : { value: null, ok: null, applied: false, need_s: null, reason: null },
     }
     const reasons = []
     if (fir == null) {
@@ -512,9 +823,17 @@ function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_r
                   pidtune_beyond(ridge, q.ridge_rms_max, 3) + " (порог " + q.ridge_rms_max + ")")
         }
         if (!checks.halves.ok) {
-            reasons.push((halves == null) ? "половины данных не посчитались"
-                : "половины данных дают разный отклик: RMS " + pidtune_beyond(halves, q.halves_rms_max, 3) + " (порог " + q.halves_rms_max + ") — режим " +
-                  "или объект менялись в интервале, или данных мало")
+            if (halves == null) {
+                reasons.push("половины данных не посчитались")
+            } else if (rate_only && (noise == null)) {
+                reasons.push("шум лога не посчитался (суррогаты): проверка (б) не пройдена — отказ при сомнении")
+            } else if (rate_only && (halves_ratio != null)) {
+                reasons.push("половины данных расходятся в " + pidtune_beyond(halves_ratio, rules.halves_ratio_max, 1) + " раза сильнее, чем даёт шум этого лога (RMS " +
+                             halves.toFixed(3) + " при шуме " + halves_noise.toFixed(3) + ", порог — " + rules.halves_ratio_max + " × шум): режим или аппарат менялись по ходу полёта")
+            } else {
+                reasons.push("половины данных дают разный отклик: RMS " + pidtune_beyond(halves, halves_limit, 3) + " (порог " + halves_limit + ") — режим " +
+                             "или объект менялись в интервале, или данных мало")
+            }
         }
         if (outer_applied && !checks.outer.ok) {
             reasons.push((outer == null) ? "подпись углового контура не посчиталась"
@@ -523,7 +842,8 @@ function pidtune_quality(segments, rate_hz, fir, options = {}, rules = pidtune_r
                   "контур (Acro без «Rate Loop Only»)")
         }
     }
-    return { ok: checks.ridge.ok && checks.halves.ok && (!outer_applied || checks.outer.ok), checks: checks, reasons: reasons }
+    return { ok: checks.ridge.ok && checks.halves.ok && (!outer_applied || checks.outer.ok), precise: rate_only ? checks.precision.ok : true,
+             checks: checks, reasons: reasons, noise: noise }
 }
 
 // Время первого достижения уровня level снизу (линейная интерполяция) на отсчётах 0…n − 1; null — не достиг
@@ -916,29 +1236,37 @@ function pidtune_change_p(gains, axis, sign, reason, rules) {
     if ((P - gains.P) * sign <= 0) {
         const why = (P == gains.P) ? "P уже на пределе"
             : "P = " + gains.P + " вне пределов: ограничение " + ((sign > 0) ? "уменьшило бы P вместо увеличения" : "увеличило бы P вместо уменьшения")
-        return { change: null, reason: reason + "; " + why + " (" + limit_text + ") — без изменений", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true }
+        return { change: null, reason: reason + "; " + why + " (" + limit_text + ") — без изменений", values: { P: gains.P, I: gains.I, D: gains.D }, limited: true, borderline: null }
     }
     const I = (axis == "yaw") ? pidtune_round(rules.yaw_i_ratio * P, rules) : P
     return { change: (sign > 0) ? "P+" : "P-", reason: reason + (limited ? " (ограничено: " + limit_text + " — фактически P " + pidtune_percent_text(gains.P, P) + ")" : ""),
-             values: { P: P, I: I, D: gains.D }, limited: limited }
+             values: { P: P, I: I, D: gains.D }, limited: limited, borderline: null }
 }
 
 // Предложение по правилам (раздел 3 дизайна). Без изменений (change null, причина), по порядку: P или I нет в логе
 // (не число); отобранных данных меньше min_data_s — «мало манёвров» (раньше качества: на коротком полёте причина —
-// данные, а не проверки); измерение ненадёжно (quality.ok ложно); нет метрик. По оси RATE метрики включают FLTT
-// (pidtune_fir) — правила те же. Иначе одно изменение на коэффициент за проход, правила по порядку:
+// данные, а не проверки); измерение ненадёжно (quality.ok ложно); точности не хватает ((г), quality.precise ложно —
+// только в Acro «Rate Loop Only», причина — quality.checks.precision.reason); нет метрик. По оси RATE метрики включают
+// FLTT (pidtune_fir) — правила те же. Иначе одно изменение на коэффициент за проход, правила по порядку:
 //   1. остаточные колебания (metrics.osc): частота выше osc_band_ratio полос отклика (bandwidth_hz) — «высокие» → D −10 %,
 //      не выше — «низкие» → P −10 %. При D = 0 (или D нет) правило для D не применяется — дальше по правилам;
 //   2. перерегулирование больше overshoot_high_pct → P −10 %;
 //   3. перерегулирование меньше overshoot_low_pct и колебаний нет — отклик вялый → P +10 % [wiki: P поднимают
 //      до раскачки, затем отступают; пороги — наше];
 //   4. иначе — менять нечего.
+// С шумом (quality.noise, Acro «Rate Loop Only», раздел 3.4 дизайна этапа 10) перерегулирование — (пик − 1)·100 без
+// обрезки снизу, σ — σ пика по суррогатам × 100 (quality.noise.sigma.peak), и пороги сравниваются с запасом
+// rule_margin_sigma·σ: больше overshoot_high_pct + запас → P −10 %, меньше overshoot_low_pct − запас → P +10 %, от
+// overshoot_low_pct + запас до overshoot_high_pct − запас — менять нечего, иначе — «на границе» (change null, borderline —
+// ближайший порог, 5 или 20): по правилам решения нет, пользователь сравнивает варианты по прогнозу [наше: 1σ].
+// Не посчитанное σ — без изменений, отказ при сомнении. Без noise — всё как описано выше, по overshoot_pct.
 // gains = { P, I, D } лога, axis — "roll", "pitch", "yaw", metrics — pidtune_step_metrics, data_s — секунды отобранных
 // данных (pidtune_segments), quality — pidtune_quality. Пределы AutoTune: P в p_min…p_max, D ≤ d_max
 // (pidtune_change_p). Изменённые значения — round_digits значащих цифр (pidtune_round), I — от округлённого P.
-// → { change: "P-" | "P+" | "D-" | null, reason, values: { P, I, D }, limited } (change null — values как в логе)
+// → { change: "P-" | "P+" | "D-" | null, reason, values: { P, I, D }, limited, borderline: 5 | 20 | null (только с шумом,
+// у «на границе») } (change null — values как в логе)
 function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rules) {
-    const keep = (reason, limited = false) => ({ change: null, reason: reason, values: { P: gains.P, I: gains.I, D: gains.D }, limited: limited })
+    const keep = (reason, limited = false, borderline = null) => ({ change: null, reason: reason, values: { P: gains.P, I: gains.I, D: gains.D }, limited: limited, borderline: borderline })
     const missing = ["P", "I"].filter((k) => !Number.isFinite(gains[k])).map((k) => pidtune_axes[axis].rate + k)
     if (missing.length > 0) {
         return keep("нет коэффициента в логе: " + missing.join(", "))
@@ -951,12 +1279,25 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
         const why = ((quality != null) && (quality.reasons.length > 0)) ? ": " + quality.reasons.join("; ") : ""
         return keep("измерение ненадёжно" + why + " — правил нет")
     }
+    if (quality.precise === false) {
+        return keep(quality.checks.precision.reason + " — правил нет")
+    }
     if (metrics == null) {
         return keep("нет отклика")
     }
-    const os = metrics.overshoot_pct
+    // С шумом: перерегулирование без обрезки снизу и запас margin (п.) — остальное как раньше
+    const noisy = (quality.noise != null)
+    const sigma = noisy ? quality.noise.sigma.peak * 100 : 0
+    if (noisy && !(Number.isFinite(sigma) && Number.isFinite(metrics.peak))) {
+        return keep("перерегулирование не посчиталось с погрешностью (суррогаты) — правил нет")
+    }
+    const margin = noisy ? rules.rule_margin_sigma * sigma : 0
+    const margin_text = noisy ? " с запасом " + rules.rule_margin_sigma + "σ" : ""
+    const os = noisy ? (metrics.peak - 1) * 100 : metrics.overshoot_pct
     // Числа у порога — с округлением от него (pidtune_beyond)
-    const os_text = (limit) => "перерегулирование " + ((limit != null) ? pidtune_beyond(os, limit, 1) : os.toFixed(1)) + " %"
+    const os_text = (limit) => (noisy ? ((metrics.peak >= 1) ? "перерегулирование " + os.toFixed(1) + " ± " + sigma.toFixed(1) + " %"
+                                                              : "перерегулирования нет (пик " + metrics.peak.toFixed(3) + " ± " + quality.noise.sigma.peak.toFixed(3) + ")")
+                                : "перерегулирование " + ((limit != null) ? pidtune_beyond(os, limit, 1) : os.toFixed(1)) + " %")
     const osc = metrics.osc
     let d_skipped = null
     if (osc != null) {
@@ -974,7 +1315,7 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
                 const limited = (D != target)
                 return { change: "D-", reason: "высокие " + osc_text + " — выше " + band_text + " → D −" + Math.round(rules.gain_step * 100) + " %" +
                          (limited ? " (ограничено: предел AutoTune D ≤ " + rules.d_max + " — фактически D " + pidtune_percent_text(gains.D, D) + ")" : ""),
-                         values: { P: gains.P, I: gains.I, D: D }, limited: limited }
+                         values: { P: gains.P, I: gains.I, D: D }, limited: limited, borderline: null }
             }
             d_skipped = "высокие " + osc_text + " — выше " + band_text + ", но D " + (Number.isFinite(gains.D) ? "выключен (D = 0)" : "нет в логе") +
                         " — правило для D не применяется"
@@ -982,18 +1323,23 @@ function pidtune_rule(gains, axis, metrics, data_s, quality, rules = pidtune_rul
             return pidtune_change_p(gains, axis, -1, "низкие " + osc_text + " — не выше " + band_text + " → P −" + Math.round(rules.gain_step * 100) + " %", rules)
         }
     }
-    if (os > rules.overshoot_high_pct) {
+    if (os > rules.overshoot_high_pct + margin) {
         return pidtune_change_p(gains, axis, -1, (d_skipped != null ? d_skipped + "; " : "") + os_text(rules.overshoot_high_pct) + " больше " + rules.overshoot_high_pct +
-                                " % → P −" + Math.round(rules.gain_step * 100) + " %", rules)
+                                " %" + margin_text + " → P −" + Math.round(rules.gain_step * 100) + " %", rules)
     }
     if (d_skipped != null) {
         return keep(d_skipped)
     }
-    if (os < rules.overshoot_low_pct) {
-        return pidtune_change_p(gains, axis, 1, os_text(rules.overshoot_low_pct) + " меньше " + rules.overshoot_low_pct + " %, колебаний нет — отклик вялый, запас есть → P +" +
+    if (os < rules.overshoot_low_pct - margin) {
+        return pidtune_change_p(gains, axis, 1, os_text(rules.overshoot_low_pct) + " меньше " + rules.overshoot_low_pct + " %" + margin_text + ", колебаний нет — отклик вялый, запас есть → P +" +
                                 Math.round(rules.gain_step * 100) + " %", rules)
     }
-    return keep(os_text(null) + " — от " + rules.overshoot_low_pct + " до " + rules.overshoot_high_pct + " %, колебаний нет — менять нечего")
+    if ((os < rules.overshoot_low_pct + margin) || (os > rules.overshoot_high_pct - margin)) {
+        // Только с шумом (без него запас 0 и сюда не попасть): у порога в пределах запаса — решения нет
+        const border = (Math.abs(os - rules.overshoot_high_pct) <= Math.abs(os - rules.overshoot_low_pct)) ? rules.overshoot_high_pct : rules.overshoot_low_pct
+        return keep(os_text(null) + " — на границе " + border + " %: по правилам решения нет, сравните варианты по прогнозу", false, border)
+    }
+    return keep(os_text(null) + " — от " + rules.overshoot_low_pct + " до " + rules.overshoot_high_pct + " %" + margin_text + ", колебаний нет — менять нечего")
 }
 
 // ---------- Модель регулятора, прогноз, варианты и отметки (раздел 4 дизайна) ----------
@@ -1532,7 +1878,8 @@ function pidtune_predict(fir, c_log, c_new, ratio, rate_hz, rules = pidtune_rule
 
 // Достоверность прогноза оси (раздел 4 дизайна). Для коэффициентов лога прогноз совпадает с измеренным по построению,
 // поэтому проверяется, можно ли доверять T и модели регулятора:
-//   измерение надёжно — quality.ok (pidtune_quality: (а)–(в), в Acro «Rate Loop Only» — (а) и (б));
+//   измерение надёжно — quality.ok (pidtune_quality: (а)–(в), в Acro «Rate Loop Only» — (а) и (б)) и точно —
+//   quality.precise ((г), только в Acro «Rate Loop Only»; причина — quality.checks.precision.reason);
 //   модель регулятора сходится с данными — controller_check.ok (pidtune_controller_check); у оси RATE сверка не
 //   запускается (skipped "rate") — причина «по RATE прогноз не считается» (решение координатора по ревью задачи 6:
 //   честный отказ — цель записана до FLTT, выход — с FF; FLTT не моделируется);
@@ -1545,6 +1892,9 @@ function pidtune_validity(quality, controller_check, coherence_at_crossover, rul
         reasons.push("нет проверки качества измерения")
     } else if (!quality.ok) {
         reasons.push("измерение ненадёжно" + ((quality.reasons.length > 0) ? ": " + quality.reasons.join("; ") : ""))
+    }
+    if (quality?.precise === false) {
+        reasons.push(quality.checks.precision.reason)
     }
 
     const cc = rules.controller_check
