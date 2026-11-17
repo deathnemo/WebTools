@@ -1,5 +1,5 @@
-// Средний спектр, сворачивание алиасинга, матрица спектрограммы и линии трекинга notch. Без DOM:
-// работает в браузере и под Node (тесты).
+// Средний спектр, сворачивание алиасинга, матрица спектрограммы, пределы её цветовой шкалы (своё) и линии трекинга
+// notch. Без DOM: работает в браузере и под Node (тесты).
 // Перенос из FilterReview/FilterReview.js (upstream 05d6177) построчно, чтобы будущие изменения FilterReview
 // переносились диффом. Источники: get_amplitude_scale и get_frequency_scale (957–971), get_alias_obj (973–1028),
 // среднее по окнам внутри redraw (1131–1182), find_instance (1466–1475), данные спектрограммы внутри
@@ -264,6 +264,42 @@ function spectrogram_matrix(gyro, batch_instance, axis, estimated, amplitude_sca
     }
 
     return { x: x, bins: bins, z: z }
+}
+
+// Пределы цветовой шкалы спектрограммы (своё, в FilterReview нет: там шкала — весь размах z). Весь размах сжимал почти
+// весь спектр в середину Viridis: на четвёртом логе z от −142 до +13 дБ (бин 0 Гц и редкие провалы), а 90 % значений —
+// между −87 и −31 дБ, и гармоники сливались с фоном (просьба пользователя 17.11.2026). Шкала — от low-го до high-го
+// процентиля чисел z (строки разрывов — undefined — пропускаются): слабее нижнего предела — одним тёмным цветом,
+// сильнее верхнего — жёлтым; подсказка при наведении показывает настоящее значение
+const SPECTROGRAM_COLOR_RANGE = { low: 25, high: 99.5 }
+
+// Поля heatmap для z (строки окон): { zauto: false, zmin, zmax } по процентилям SPECTROGRAM_COLOR_RANGE; чисел нет или
+// все одинаковые — { zauto: true, zmin: undefined, zmax: undefined } (размах выбирает Plotly). Применяется
+// Object.assign(heat, spectrogram_color_range(heat.z))
+function spectrogram_color_range(z) {
+    let count = 0
+    for (const row of z) {
+        for (const a of row ?? []) {
+            if (Number.isFinite(a)) {
+                count++
+            }
+        }
+    }
+    const values = new Float64Array(count)
+    let n = 0
+    for (const row of z) {
+        for (const a of row ?? []) {
+            if (Number.isFinite(a)) {
+                values[n++] = a
+            }
+        }
+    }
+    values.sort()
+    const at = (percent) => values[Math.round(percent / 100 * (count - 1))]
+    if ((count == 0) || !(at(SPECTROGRAM_COLOR_RANGE.high) > at(SPECTROGRAM_COLOR_RANGE.low))) {
+        return { zauto: true, zmin: undefined, zmax: undefined }
+    }
+    return { zauto: false, zmin: at(SPECTROGRAM_COLOR_RANGE.low), zmax: at(SPECTROGRAM_COLOR_RANGE.high) }
 }
 
 // Линии трекинга notch для спектрограммы (данные линий из redraw_Spectrogram в upstream): для каждого notch

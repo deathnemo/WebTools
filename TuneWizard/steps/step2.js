@@ -1656,5 +1656,7 @@ function redraw_spectrogram2() {
         }
     }
     spectrogram2_theme(plot_palette(), p.data, p.layout)
+    // Шкала цвета — по процентилям амплитуд, как на шаге 1
+    Object.assign(heat, spectrogram_color_range(heat.z))
     render_plot("Spectrogram2")
 }

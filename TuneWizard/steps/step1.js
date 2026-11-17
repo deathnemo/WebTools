@@ -736,6 +736,8 @@ function redraw_spectrogram1() {
         // Новым линиям — цвета темы тем же хуком, что и при смене темы
         spectrogram1_theme(plot_palette(), p.data, p.layout)
     }
+    // Шкала цвета — по процентилям амплитуд, чтобы гармоники выделялись на фоне (core/spectrum.js)
+    Object.assign(heat, spectrogram_color_range(heat.z))
     render_plot("Spectrogram1")
 }
 

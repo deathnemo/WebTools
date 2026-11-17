@@ -961,3 +961,27 @@ test('auto_fit_values: INS_HNTCH_* по результату, OPTS без бит
     // Один источник — бит 2 снимается
     assert.equal(auto_fit_values({ ...r, multi_source: false }, { INS_HNTCH_OPTS: 2 | 8 }).INS_HNTCH_OPTS, 8)
 })
+
+test('spectrogram_color_range: шкала от 25-го до 99.5-го процентиля чисел z, строки разрывов пропускаются; без чисел и при одном значении — размах Plotly', () => {
+    assert.deepEqual(SPECTROGRAM_COLOR_RANGE, { low: 25, high: 99.5 })
+    // 0…200 по строкам и редкий выброс −1000 (провал) и +1000 (бин 0 Гц): шкала по процентилям, выбросы её не растягивают
+    const rows = []
+    for (let j = 0; j < 20; j++) {
+        rows.push(Array.from({ length: 10 }, (_, i) => j * 10 + i))
+    }
+    rows[0][0] = -1000
+    rows[19][9] = 1000
+    rows.splice(5, 0, new Array(10))
+    const range = spectrogram_color_range(rows)
+    assert.equal(range.zauto, false)
+    assert.equal(range.zmin, 50, '25-й процентиль 200 чисел: индекс round(0.25·199) = 50')
+    assert.equal(range.zmax, 198, '99.5-й процентиль: индекс round(0.995·199) = 198')
+    const heat = { zauto: true, z: rows }
+    Object.assign(heat, range)
+    assert.deepEqual([heat.zauto, heat.zmin, heat.zmax], [false, 50, 198])
+
+    const auto = { zauto: true, zmin: undefined, zmax: undefined }
+    assert.deepEqual(spectrogram_color_range([]), auto, 'пустая карта')
+    assert.deepEqual(spectrogram_color_range([new Array(4), [NaN, undefined]]), auto, 'только разрывы и не числа')
+    assert.deepEqual(spectrogram_color_range([[-60, -60], [-60]]), auto, 'все значения одинаковы')
+})
