@@ -1,9 +1,10 @@
 // Тесты правок аудита области D шага 4 (TuneWizard/steps/step4.js) без браузера: коэффициенты, сменившиеся после
 // интервала анализа (I-2: «Набор интервала», подписи «в наборе интервала», предупреждения, set_values принятого),
-// кнопка «Интервал — участок ACRO» (I-3: целые секунды внутри участка, подсказка в сводке и вердикте), «Применить
-// вариант» одним step_run (M-5), плитка «Шум D» без окон в интервале (M-6), заметки NTF и PDMX (M-7), FFT только нужных
-// компонент (M-8), отказ «не заполнены или не числа» (M-10) и этап 10: страница шага 4 на логе «Rate Loop Only» («±», (г),
-// «на границе», советы по осям, ранний отклик, перерегулирования нет).
+// кнопка «Интервал — участок ACRO» (I-3: участок ACRO лога в пересечении интервала PID и окна полёта, подсказка в сводке
+// и вердикте, кнопка ставит интервал PID), «Применить вариант» одним step_run (M-5), плитка «Шум D» без окон в интервале
+// (M-6), заметки NTF и PDMX (M-7), FFT только нужных компонент (M-8), отказ «не заполнены или не числа» (M-10), этап 10:
+// страница шага 4 на логе «Rate Loop Only» («±», (г), «на границе», советы по осям, ранний отклик, перерегулирования нет)
+// и этап 11: свой интервал PID шага 4 (умолчание, свой выбор, «Как на шаге 0», расчёт и ключ по нему).
 // Скрипты классические (общая глобальная область) — загружаются как на странице через vm.runInThisContext (как в
 // tests/tunewizard-common.test.cjs); DOM, оверлей, память, шаги 0–1 и 5 — заглушки ниже. Лог — поддельный PIDR
 // (первый порядок с запаздыванием, цель — две синусоиды) с двумя наборами PARM: смена P и I после последних данных.
@@ -145,12 +146,14 @@ function make_log(dur_s = 60, change_s = 100) {
     })
 }
 
-// Загрузить лог в состояние страницы и шага, посчитать шаг на интервале range (step4_compute — как step4_show)
+// Загрузить лог в состояние страницы и шага, посчитать шаг на интервале range (step4_compute — как step4_show). Окно
+// полёта — тоже range, как интервал шага 0 по умолчанию: участок ACRO лога make_log (ACRO с 0 с) в нём — сам range,
+// и интервал PID по умолчанию — range (source "acro")
 function load(log, range) {
     globalThis.state.log = log
     globalThis.state.params = log_params(log)
     globalThis.state.version = { fw_string: 'ArduCopter V4.6.3 (abcdef12)' }
-    globalThis.state.info = { build_type: 2 }
+    globalThis.state.info = { build_type: 2, flight: { start: range[0], end: range[1] } }
     globalThis.state.settings = { start: range[0], end: range[1], min: 0, max: 60, window_size: 1024 }
     globalThis.state.steps = []
     step4_reset()
@@ -270,23 +273,32 @@ test('I-2: смена PID внутри интервала — набор инт�
     assert.ok(!element('verdict4').textContent.includes('менялись после интервала'))
 })
 
-test('I-3: «Интервал — участок ACRO» — целые секунды внутри участка, подсказка в сводке и вердикте один раз, кнопка ставит поля шага 0', () => {
+test('I-3: «Интервал — участок ACRO» — участок ACRO лога в пересечении интервала PID и окна полёта, подсказка в сводке и вердикте один раз, кнопка ставит интервал PID, а не поля шага 0', () => {
     load(make_log(60, 100), [10, 50])
     const res = step4.calc.roll
-    assert.equal(step4_acro_interval(), null, 'Rate Loop Only во всём интервале — участка нет')
+    assert.deepEqual(step4_interval(), { start: 10, end: 50, source: 'acro' })
+    assert.equal(step4_acro_interval(), null, 'участок ACRO и есть интервал PID — сужать некуда')
     assert.equal(step4_acro_hint(), null)
-    // Участок 20.3–300.7 с → 21–300; ровно на секундах — как есть; короче секунды после округления — нет
-    res.mode.rate_only_segment = { start: 20.3, end: 300.7 }
-    assert.deepEqual(step4_acro_interval(), { start: 21, end: 300 })
-    assert.equal(step4_acro_hint(), 'лог тестового полёта: сузьте интервал анализа до участка ACRO (21–300 с) — кнопка «Интервал — участок ACRO» под сводкой шага 4')
+    // Участок — по логу, не по rate_only_segment расчёта осей
+    res.mode.rate_only_segment = { start: 20.3, end: 30.7 }
+    assert.equal(step4_acro_interval(), null, 'rate_only_segment расчёта не читается')
+    // Интервал PID шире окна полёта: участок — в окне полёта (без времени после посадки)
+    assert.equal(step4_set_interval(0, 60, 'own'), true)
+    assert.deepEqual(step4_acro_interval(), { start: 10, end: 50 })
+    assert.equal(step4_acro_hint(), 'лог тестового полёта: сузьте интервал PID до участка ACRO (10–50 с) — кнопка «Интервал — участок ACRO» над вкладками осей шага 4')
     assert.match(step4_acro_hint(true), /^Лог тестового полёта: /)
-    res.mode.rate_only_segment = { start: 20, end: 300 }
-    assert.deepEqual(step4_acro_interval(), { start: 20, end: 300 })
-    res.mode.rate_only_segment = { start: 20.2, end: 20.9 }
+    // Окно полёта с дробными границами — целые секунды внутрь; пересечение с интервалом PID
+    state.info.flight = { start: 10.3, end: 49.6 }
+    assert.deepEqual(step4_acro_interval(), { start: 11, end: 49 })
+    step4_set_interval(20, 60, 'own')
+    assert.deepEqual(step4_acro_interval(), { start: 20, end: 49 })
+    // Пересечение пустое — кнопки нет
+    step4_set_interval(52, 60, 'own')
     assert.equal(step4_acro_interval(), null)
+    state.info.flight = { start: 10, end: 50 }
 
     // Смешанный интервал: подсказка в вердикте оси один раз (смешение режимов + совет), в сводке — вместо тестового полёта
-    res.mode.rate_only_segment = { start: 20.3, end: 300.7 }
+    step4_set_interval(0, 60, 'own')
     res.mode.rate_only = false
     res.mode.mixed_modes = ['STABILIZE', 'ACRO', 'LAND']
     res.status = 'unreliable'
@@ -294,31 +306,39 @@ test('I-3: «Интервал — участок ACRO» — целые секу�
     step4.axis = 'roll'
     step4_render_axis_verdict()
     const verdict = element('axis_verdict4').textContent
-    assert.equal((verdict.match(/сузьте интервал анализа до участка ACRO \(21–300 с\)/g) ?? []).length, 1, verdict)
+    assert.equal((verdict.match(/сузьте интервал PID до участка ACRO \(10–50 с\)/g) ?? []).length, 1, verdict)
     assert.ok(!verdict.includes('Слетайте тестовый лог'), verdict)
     step4_render_summary()
     const summary = element('verdict4').textContent
-    assert.match(summary, /лог тестового полёта: сузьте интервал анализа до участка ACRO \(21–300 с\) — кнопка «Интервал — участок ACRO» под сводкой шага/)
+    assert.match(summary, /лог тестового полёта: сузьте интервал PID до участка ACRO \(10–50 с\) — кнопка «Интервал — участок ACRO» над вкладками осей шага 4/)
     assert.ok(!summary.includes('нужен тестовый полёт'), summary)
-    // Без участка — прежний совет (с ACRO_TRAINER = 0, I-4)
-    res.mode.rate_only_segment = null
+    // Сужать некуда (интервал PID — как на шаге 0, 10–50 с, весь в участке ACRO) — прежний совет (с ACRO_TRAINER = 0, I-4)
+    step4_interval_follow()
+    assert.equal(step4_acro_interval(), null)
     step4_render_axis_verdict()
     assert.match(element('axis_verdict4').textContent, /Слетайте тестовый лог: Acro с ACRO_OPTIONS бит 1 «Rate Loop Only» \(значение 2, или 3 вместе с Air-mode\) и ACRO_TRAINER = 0/)
     step4_render_summary()
     assert.match(element('verdict4').textContent, /нужен тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only» \(2, или 3 с Air-mode\) и ACRO_TRAINER = 0/)
 
-    // Кнопка: поля шага 0, interval_input_changed, пересчёт шага
-    res.mode.rate_only_segment = { start: 20.3, end: 300.7 }
+    // Кнопка: интервал PID — участок (source "acro"), показ шага; интервал и поля шага 0 не меняются
+    state.settings.start = 5
+    state.settings.end = 55
+    element('TimeStart').value = 5
+    element('TimeEnd').value = 55
+    step4_set_interval(0, 60, 'own')
     const calls = []
-    globalThis.interval_input_changed = () => calls.push(['interval', element('TimeStart').value, element('TimeEnd').value])
+    globalThis.interval_input_changed = () => calls.push(['interval'])
     const shown = globalThis.step4_show
-    globalThis.step4_show = () => calls.push(['show'])
+    globalThis.step4_show = () => calls.push(['show', step4_interval()])
     step4_acro_apply()
-    assert.deepEqual(calls, [['interval', 21, 300], ['show']])
-    res.mode.rate_only_segment = null
+    assert.deepEqual(calls, [['show', { start: 10, end: 50, source: 'acro' }]])
+    assert.deepEqual([state.settings.start, state.settings.end, element('TimeStart').value, element('TimeEnd').value], [5, 55, 5, 55])
+    // Участок совпал с интервалом PID — кнопка ничего не делает
+    assert.equal(step4_acro_interval(), null)
     step4_acro_apply()
-    assert.equal(calls.length, 2, 'без участка кнопка ничего не делает')
+    assert.equal(calls.length, 1, 'без участка кнопка ничего не делает')
     globalThis.step4_show = shown
+    delete globalThis.interval_input_changed
 })
 
 test('M-5: «Применить вариант» — один step_run, при устаревшем расчёте пересчёт внутри него', async () => {
@@ -630,4 +650,95 @@ test('Этап 10: ранний отклик — у «Нарастания» п�
     roll.mode = { ...roll.mode, rate_only: false }
     step4_render_metrics()
     assert.ok(!element('metrics4').innerHTML.includes('начало отклика не определено'))
+})
+
+// ---------------------------------------------------------------- этап 11: свой интервал PID шага 4
+
+test('Этап 11: интервал PID — умолчание (участок ACRO в окне полёта или как на шаге 0), свой, «Как на шаге 0», зажим и порядок границ, сброс на новый лог; расчёт и ключ — по интервалу PID', () => {
+    // Умолчание у лога с ACRO с 0 с: участок ACRO «Rate Loop Only» в окне полёта, а не интервал шага 0
+    load(make_log(60, 100), [10, 50])
+    state.settings.start = 20
+    state.settings.end = 40
+    step4_reset()
+    assert.deepEqual([step4.interval, step4.interval_ready], [null, false])
+    assert.deepEqual(step4_interval(), { start: 10, end: 50, source: 'acro' })
+    assert.deepEqual(step4.interval, { start: 10, end: 50, source: 'acro' })
+    assert.equal(step4.interval_ready, true)
+    assert.deepEqual(step4_flight_range(), [10, 50])
+    // Окно полёта с дробными границами — целые секунды внутрь
+    step4_reset()
+    state.info.flight = { start: 10.4, end: 49.5 }
+    assert.deepEqual(step4_interval(), { start: 11, end: 49, source: 'acro' })
+    // Без окна полёта и без сведений о логе — весь лог [min, max]
+    step4_reset()
+    state.info = { build_type: 2 }
+    assert.deepEqual(step4_flight_range(), [0, 60])
+    assert.deepEqual(step4_interval(), { start: 0, end: 60, source: 'acro' })
+    step4_reset()
+    state.info = null
+    assert.deepEqual(step4_interval(), { start: 0, end: 60, source: 'acro' })
+    // Без лога — как на шаге 0, умолчание не выбирается
+    const log = state.log
+    step4_reset()
+    state.log = null
+    assert.deepEqual(step4_interval(), { start: 20, end: 40, source: 'step0' })
+    assert.equal(step4.interval_ready, false)
+    assert.equal(step4_acro_interval(), null)
+    state.log = log
+
+    // Лог без бита Rate Loop Only (ACRO_OPTIONS 1) — как на шаге 0, и интервал PID следует за ним
+    const off = make_log(60, 100)
+    const parm = off.get('PARM')
+    parm.Value[parm.Name.indexOf('ACRO_OPTIONS')] = 1
+    load(off, [10, 50])
+    assert.deepEqual(step4_interval(), { start: 10, end: 50, source: 'step0' })
+    assert.equal(step4.interval, null)
+    assert.deepEqual(step4.calc.roll.range, [10, 50])
+    state.settings.start = 20
+    assert.deepEqual(step4_interval(), { start: 20, end: 50, source: 'step0' })
+
+    // Свой интервал: целые секунды наружу, шаг 0 его больше не меняет
+    assert.equal(step4_set_interval(12.4, 30.2, 'own'), true)
+    assert.deepEqual(step4_interval(), { start: 12, end: 31, source: 'own' })
+    state.settings.start = 25
+    state.settings.end = 45
+    assert.deepEqual(step4_interval(), { start: 12, end: 31, source: 'own' })
+    // Неверный порядок и не числа — отказ, интервал прежний
+    assert.equal(step4_set_interval(40, 30, 'own'), false)
+    assert.equal(step4_set_interval(NaN, 30, 'own'), false)
+    assert.equal(step4_set_interval(30, 30.0, 'own'), false)
+    assert.deepEqual(step4_interval(), { start: 12, end: 31, source: 'own' })
+    // Зажим в границы лога; за пределами лога после зажима пусто — отказ
+    assert.equal(step4_set_interval(-5, 1e6, 'own'), true)
+    assert.deepEqual(step4_interval(), { start: 0, end: 60, source: 'own' })
+    assert.equal(step4_set_interval(70, 80, 'own'), false)
+    assert.deepEqual(step4_interval(), { start: 0, end: 60, source: 'own' })
+    // «Как на шаге 0» — снова интервал шага 0
+    step4_interval_follow()
+    assert.deepEqual(step4_interval(), { start: 25, end: 45, source: 'step0' })
+    assert.equal(step4.interval, null)
+
+    // Ключ и расчёт — по интервалу PID: свой интервал делает расчёт устаревшим
+    step4_compute()
+    assert.equal(step4_stale(), false)
+    step4_set_interval(12.4, 30.2, 'own')
+    assert.equal(step4_stale(), true, 'интервал PID — часть ключа расчёта')
+    assert.deepEqual(JSON.parse(step4_calc_key()).slice(0, 2), [12, 31])
+    step4_compute()
+    assert.deepEqual(step4.calc.roll.range, [12, 31])
+    assert.deepEqual(state.settings, { start: 25, end: 45, min: 0, max: 60, window_size: 1024 }, 'интервал шага 0 не меняется')
+
+    // Интервал PID без данных PID (данные 0–20 с, набор параметров с 30 с — без данных) — вердикт про интервал PID, а не
+    // про шаг 0
+    load(make_log(20, 30), [5, 15])
+    assert.equal(step4_set_interval(31, 59, 'own'), true)
+    step4_compute()
+    assert.deepEqual(step4_axis_list.map((axis) => step4.calc[axis].status), ['nodata', 'nodata', 'nodata'])
+    step4_render_summary()
+    assert.equal(element('verdict4').textContent, 'Нет данных PID ни по одной оси в интервале PID — выберите другой интервал PID (график над вкладками осей).')
+
+    // Новый лог — интервал PID забыт, умолчание выбирается заново
+    step4_reset()
+    assert.equal(step4.interval, null)
+    assert.equal(step4.interval_ready, false)
 })

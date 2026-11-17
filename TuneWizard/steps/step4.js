@@ -21,13 +21,16 @@
 // Форма — своя (id="pidf_<имя>"), механизм правок — как на шаге 3: пересчёт через паузу в наборе, change — только
 // при отличии и после отпускания мыши, кнопки досчитывают правки сами (step4_flush_edits(true)).
 //
+// Шаг считается на своём интервале PID (step4_interval; дизайн этапа 11 — docs/plans/2026-11-17-tune-wizard-stage11-design.md,
+// разделы 5 и 8): по умолчанию — участок ACRO «Rate Loop Only» в окне полёта, иначе интервал шага 0; фильтры (шаги 1–3)
+// считаются на интервале шага 0 (state.settings.start/end), интервал PID их не меняет.
+//
 // Нужны глобалы страницы: core/pid.js (load_pid, pid_run_batch_fft, pid_step_response, PID_STEP_MIN_RATE),
 // core/pidtune.js (pidtune_*), core/lowpass.js (lowpass_log_values — фильтры лога для ключа расчёта),
 // core/candidates.js (candidate_key), core/filters.js (notch_param_names), core/spectrum.js (find_instance),
 // core/gyro.js (find_start_index, find_end_index), Libraries/Array_Math.js (complex_abs, array_add),
 // Libraries/Param_Helpers.js (param_to_string),
-// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape,
-// interval_input_changed — кнопка «Интервал — участок ACRO»),
+// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape),
 // steps/common.js (step_signed, step_plural, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, step_pointer, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js
@@ -52,6 +55,8 @@ const step4 = {
     edit_timer: null,         // отложенный пересчёт после набора в поле (step4_edits)
     edit_postponed: false,    // пересчёт (правок или окна FFT) отложен до отпускания кнопки мыши (step4_edits)
     window_pending: false,    // поле окна FFT изменено (change), а step4.window ещё не обновлён (step4_flush_window)
+    interval: null,           // интервал PID { start, end, source: "acro" | "own" }; null — как на шаге 0 (читать через step4_interval)
+    interval_ready: false,    // умолчание интервала PID для лога выбрано (step4_interval); false — ещё нет
 }
 
 // Пауза в наборе, после которой поле пересчитывается, мс [наше, как на шаге 3]
@@ -116,29 +121,94 @@ function step4_pm_text(pred) {
     return (pred?.pm_note != null) ? "не определён" : "—"
 }
 
-// Интервал для кнопки «Интервал — участок ACRO»: участок ACRO лога тестового полёта с интервалом шире него
-// (pidtune_log_mode → rate_only_segment; один на интервал — у первой оси с режимом лога), границы — целые секунды внутри
-// участка (начало вверх, конец вниз: interval_input_changed округляет наружу и захватил бы соседние режимы; MODE ровно
-// на конце участка pidtune_mode_segments в интервал не берёт). null — участка нет или он короче секунды
-function step4_acro_interval() {
-    const segment = step4_axis_list.map((axis) => step4.calc?.[axis]?.mode?.rate_only_segment ?? null).find((s) => s != null) ?? null
-    if (segment == null) {
-        return null
-    }
-    const start = Math.ceil(segment.start)
-    const end = Math.floor(segment.end)
-    return (end > start) ? { start: start, end: end } : null
+// ---------- Интервал PID ----------
+// Свой интервал анализа шага 4 (дизайн этапа 11, раздел 5): фильтрам нужен длинный кусок полёта с висением и сменой газа,
+// PID — резкие манёвры в ACRO, поэтому интервал шага 0 (state.settings.start/end) шаг 4 не берёт. Источник — "step0"
+// (повторяет интервал шага 0 при каждой его смене), "acro" (участок ACRO «Rate Loop Only»), "own" (свой выбор);
+// подписи — pidtune_interval_sources. В память прохода интервал PID не попадает, на новый лог — заново (step4_reset)
+
+// Окно полёта, в котором ищется участок ACRO: окно по газу шага 0 (state.info.flight — им же задан интервал шага 0 по
+// умолчанию) → [start, end]; окна нет — весь лог [state.settings.min, state.settings.max]. Не весь лог при окне:
+// log_mode_segments продлевает последний режим до конца лога, и участок захватил бы время после посадки (газ ноль)
+function step4_flight_range() {
+    const flight = state.info?.flight
+    return (flight != null) ? [flight.start, flight.end] : [state.settings.min, state.settings.max]
 }
 
-// Подсказка лога тестового полёта с широким интервалом (вместо совета слетать ещё раз): строчными, для начала фразы —
-// capital. null — участка ACRO нет
+// Интервал PID → { start, end, source }: свой (step4.interval) или интервал шага 0 (step4.interval == null, source "step0").
+// Первый вызов после step4_reset при загруженном логе и известном окне полёта выбирает умолчание: участок ACRO «Rate
+// Loop Only» в окне полёта (pidtune_acro_interval: самый длинный, целые секунды внутрь) — source "acro", участка нет —
+// как на шаге 0. Без лога умолчание не выбирается (выберется при первом вызове с логом)
+function step4_interval() {
+    if (!step4.interval_ready && (state.log != null)) {
+        const range = step4_flight_range()
+        if (Number.isFinite(range[0]) && Number.isFinite(range[1])) {
+            const acro = pidtune_acro_interval(state.log, state.params, range)
+            step4.interval = (acro != null) ? { start: acro.start, end: acro.end, source: "acro" } : null
+            step4.interval_ready = true
+        }
+    }
+    if (step4.interval == null) {
+        return { start: state.settings.start, end: state.settings.end, source: "step0" }
+    }
+    return { ...step4.interval }
+}
+
+// Задать интервал PID (поля и ползунок шага 4 — source "own", кнопка «Интервал — участок ACRO» — "acro"): границы —
+// целые секунды наружу и в пределах лога, сначала зажим, потом порядок — как set_interval / interval_input_changed шага 0
+// → true; не числа или конец не позже начала — false, интервал прежний. Явный выбор заменяет умолчание: оно после этого
+// не выбирается (interval_ready). Только состояние: пересчёт и отрисовка — у вызывающего
+function step4_set_interval(start, end, source) {
+    start = Math.floor(start)
+    end = Math.ceil(end)
+    if (state.settings.min != null) {
+        start = Math.max(start, state.settings.min)
+        end = Math.min(end, state.settings.max)
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) {
+        return false
+    }
+    step4.interval = { start: start, end: end, source: source }
+    step4.interval_ready = true
+    return true
+}
+
+// «Как на шаге 0»: интервал PID снова повторяет интервал шага 0 (source "step0"); умолчание лога больше не выбирается
+function step4_interval_follow() {
+    step4.interval = null
+    step4.interval_ready = true
+}
+
+// Участок для кнопки «Интервал — участок ACRO»: участок ACRO «Rate Loop Only» лога (pidtune_acro_interval — самый
+// длинный, целые секунды внутрь участка: MODE ровно на конце участка pidtune_mode_segments в интервал не берёт) в
+// пересечении интервала PID и окна полёта (step4_flight_range: без времени после посадки) → { start, end }. null — нет
+// лога, нет участка, пересечение пустое или участок совпадает с интервалом PID (сужать некуда). Расчёт шага не нужен
+function step4_acro_interval() {
+    if (state.log == null) {
+        return null
+    }
+    const interval = step4_interval()
+    const flight = step4_flight_range()
+    const range = [Math.max(interval.start, flight[0]), Math.min(interval.end, flight[1])]
+    if (!(range[1] > range[0])) {
+        return null
+    }
+    const acro = pidtune_acro_interval(state.log, state.params, range)
+    if ((acro == null) || ((acro.start === interval.start) && (acro.end === interval.end))) {
+        return null
+    }
+    return acro
+}
+
+// Подсказка лога тестового полёта с интервалом PID шире участка ACRO (вместо совета слетать ещё раз): строчными, для
+// начала фразы — capital. null — участка ACRO нет
 function step4_acro_hint(capital = false) {
     const interval = step4_acro_interval()
     if (interval == null) {
         return null
     }
-    const text = "лог тестового полёта: сузьте интервал анализа до участка ACRO (" + interval.start + "–" + interval.end + " с) — кнопка " +
-        "«Интервал — участок ACRO» под сводкой шага 4"
+    const text = "лог тестового полёта: сузьте интервал PID до участка ACRO (" + interval.start + "–" + interval.end + " с) — кнопка " +
+        "«Интервал — участок ACRO» над вкладками осей шага 4"
     return capital ? text[0].toUpperCase() + text.slice(1) : text
 }
 
@@ -249,13 +319,14 @@ function step4_init() {
     step4_setup_plots()
 }
 
-// Новый лог или ошибка загрузки: забыть данные PID, расчёт, выбор и форму, графики — пустые. Окно FFT шага остаётся
-// (как окно шага 0); недосчитанная правка его поля забывается — поле снова показывает действующее окно
+// Новый лог или ошибка загрузки: забыть данные PID, расчёт, выбор, интервал PID (умолчание выберется для нового лога —
+// step4_interval) и форму, графики — пустые. Окно FFT шага остаётся (как окно шага 0); недосчитанная правка его поля
+// забывается — поле снова показывает действующее окно
 function step4_reset() {
     Object.assign(step4, {
         pid: null, fft_window: null, axis: "roll", set_choice: { roll: null, pitch: null, yaw: null }, calc: null, key: null, gyro_ref: null,
         error: null, selected: { roll: null, pitch: null, yaw: null }, form_built: false, filled: false, edit_form: null, edit_postponed: false,
-        window_pending: false,
+        window_pending: false, interval: null, interval_ready: false,
     })
     clearTimeout(step4.edit_timer)
     step4.edit_timer = null
@@ -627,9 +698,9 @@ function step4_new_filters(axis, log_filters) {
     return { flte: accepted[prefix + "FLTE"], fltd: accepted[prefix + "FLTD"] }
 }
 
-// Части ключа расчёта: интервал, окно, выбор наборов, фильтры шагов 2–3 (notch и INS_GYRO_FILTER — для поправки,
-// FLTE/FLTD — для регуляторов вариантов); если фильтры гироскопа менялись, ещё и расчёт шага 1 (по его окнам
-// считается поправка). Фильтры — действующие значения, без принятого шагом 3 — значения лога (lowpass_log_values, как
+// Части ключа расчёта: интервал PID (step4_interval), окно, выбор наборов, фильтры шагов 2–3 (notch и INS_GYRO_FILTER —
+// для поправки, FLTE/FLTD — для регуляторов вариантов); если фильтры гироскопа менялись, ещё и расчёт шага 1 (по его
+// окнам считается поправка). Фильтры — действующие значения, без принятого шагом 3 — значения лога (lowpass_log_values, как
 // их показывает форма шага 3), float32: принятие шага 3 с фильтрами лога ключ не меняет и не даёт ложного «Принято
 // раньше…» (ревью задачи 7). Те же имена принятого на шагах 2–3 — в отпечатке входов шага 4 для сводки
 // (step_depends4_names): шаг и сводка видят устаревание одинаково
@@ -643,7 +714,8 @@ function step4_calc_key() {
         const f = step4_new_filters(axis, { flte: log_values[prefix + "FLTE"], fltd: log_values[prefix + "FLTD"] })
         return [Math.fround(f.flte), Math.fround(f.fltd)]
     })
-    return JSON.stringify([state.settings.start, state.settings.end, step4.window, step4.set_choice, candidate_key(now), filters,
+    const interval = step4_interval()
+    return JSON.stringify([interval.start, interval.end, step4.window, step4.set_choice, candidate_key(now), filters,
                            gyro_changed ? [step1.fft_key, state.spectrum.filter_version] : null])
 }
 
@@ -825,7 +897,7 @@ function step4_predict(res, values) {
     return { pred: pred, flags: pidtune_flags(pred, res.pred_log) }
 }
 
-// Расчёт шага для текущего интервала, окна, наборов и фильтров шагов 2–3: FFT осей (если сменилось окно), расчёт
+// Расчёт шага для текущего интервала PID, окна, наборов и фильтров шагов 2–3: FFT осей (если сменилось окно), расчёт
 // каждой оси, поправка фильтров гироскопа (только для осей с достоверным прогнозом и только если фильтры менялись —
 // тогда нужен расчёт шага 1, step_ensure_step1) и прогнозы вариантов. Выбор строки оси сохраняется, если пользователь
 // выбрал не строку по умолчанию и она осталась; иначе — рекомендованная или «Как в логе». Ключ расчёта пишется только
@@ -859,7 +931,8 @@ function step4_compute() {
         step4.fft_window = step4.window
     }
 
-    const range = [state.settings.start, state.settings.end]
+    const interval = step4_interval()
+    const range = [interval.start, interval.end]
     const gyro_old = step4_gyro_old()
     const gyro_new = step4_gyro_new()
     const gyro_changed = candidate_key(gyro_old) !== candidate_key(gyro_new)
@@ -1022,7 +1095,7 @@ function step4_best_unflagged(axis) {
 // Неожиданная ошибка действия — в консоль и вердикт «Ошибка шага 4: …»: step_try (сразу) и step_run (под оверлеем)
 
 // Показ шага: данные PID (один раз на лог), форма (один раз на лог, значения — наборов анализа), расчёт заново, если
-// сменились интервал, окно, набор или фильтры шагов 2–3. Расчёт на тестовом логе (400 Гц, 3 оси) — доли секунды
+// сменились интервал PID, окно, набор или фильтры шагов 2–3. Расчёт на тестовом логе (400 Гц, 3 оси) — доли секунды
 function step4_show() {
     if (state.log == null) {
         return
@@ -1080,19 +1153,16 @@ function step4_apply() {
     }, "verdict4", "шага 4")
 }
 
-// «Интервал — участок ACRO»: интервал анализа — участок ACRO лога тестового полёта (step4_acro_interval) через поля
-// шага 0 и interval_input_changed (wizard.js: зажим в границы лога, график полёта), затем пересчёт шага (интервал —
-// часть ключа расчёта). Под step_try, как остальные кнопки шага: неожиданная ошибка — в вердикт, а не в консоль молча
+// «Интервал — участок ACRO»: интервал PID — участок ACRO лога тестового полёта (step4_acro_interval, source "acro"),
+// затем показ шага с пересчётом (интервал PID — часть ключа расчёта). Интервал и поля шага 0 не меняются — фильтры
+// шагов 1–3 не пересчитываются. Под step_try, как остальные кнопки шага: неожиданная ошибка — в вердикт, а не в консоль
+// молча
 function step4_acro_apply() {
     step_try(() => {
         const interval = step4_acro_interval()
-        if (interval == null) {
-            return
+        if ((interval != null) && step4_set_interval(interval.start, interval.end, "acro")) {
+            step4_show()
         }
-        document.getElementById("TimeStart").value = interval.start
-        document.getElementById("TimeEnd").value = interval.end
-        interval_input_changed()
-        step4_show()
     }, "verdict4", "шага 4")
 }
 
@@ -1368,7 +1438,7 @@ function step4_render_summary() {
     }
     if (reliable.length == 0) {
         if (step4_axis_list.every((axis) => step4.calc[axis].status === "nodata")) {
-            step_verdict("verdict4", "fail", "Нет данных PID ни по одной оси в интервале анализа — выберите другой интервал на шаге 0.")
+            step_verdict("verdict4", "fail", "Нет данных PID ни по одной оси в интервале PID — выберите другой интервал PID (график над вкладками осей).")
             return
         }
         // Одинаковая причина у всех осей — одной фразой
