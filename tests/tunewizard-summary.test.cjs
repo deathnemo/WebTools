@@ -398,7 +398,7 @@ test('summary_rows: шаг 4 без axes или с metrics null — правка
 })
 
 test('summary_rows: PID менялись после интервала анализа (steps[4].set_values ≠ конец лога) — пометка у строки и имя в moved', () => {
-    const moved_note = 'в конце лога другое значение: параметры менялись после интервала анализа'
+    const moved_note = 'в конце лога другое значение: параметры менялись после интервала PID'
     // Набор анализа: P крена и D тангажа другие, чем в конце лога (0.135 и 0.0036 из BASE_LOG); остальное — как в конце
     const set_values = accepted_values(STEP4_NAMES, BASE_LOG, { ATC_RAT_RLL_P: 0.12, ATC_RAT_PIT_D: 0.003 })
     const steps = []
@@ -532,6 +532,21 @@ test('summary_inputs_key: JSON [начало, конец, ключ FFT, верс
     const swapped = inputs_ctx(accepted_steps())
     swapped.steps[3] = { accepted: Object.fromEntries(Object.entries(swapped.steps[3].accepted).reverse()) }
     assert.equal(summary_inputs_key(4, swapped), summary_inputs_key(4, ctx))
+})
+
+test('summary_inputs_key: шаг 4 — по интервалу PID (pid_start/pid_end), шаги 2–3 — по интервалу шага 0; без pid_* — как раньше', () => {
+    const ctx = { ...rows_ctx({ steps: [] }), start: 10, end: 100, pid_start: 20, pid_end: 90, fft_key: 'batch:16', filter_version: 4 }
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, ctx)).slice(0, 2), [20, 90])
+    assert.deepEqual(JSON.parse(summary_inputs_key(2, ctx)).slice(0, 2), [10, 100])
+    assert.deepEqual(JSON.parse(summary_inputs_key(3, ctx)).slice(0, 2), [10, 100])
+    // Смена интервала шага 0 при своём интервале PID: шаги 2–3 устаревают, шаг 4 — нет; смена интервала PID — наоборот
+    assert.equal(summary_inputs_key(4, { ...ctx, start: 0 }), summary_inputs_key(4, ctx))
+    assert.notEqual(summary_inputs_key(2, { ...ctx, start: 0 }), summary_inputs_key(2, ctx))
+    assert.notEqual(summary_inputs_key(4, { ...ctx, pid_end: 80 }), summary_inputs_key(4, ctx))
+    assert.equal(summary_inputs_key(2, { ...ctx, pid_end: 80 }), summary_inputs_key(2, ctx))
+    // Без pid_* (старые вызовы) — интервал шага 0
+    const { pid_start, pid_end, ...old } = ctx
+    assert.deepEqual(JSON.parse(summary_inputs_key(4, old)).slice(0, 2), [10, 100])
 })
 
 test('summary_inputs_key: нет интервала, ключа FFT или версии фильтра (undefined) — null', () => {

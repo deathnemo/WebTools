@@ -54,7 +54,7 @@ function summary_notch_enabling(log, value) {
 //   памяти прохода сохраняются). Шаг 2 поставил своё, а шаг 3 вернул лог — расхождение: в файл ничего не идёт, а
 //   пользователь на шаге 2 ждал другого [наше];
 // - moved — имена строк шага 4, у которых значение набора анализа (steps[4].set_values) отличается от конца лога:
-//   PID менялись после интервала анализа, принятое перепишет значения конца лога; у строки — пометка.
+//   PID менялись после интервала PID, принятое перепишет значения конца лога; у строки — пометка.
 // *_ESCMSK строки не получает, если его нет у аппарата (escmsk_present: не записан в лог и версия фильтра ниже 4): у
 // таких прошивок параметра нет, а 0 вместо настоящей маски сменил бы набор моторов — то же правило, что у «Сохранить
 // .param» шага 2, значений лога шага 1 и памяти прохода. Включаемый notch (summary_notch_enabling): все его поля изменены,
@@ -136,7 +136,7 @@ function summary_rows(ctx) {
                 }
                 const set = set_values?.[name]
                 if ((log != null) && Number.isFinite(set) && !summary_same(name, set, log, ctx.bits)) {
-                    notes.push("в конце лога другое значение: параметры менялись после интервала анализа")
+                    notes.push("в конце лога другое значение: параметры менялись после интервала PID")
                     moved.push(name)
                 }
             }
@@ -214,7 +214,10 @@ function summary_inputs_key(n, ctx) {
     }
     const changes = Object.keys(values).sort().map((name) => [name, values[name]])
     const from_step1 = (n < 4) ? [ctx.fft_key ?? null, ctx.filter_version ?? null] : [null, null]
-    return JSON.stringify([ctx.start ?? null, ctx.end ?? null, ...from_step1, changes])
+    // Шаг 4 — по своему интервалу PID (pid_start/pid_end; без них — интервал шага 0), шаги 2–3 — по интервалу шага 0
+    const start = (n === 4) ? (ctx.pid_start ?? ctx.start) : ctx.start
+    const end = (n === 4) ? (ctx.pid_end ?? ctx.end) : ctx.end
+    return JSON.stringify([start ?? null, end ?? null, ...from_step1, changes])
 }
 
 // Устарело ли принятое шага n: шаг принят (steps[n] != null), а отпечаток, сохранённый при «Принять»

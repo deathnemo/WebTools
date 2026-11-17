@@ -249,6 +249,48 @@ function step4_plots(page) {
     })))
 }
 
+// Блок «Интервал PID» шага 4 (этап 11): виден ли он и его кнопки, подпись, поля, заметка, источник интервала PID; график
+// PidFlight4 — имена трасс с данными, ползунок, диапазон оси X, число заливок участков ACRO
+function step4_interval_block(page) {
+    return page.evaluate(() => {
+        const gd = document.getElementById('PidFlight4')
+        const seen = (id) => document.getElementById(id).checkVisibility()
+        return {
+            shown: seen('step4_interval_block'),
+            label: document.getElementById('step4_interval_label').textContent,
+            fields: [document.getElementById('step4_start').value, document.getElementById('step4_end').value],
+            acro: seen('step4_acro_interval'),
+            step0: seen('step4_interval_step0'),
+            note: document.getElementById('step4_interval_note').textContent,
+            source: step4_interval().source,
+            traces: gd.data.filter((t) => Array.from(t.y).some(Number.isFinite)).map((t) => t.name),
+            rangeslider: gd._fullLayout.xaxis.rangeslider?.visible === true,
+            range: gd.layout.xaxis.range,
+            acro_shapes: (gd.layout.shapes ?? []).map((s) => [s.x0, s.x1]),
+            acro_log: log_mode_segments(state.log, [state.settings.min, state.settings.max]).filter((s) => s.mode == pidtune_rules.acro_mode).map((s) => [s.start, s.end]),
+        }
+    })
+}
+
+// Подписи «ACRO» заливок на графике PidFlight4 (итоговое ревью этапа 11, M-6): сколько их и все ли целиком внутри области
+// построения по горизонтали — подпись у начала участка, начатого левее видимого диапазона, обрезалась краем («CRO»)
+function acro_labels(page) {
+    return page.evaluate(() => {
+        const gd = document.getElementById('PidFlight4')
+        const box = gd.getBoundingClientRect()
+        const size = gd._fullLayout._size
+        const rects = [...gd.querySelectorAll('text')].filter((t) => t.textContent === 'ACRO').map((t) => t.getBoundingClientRect())
+        return { n: rects.length, inside: rects.every((r) => (r.left >= box.left + size.l - 0.5) && (r.right <= box.left + size.l + size.w + 0.5)) }
+    })
+}
+
+// Дождаться расчёта шага 4 на интервале PID range = { start, end }: после смены полями или ползунком — сам, после паузы
+// step4_interval_delay_ms и под оверлеем; кнопками — сразу
+function wait_interval4(page, range) {
+    return page.waitForFunction((range) => (step4.interval_timer == null) && (document.getElementById('loading').style.visibility === 'hidden') &&
+        (step4.calc?.roll?.range?.[0] === range.start) && (step4.calc.roll.range[1] === range.end) && !step4_stale(), range, { timeout: 60000 })
+}
+
 // Сводка шага 5: вердикт, плитки, строки таблицы шагов (ячейки и кнопка), изменённые и неизменённые строки,
 // расхождения, «что перелететь», кнопки и устаревшие шаги; ожидаемое из ядра — строки summary_rows(step_summary_context())
 // (изменённые: имя, «станет», шаг) и имена, которым по метаданным нужна перезагрузка
@@ -1197,7 +1239,21 @@ async function main() {
         assert.match(p4.verdict, /^Измерение ненадёжно на всех осях/, p4.verdict)
         assert.match(p4.verdict, /тестовый полёт: Acro с ACRO_OPTIONS «Rate Loop Only»/, 'сводка советует тестовый полёт: ' + p4.verdict)
         assert.match(p4.verdict, /и ACRO_TRAINER = 0/, 'совет тестового полёта называет ACRO_TRAINER = 0 (аудит D)')
-        assert.equal(await page.evaluate(() => document.getElementById('step4_acro_row').hidden), true, 'участка ACRO в логе нет — кнопки «Интервал — участок ACRO» нет (аудит D)')
+        // Блок «Интервал PID» (этап 11, дизайн раздел 6): участка ACRO в логе нет — интервал PID как на шаге 0, кнопок
+        // «Интервал — участок ACRO» (аудит D) и «Как на шаге 0» нет; график — цель скорости трёх осей и газ за весь полёт,
+        // с ползунком, показывает интервал PID; заметка называет интервал шага 0 — на нём считаются фильтры
+        const block4 = await step4_interval_block(page)
+        assert.deepEqual([block4.shown, block4.label, block4.source, block4.fields], [true, start + '–' + end + ' с, как на шаге 0', 'step0', [String(start), String(end)]],
+                         'интервал PID — как на шаге 0: ' + JSON.stringify(block4))
+        assert.deepEqual([block4.acro, block4.step0], [false, false], 'участка ACRO в логе нет, интервал как на шаге 0 — кнопок «Интервал — участок ACRO» и «Как на шаге 0» нет')
+        assert.equal(block4.note, 'Фильтры (шаги 1–3) считаются на интервале шага 0: ' + start + '–' + end + ' с.')
+        assert.deepEqual(block4.traces, ['цель крена', 'цель тангажа', 'цель рыскания', 'Газ'], 'график интервала PID — четыре ряда с данными')
+        assert.deepEqual([block4.rangeslider, block4.range], [true, [start, end]], 'у графика ползунок, ось X — интервал PID')
+        // В логе есть и ACRO без «Rate Loop Only» (режимы смешаны — ниже): заливки — участки ACRO по всему логу
+        assert.ok(block4.acro_log.length > 0, 'в тестовом логе есть участки ACRO')
+        assert.deepEqual(block4.acro_shapes, block4.acro_log, 'заливки — участки ACRO лога')
+        const labels4 = await acro_labels(page)
+        assert.ok((labels4.n > 0) && labels4.inside, 'подписи «ACRO» есть и видны целиком (итоговое ревью M-6): ' + JSON.stringify(labels4))
         // FFT компонент — только нужных шагу: Tar и Act (отклик PIDReview), D (шум и спектр D), Out (спектр выхода) (аудит D, M8)
         assert.deepEqual(await page.evaluate(() => Object.keys(step4_source('roll').sets.find((set) => set != null).FFT)), ['time', 'Tar', 'Act', 'D', 'Out'],
                          'FFT набора крена — время и четыре компоненты')
@@ -1488,51 +1544,76 @@ async function main() {
         assert.deepEqual(back4.titles, ['Как в логе'], 'подмена снята: в таблице только «Как в логе»')
         assert.equal((await step4_plots(page)).LBode4.with_data, 0, 'подмена снята: бодэ L пуст')
 
-        // ПОДМЕНА: лог тестового полёта с интервалом шире участка ACRO (pidtune_log_mode → rate_only_segment внутри интервала
-        // анализа): кнопка «Интервал — участок ACRO», подсказка сузить интервал в сводке и вердикте оси вместо совета слетать
-        // снова; щелчок сужает интервал анализа до целых секунд внутри участка и пересчитывает шаг (ключ расчёта сменился).
-        // Затем подмена снимается, интервал возвращается (аудит D)
-        const seg4 = { start: start + 10.4, end: start + 70.6 }
-        const acro_interval = { start: Math.ceil(seg4.start), end: Math.floor(seg4.end) }
+        // ПОДМЕНА: лог тестового полёта с интервалом PID шире участка ACRO — pidtune_acro_interval даёт участок внутри интервала
+        // PID (на 11 с позже начала), pidtune_log_mode — смешение режимов, не Rate Loop Only: кнопка «Интервал — участок ACRO»
+        // в блоке «Интервал PID», подсказка сузить интервал PID в сводке и вердикте оси вместо совета слетать снова; щелчок
+        // ставит интервал PID — участок (source "acro") и пересчитывает шаг (ключ расчёта сменился), интервал и поля шага 0 не
+        // меняются (этап 11: фильтры шагов 1–3 не пересчитываются). Затем подмены снимаются, интервал PID — снова как на шаге 0
+        // (аудит D). Внутри участка режим — ACRO (pidtune_mode_segments): кнопка участка прячется по допуску в 1 с, только
+        // если весь интервал PID — ACRO (итоговое ревью этапа 11, I-1), а в тестовом логе на этом месте режимы смешаны
+        const acro_interval = { start: start + 11, end: start + 70 }
         await page.evaluate((seg) => {
-            pidtune_log_mode = (...args) => ({ ...window.__step4_orig.mode(...args), rate_only: false, mixed_modes: ['STABILIZE', 'ACRO'], rate_only_segment: seg })
+            window.__step4_orig.acro = pidtune_acro_interval
+            window.__step4_orig.segments = pidtune_mode_segments
+            pidtune_log_mode = (...args) => ({ ...window.__step4_orig.mode(...args), rate_only: false, mixed_modes: ['STABILIZE', 'ACRO'] })
+            pidtune_acro_interval = () => ({ ...seg })
+            pidtune_mode_segments = (log, range) => ((range[0] >= seg.start) && (range[1] <= seg.end)) ?
+                [{ mode: pidtune_rules.acro_mode, start: range[0], end: range[1] }] : window.__step4_orig.segments(log, range)
             window.__step4_key = step4.key
             step4.key = null
             step4_show()
-        }, seg4)
+        }, acro_interval)
         try {
             await wait_overlay(page)
             await page.click('#step4_tab_roll')
             const acro4 = await step4_summary(page)
-            const hint4 = 'сузьте интервал анализа до участка ACRO (' + acro_interval.start + '–' + acro_interval.end + ' с)'
-            assert.equal(await page.isVisible('#step4_acro_row'), true, 'подмена: кнопка «Интервал — участок ACRO» видна')
-            assert.ok(acro4.verdict.includes(hint4) && !acro4.verdict.includes('нужен тестовый полёт'), 'подмена: сводка советует сузить интервал: ' + acro4.verdict)
-            assert.ok(acro4.axis_verdict.includes(hint4), 'подмена: вердикт оси советует сузить интервал: ' + acro4.axis_verdict)
+            const hint4 = 'сузьте интервал PID до участка ACRO (' + acro_interval.start + '–' + acro_interval.end + ' с)'
+            assert.equal(await page.isVisible('#step4_acro_interval'), true, 'подмена: кнопка «Интервал — участок ACRO» видна')
+            assert.ok(acro4.verdict.includes(hint4) && !acro4.verdict.includes('нужен тестовый полёт'), 'подмена: сводка советует сузить интервал PID: ' + acro4.verdict)
+            assert.ok(acro4.axis_verdict.includes(hint4), 'подмена: вердикт оси советует сузить интервал PID: ' + acro4.axis_verdict)
             assert.match(acro4.axis_verdict, /В интервале режимы STABILIZE, ACRO: смешение режимов ломает проверку \(б\)/, acro4.axis_verdict)
             await page.click('#step4_acro_interval')
             await wait_overlay(page)
-            assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, step4.key !== window.__step4_key, step4_stale(),
+            assert.deepEqual(await page.evaluate(() => [step4_interval(), step4.key !== window.__step4_key, step4_stale(), state.settings.start, state.settings.end,
                                                          document.getElementById('TimeStart').value, document.getElementById('TimeEnd').value]),
-                             [acro_interval.start, acro_interval.end, true, false, String(acro_interval.start), String(acro_interval.end)],
-                             '«Интервал — участок ACRO»: интервал анализа — участок, шаг пересчитан')
+                             [{ ...acro_interval, source: 'acro' }, true, false, start, end, String(start), String(end)],
+                             '«Интервал — участок ACRO»: интервал PID — участок, шаг пересчитан, интервал шага 0 прежний')
+            const acro_block = await step4_interval_block(page)
+            assert.deepEqual([acro_block.label, acro_block.fields, acro_block.range, acro_block.acro, acro_block.step0],
+                             [acro_interval.start + '–' + acro_interval.end + ' с, участок ACRO «Rate Loop Only»', [String(acro_interval.start), String(acro_interval.end)],
+                              [acro_interval.start, acro_interval.end], false, true],
+                             'интервал PID — участок ACRO: подпись, поля, график; сужать дальше некуда, видна «Как на шаге 0»')
+            // Набор начала с клавиатуры и сразу щелчок по «Как на шаге 0»: набранный интервал шире участка, и левее неё
+            // появилась бы «Интервал — участок ACRO» — до отпускания мыши кнопка сдвинулась бы, и щелчок потерялся (раздел 8
+            // журнала). change поля ждёт отпускания, щелчок отменяет набранное: интервал PID — как на шаге 0
+            await page.click('#step4_start', { clickCount: 3 })
+            await page.keyboard.type(String(start))
+            await page.click('#step4_interval_step0')
+            await wait_interval4(page, { start: start, end: end })
+            assert.deepEqual(await page.evaluate(() => [step4_interval(), step4.interval_postponed]), [{ start: start, end: end, source: 'step0' }, false],
+                             'набор и сразу «Как на шаге 0» — щелчок не потерялся, набранное отменено')
         } finally {
-            // Снять подмену и вернуть интервал (и при упавшей проверке), затем пересчитать шаг
-            await page.evaluate(([s, e]) => {
+            // Снять подмены и вернуть интервал PID (и при упавшей проверке), затем пересчитать шаг
+            await page.evaluate(() => {
                 pidtune_log_mode = window.__step4_orig.mode
-                document.getElementById('TimeStart').value = s
-                document.getElementById('TimeEnd').value = e
-                interval_input_changed()
-            }, [start, end])
+                if (window.__step4_orig.acro != null) {
+                    pidtune_acro_interval = window.__step4_orig.acro
+                }
+                if (window.__step4_orig.segments != null) {
+                    pidtune_mode_segments = window.__step4_orig.segments
+                }
+                step4_interval_follow()
+            })
         }
         await page.evaluate(() => {
             step4.key = null
             step4_show()
         })
         await wait_overlay(page)
-        assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, document.getElementById('step4_acro_row').hidden]), [start, end, true],
-                         'подмена снята, интервал прежний — кнопки нет')
+        assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, step4_interval(), document.getElementById('step4_acro_interval').hidden]),
+                         [start, end, { start: start, end: end, source: 'step0' }, true], 'подмены сняты, интервал PID — как на шаге 0, кнопки нет')
 
-        // ПОДМЕНА: PID тангажа менялись после интервала анализа — в конце лога (state.params) другое P, чем в наборе интервала
+        // ПОДМЕНА: PID тангажа менялись после интервала PID — в конце лога (state.params) другое P, чем в наборе интервала
         // (step4_gains_after): строка «Набор интервала», подпись «в наборе интервала: … (в конце лога …)», предупреждения
         // сводки и вердикта оси; после «Принять» set_values — набор интервала, а сводка шага 5 помечает строку и вердикт
         // (аудит D, I2; аудит E, D-2). Затем подмена снимается
@@ -1554,9 +1635,9 @@ async function main() {
                          /^в наборе интервала: [\d.]+ \(в конце лога [\d.]+\)$/, 'подпись поля P тангажа')
             assert.match(await page.evaluate(() => document.querySelector('#pidf_form p[data-name="ATC_RAT_PIT_I"] .inlog').textContent),
                          /^в наборе интервала: [\d.]+$/, 'подпись поля I тангажа — без значения конца лога (оно то же)')
-            assert.match(after4.verdict, / PID тангажа менялись после интервала анализа — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/, after4.verdict)
+            assert.match(after4.verdict, / PID тангажа менялись после интервала PID — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/, after4.verdict)
             assert.match(after4.verdict_class, /verdict--warn/)
-            assert.match(after4.axis_verdict, /После интервала анализа параметры менялись: в конце лога P = [\d.]+, I = [\d.]+, D = [\d.]+ \(в наборе интервала P = [\d.]+, I = [\d.]+, D = [\d.]+\)\. Принятое перепишет значения конца лога\./,
+            assert.match(after4.axis_verdict, /После интервала PID параметры менялись: в конце лога P = [\d.]+, I = [\d.]+, D = [\d.]+ \(в наборе интервала P = [\d.]+, I = [\d.]+, D = [\d.]+\)\. Принятое перепишет значения конца лога\./,
                          after4.axis_verdict)
             assert.match(await page.textContent('#candidates4 tbody tr:first-child td:last-child'), /^набор интервала \(в конце лога другие значения\)/, 'оценка строки лога')
             await page.click('#pidf_accept')
@@ -1567,9 +1648,9 @@ async function main() {
                 row: [...document.querySelectorAll('#changes5 tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)).find((cells) => cells[0] === 'ATC_RAT_PIT_P') ?? null,
             }))
             assert.deepEqual([acc_after.set, acc_after.accepted], [Math.fround(pit_p), Math.fround(pit_p)], 'set_values и принятое — набор интервала')
-            assert.ok((acc_after.row != null) && /в конце лога другое значение: параметры менялись после интервала анализа/.test(acc_after.row[4]),
+            assert.ok((acc_after.row != null) && /в конце лога другое значение: параметры менялись после интервала PID/.test(acc_after.row[4]),
                       'в изменениях сводки — пометка: ' + JSON.stringify(acc_after.row))
-            assert.match(acc_after.verdict, /PID менялись после интервала анализа: принятое перепишет значения конца лога \(см\. пометки\)/, acc_after.verdict)
+            assert.match(acc_after.verdict, /PID менялись после интервала PID: принятое перепишет значения конца лога \(см\. пометки\)/, acc_after.verdict)
         } finally {
             await page.evaluate(() => {
                 state.params.get = window.__params_get
@@ -1644,6 +1725,136 @@ async function main() {
         assert.match((await step4_summary(page)).verdict, /^Принято: /, 'вердикт шага 4 — «Принято»')
         assert.equal((await step4_plots(page)).DSpec4.traces[1].n, 513, 'спектр выхода — окном 1024 (513 бинов)')
 
+        // Свой интервал PID (этап 11, дизайн разделы 5 и 8): поля «Начало/Конец анализа PID» — на 5 с внутрь с каждого края:
+        // подпись «свой» и график сразу, видна «Как на шаге 0»; шаг пересчитывается сам после паузы, на новом интервале.
+        // Интервал и поля шага 0 те же; отпечатки и «устарело» шагов 2–3 не меняются (их принятое устарело раньше — интервал
+        // шага 0 сдвигали, — свежее принятое — в конце теста), а принятое шага 4 устарело
+        const own4 = { start: start + 5, end: end - 5 }
+        const steps23 = () => page.evaluate(() => [2, 3].map((n) => [step_inputs_key(n), step_accepted_stale(n)]))
+        const before23 = await steps23()
+        await page.fill('#step4_start', String(own4.start))
+        await page.dispatchEvent('#step4_start', 'change')
+        await page.fill('#step4_end', String(own4.end))
+        await page.dispatchEvent('#step4_end', 'change')
+        const own_block = await step4_interval_block(page)
+        assert.deepEqual([own_block.label, own_block.source, own_block.step0, own_block.range], [own4.start + '–' + own4.end + ' с, свой', 'own', true, [own4.start, own4.end]],
+                         'поля — свой интервал PID: ' + JSON.stringify(own_block))
+        await wait_interval4(page, own4)
+        assert.deepEqual(await page.evaluate(() => [state.settings.start, state.settings.end, document.getElementById('TimeStart').value, document.getElementById('TimeEnd').value]),
+                         [start, end, String(start), String(end)], 'интервал и поля шага 0 не изменились')
+        assert.deepEqual(await steps23(), before23, 'интервал PID не трогает отпечатки и «устарело» шагов 2–3')
+        assert.equal(await page.evaluate(() => step_accepted_stale(4)), true, 'принятое шага 4 устарело — другой интервал PID')
+        assert.match((await step4_summary(page)).verdict, /^Принято раньше для другого интервала PID, /, 'вердикт шага 4 — «Принято раньше…»')
+        // Сводка: строка шага 4 — «устарело», а в «Принято: …» — интервал PID, на котором приняли, не текущий (дизайн, раздел 8)
+        await page.click('#wizbar button:nth-child(6)')
+        const own5 = await step5_summary(page)
+        assert.equal(own5.steps[2].cells[1], 'устарело', 'шаг 4 в сводке — «устарело»')
+        assert.ok(own5.steps[2].cells[2].includes('Принято: интервал PID ' + start + '–' + end + ' с, как на шаге 0; ') &&
+                  !own5.steps[2].cells[2].includes(own4.start + '–' + own4.end), 'в строке шага 4 — интервал PID принятого: ' + own5.steps[2].cells[2])
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_interval4(page, own4)
+        // «Как на шаге 0»: подпись сразу, шаг пересчитан на интервале шага 0 без паузы; источник остаётся «как на шаге 0» и
+        // после того, как график сам перешёл на интервал (Plotly.relayout зовёт обработчик ползунка — Review Focus 1)
+        await page.click('#step4_interval_step0')
+        assert.equal(await page.textContent('#step4_interval_label'), start + '–' + end + ' с, как на шаге 0', '«Как на шаге 0» — подпись сразу')
+        await wait_interval4(page, { start: start, end: end })
+        await page.waitForTimeout(300)
+        const step0_block = await step4_interval_block(page)
+        assert.deepEqual([step0_block.label, step0_block.source, step0_block.step0, step0_block.range, await page.evaluate(() => step4.interval_timer)],
+                         [start + '–' + end + ' с, как на шаге 0', 'step0', false, [start, end], null], '«Как на шаге 0» — источник не сменился: ' + JSON.stringify(step0_block))
+        assert.equal(await page.evaluate(() => step_accepted_stale(4)), false, 'интервал PID — тот, на котором приняли: принятое шага 4 снова актуально')
+        // Смена интервала PID полем и уход на шаг 5 раньше паузы: отложенный пересчёт шаг 4 не показывает и не считает
+        // (Review Focus 2); интервал PID вернуть — «Как на шаге 0» на шаге 4
+        await page.fill('#step4_start', String(own4.start))
+        await page.dispatchEvent('#step4_start', 'change')
+        await page.click('#wizbar button:nth-child(6)')
+        assert.equal(await page.evaluate(() => step4.interval_timer != null), true, 'ушли с шага 4 раньше паузы')
+        await page.waitForTimeout(1000)
+        assert.deepEqual(await visible_steps(page), ['5'], 'пауза кончилась на шаге 5 — виден только шаг 5')
+        assert.deepEqual(await page.evaluate(() => [step4.interval_timer, step4_stale()]), [null, true], 'пауза кончилась, шаг 4 не пересчитан')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_interval4(page, { start: own4.start, end: end })
+        await page.click('#step4_interval_step0')
+        await wait_interval4(page, { start: start, end: end })
+
+        // Путь через сам график (дизайн, раздел 9; итоговое ревью этапа 11, I-2): обработчик plotly_relayout не отличает
+        // событие пользователя от программного, поэтому ползунок и зум — Plotly.relayout. Диапазон оси X — свой интервал PID
+        // (целые секунды наружу), подпись и поля сразу, расчёт — после паузы; поле с фокусом при перетаскивании показывает новую
+        // границу, а эхо графика (те же границы) не затирает набираемое в нём (M-1)
+        const bounds = await page.evaluate(() => [state.settings.min, state.settings.max])
+        const relayout4 = (update) => page.evaluate(async (update) => {
+            await Plotly.relayout('PidFlight4', update)
+            return { interval: step4_interval(), timer: step4.interval_timer != null, label: document.getElementById('step4_interval_label').textContent,
+                     fields: [document.getElementById('step4_start').value, document.getElementById('step4_end').value] }
+        }, update)
+        const drag1 = { start: start + 3, end: end - 2 }
+        await page.focus('#step4_start')
+        const r1 = await relayout4({ 'xaxis.range': [start + 3.4, end - 2.6] })
+        assert.deepEqual([r1.interval, r1.timer, r1.label, r1.fields], [{ ...drag1, source: 'own' }, true, drag1.start + '–' + drag1.end + ' с, свой',
+                                                                         [String(drag1.start), String(drag1.end)]], 'xaxis.range — свой интервал PID: ' + JSON.stringify(r1))
+        await wait_interval4(page, drag1)
+        await page.evaluate(() => { document.getElementById('step4_start').value = '77' })
+        const echo = await relayout4({ 'xaxis.range': [drag1.start, drag1.end] })
+        assert.deepEqual([echo.interval, echo.timer, echo.fields], [{ ...drag1, source: 'own' }, false, ['77', String(drag1.end)]],
+                         'эхо графика: интервал и источник прежние, пересчёта нет, набираемое в поле с фокусом не затёрто: ' + JSON.stringify(echo))
+        await page.evaluate((value) => {
+            const field = document.getElementById('step4_start')
+            field.value = value
+            field.blur()
+        }, String(drag1.start))
+        const drag2 = { start: start + 7, end: end - 4 }
+        const r2 = await relayout4({ 'xaxis.range[0]': start + 7.2, 'xaxis.range[1]': end - 4.9 })
+        assert.deepEqual([r2.interval, r2.timer], [{ ...drag2, source: 'own' }, true], 'xaxis.range[0]/[1] — свой интервал PID: ' + JSON.stringify(r2))
+        await wait_interval4(page, drag2)
+        const r3 = await relayout4({ 'xaxis.autorange': true })
+        assert.deepEqual([r3.interval, r3.timer], [{ start: bounds[0], end: bounds[1], source: 'own' }, true], 'xaxis.autorange — весь лог: ' + JSON.stringify(r3))
+        await wait_interval4(page, { start: bounds[0], end: bounds[1] })
+
+        // Ползунок держат, не отпуская кнопку мыши (I-3): Plotly шлёт plotly_relayout только на движение — пауза кончается при
+        // нажатой кнопке, а пересчёт ждёт её отпускания (расчёт под оверлеем занял бы главный поток посреди перетаскивания)
+        const grab = page.locator('#PidFlight4 .rangeslider-grabarea-min')
+        await grab.scrollIntoViewIfNeeded()
+        const box = await grab.boundingBox()
+        await page.evaluate(() => { window.__key_held = step4.key })
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+        await page.mouse.down()
+        await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2, { steps: 8 })
+        await page.waitForTimeout(1000)
+        const held = await page.evaluate(() => ({ interval: step4_interval(), same_key: step4.key === window.__key_held, stale: step4_stale(), timer: step4.interval_timer,
+                                                  held: step4.interval_held, overlay: document.getElementById('loading').style.visibility }))
+        assert.ok((held.interval.source === 'own') && (held.interval.start > bounds[0]) && (held.interval.end === bounds[1]), 'ползунок сдвинут: ' + JSON.stringify(held.interval))
+        assert.deepEqual([held.same_key, held.stale, held.timer, held.held, held.overlay], [true, true, null, true, 'hidden'],
+                         'ползунок держат 1 с: пауза кончилась, шаг не пересчитан — ждёт отпускания: ' + JSON.stringify(held))
+        await page.mouse.up()
+        await wait_interval4(page, held.interval)
+        assert.equal(await page.evaluate(() => step4.interval_held), false, 'кнопку отпустили — шаг пересчитан')
+
+        // Свой интервал PID с границами шага 0 — «Как на шаге 0» не видна: возвращать некуда (дизайн, раздел 5; итоговое
+        // ревью M-2)
+        await page.fill('#step4_start', String(start))
+        await page.dispatchEvent('#step4_start', 'change')
+        await page.fill('#step4_end', String(end))
+        await page.dispatchEvent('#step4_end', 'change')
+        const same_block = await step4_interval_block(page)
+        assert.deepEqual([same_block.label, same_block.source, same_block.step0], [start + '–' + end + ' с, свой', 'own', false],
+                         'свой интервал PID с границами шага 0 — кнопки «Как на шаге 0» нет: ' + JSON.stringify(same_block))
+        await wait_interval4(page, { start: start, end: end })
+        assert.equal(await page.evaluate(() => step_accepted_stale(4)), false, 'границы те же — принятое шага 4 актуально')
+
+        // Набор границы с клавиатуры и сразу щелчок по полосе шагов (M-7): change поля ждёт отпускания мыши, а уход с шага 4
+        // досчитывает его до показа шага 5 — сводка сразу на набранном интервале PID: шаг 4 «устарело»
+        await page.click('#step4_start', { clickCount: 3 })
+        await page.keyboard.type(String(own4.start))
+        await page.click('#wizbar button:nth-child(6)')
+        const typed5 = await step5_summary(page)
+        assert.deepEqual(await page.evaluate(() => [step4_interval(), step4.interval_postponed]), [{ start: own4.start, end: end, source: 'own' }, false],
+                         'уход с шага 4 досчитал набранную границу')
+        assert.equal(typed5.steps[2].cells[1], 'устарело', 'сводка — на набранном интервале PID: шаг 4 «устарело»')
+        await page.click('#wizbar button:nth-child(5)')
+        await wait_interval4(page, { start: own4.start, end: end })
+        await page.click('#step4_interval_step0')
+        await wait_interval4(page, { start: start, end: end })
+
         // Устаревание: «Принять» на шаге 3 с другими значениями (INS_GYRO_FILTER 39) после «Принять» на шаге 4 — фильтры
         // для прогноза сменились, вердикт шага 4 — «Принято раньше …»
         await page.click('#wizbar button:nth-child(4)')
@@ -1654,7 +1865,7 @@ async function main() {
         assert.deepEqual(await visible_steps(page), ['4'], '«Принять» шага 3 открывает шаг 4')
         assert.equal(await page.evaluate(() => state.steps[3].accepted.INS_GYRO_FILTER), 39, 'на шаге 3 принят INS_GYRO_FILTER 39')
         const stale4 = await step4_summary(page)
-        assert.match(stale4.verdict, /^Принято раньше для другого интервала, окна FFT, набора или фильтров шагов 2–3/, stale4.verdict)
+        assert.match(stale4.verdict, /^Принято раньше для другого интервала PID, окна FFT, набора или фильтров шагов 2–3/, stale4.verdict)
         assert.match(stale4.verdict_class, /verdict--warn/, '«Принято раньше» — предупреждение')
         // Отпечаток входов: принятое шага 4 устарело (сменилось принятое шага 3), шага 3 — нет
         await assert_accepted_fresh(page, 3)
@@ -1670,7 +1881,8 @@ async function main() {
         for (const id of ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4']) {
             assert.equal(g4[id].bg, surface, id + ': фон — --surface')
         }
-        await assert_plot_widths(page, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4'])
+        assert.equal(await page.evaluate(() => document.getElementById('PidFlight4').layout.paper_bgcolor), surface, 'PidFlight4: фон — --surface')
+        await assert_plot_widths(page, ['PidFlight4', 'StepResp4', 'TarAct4', 'DSpec4', 'LBode4'])
         await page.screenshot({ path: path.join(shots, 'step4.png'), fullPage: true })
         await page.click('#wizbar button:nth-child(1)')
 
@@ -1692,8 +1904,9 @@ async function main() {
         assert.deepEqual(v5.steps.map((row) => [row.cells[0], row.cells[1], row.button]),
                          [['Шаг 2Гармонический notch', 'устарело', 'К шагу 2'], ['Шаг 3Низкочастотные фильтры', 'принят', null], ['Шаг 4PID по осям', 'устарело', 'К шагу 4']],
                          'таблица шагов: устаревшие — с кнопкой перехода')
-        assert.match(v5.steps[2].cells[2], /^Примите шаг 4 заново: после «Принять» сменились интервал анализа или фильтры шагов 2–3\.Принято: крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно$/,
-                     v5.steps[2].cells[2])
+        // В строке принятого шага 4 — интервал PID, на котором его приняли (этап 11)
+        assert.equal(v5.steps[2].cells[2], 'Примите шаг 4 заново: после «Принять» сменились интервал PID или фильтры шагов 2–3.Принято: интервал PID ' + start + '–' + end +
+                     ' с, как на шаге 0; крен — ненадёжно; тангаж — ненадёжно; рыскание — ненадёжно', 'строка шага 4 в сводке')
         assert.match(v5.steps[1].cells[2], /^Шум гироскопа [+-]?[\d.]+ дБ, шум D .*; задержка на 30 Гц: путь P .* \(к логу\)/, v5.steps[1].cells[2])
         // Изменения — изменённые строки итога (имя, «станет», шаг); INS_GYRO_FILTER — 39 от шага 3. Расхождения шагов нет:
         // шаг 2 оставил INS_GYRO_FILTER лога (принятые варианты его не меняли), а расхождение считается только между
@@ -2406,7 +2619,7 @@ async function main() {
                      'заметка о расхождении с шагом 2')
 
         for (const [button, ids] of [[2, ['Spectrum1', 'Spectrogram1']], [3, ['Spectrum2', 'Bode2', 'Spectrogram2']], [4, ['Spectrum3', 'DTerm3', 'Bode3']],
-                                     [5, ['StepResp4', 'TarAct4', 'DSpec4', 'LBode4']]]) {
+                                     [5, ['PidFlight4', 'StepResp4', 'TarAct4', 'DSpec4', 'LBode4']]]) {
             await page.click('#wizbar button:nth-child(' + button + ')')
             await wait_overlay(page)
             await assert_plot_widths(page, ids)
@@ -2429,6 +2642,17 @@ async function main() {
         assert.equal(log_accept3.id, 'log', 'принят вариант «log»')
         assert.match(log_accept3.verdict, /^Принято: «Как в логе» — .* \(к логу\)\. Рекомендовался «По размеру винта \(10″\)»\.$/, log_accept3.verdict)
         assert.equal(log_accept3.stale, false, 'принятое шага 3 актуально')
+        // Свой интервал PID при актуальном принятом шагов 2–3 (этап 11): их принятое не устаревает — интервал PID только
+        // у шага 4; интервал PID — вернуть («Как на шаге 0»)
+        const [start_r, end_r] = await page.evaluate(() => [state.settings.start, state.settings.end])
+        await wait_interval4(page, { start: start_r, end: end_r })
+        await page.fill('#step4_end', String(end_r - 10))
+        await page.dispatchEvent('#step4_end', 'change')
+        await wait_interval4(page, { start: start_r, end: end_r - 10 })
+        assert.deepEqual(await page.evaluate(() => [step4_interval().source, step_accepted_stale(2), step_accepted_stale(3), state.settings.start, state.settings.end]),
+                         ['own', false, false, start_r, end_r], 'свой интервал PID: принятое шагов 2–3 актуально, интервал шага 0 прежний')
+        await page.click('#step4_interval_step0')
+        await wait_interval4(page, { start: start_r, end: end_r })
         await page.click('#wizbar button:nth-child(4)')
         await wait_overlay(page)
         await page.fill('#prop_in', '12')

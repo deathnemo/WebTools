@@ -248,9 +248,20 @@ function on_show_step(n) {
     }
 }
 
+// Хук ухода с шага n — до показа нового (set_step): шаг 4 досчитывает отложенную до отпускания мыши правку поля интервала
+// PID (переход щелчком по полосе шагов), иначе сводка шага 5 нарисовалась бы на прежнем интервале PID
+function on_leave_step(n) {
+    if ((n === 4) && (typeof step4_leave === "function")) {
+        step4_leave()
+    }
+}
+
 function set_step(n) {
     if (!step_available(n)) {
         return
+    }
+    if (state.step !== n) {
+        on_leave_step(state.step)
     }
     state.step = n
     for (const section of document.querySelectorAll("section[data-step]")) {

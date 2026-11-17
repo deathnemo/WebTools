@@ -33,7 +33,7 @@ const step5_param_forms = ["параметр", "параметра", "парам
 const step5_stale_inputs = {
     2: "интервал анализа или расчёт шага 1",
     3: "интервал анализа, расчёт шага 1 или принятое на шаге 2",
-    4: "интервал анализа или фильтры шагов 2–3",
+    4: "интервал PID или фильтры шагов 2–3",
 }
 
 // ---------- Подписи ----------
@@ -145,7 +145,9 @@ function step5_step_result(n, accepted) {
         const text = (metrics != null) ? step3_summary_text(metrics.current, metrics.log) + " (к логу)" : "без сравнения с логом"
         return { text: text, flags: step3_flagged(accepted.flags) ? step3_flags_text(accepted.flags, metrics.current, metrics.log) : null }
     }
-    const text = step4_axis_list.map((axis) => pidtune_axes[axis].title + " — " + step5_axis_text(accepted.axes?.[axis]?.metrics)).join("; ")
+    const axes_text = step4_axis_list.map((axis) => pidtune_axes[axis].title + " — " + step5_axis_text(accepted.axes?.[axis]?.metrics)).join("; ")
+    // Принятое до этапа 11 — без интервала PID
+    const text = (accepted.interval != null) ? "интервал PID " + pidtune_interval_text(accepted.interval) + "; " + axes_text : axes_text
     const flagged = step5_flagged4_axes(accepted)
     const flags = flagged.map((axis) => pidtune_axes[axis].title + " — " + accepted.axes[axis].flags.reasons.join("; ")).join(" · ")
     return { text: text, flags: (flagged.length > 0) ? flags : null }
@@ -379,7 +381,7 @@ function step5_render_verdict(summary, bits, changed, accepted, stale, unreliabl
         issues.push(step5_conflict_issue(conflict, summary.rows, bits))
     }
     if (changed.some((row) => summary.moved.includes(row.name))) {
-        issues.push("PID менялись после интервала анализа: принятое перепишет значения конца лога (см. пометки)")
+        issues.push("PID менялись после интервала PID: принятое перепишет значения конца лога (см. пометки)")
     }
     const flagged = []
     if ((state.steps[2] != null) && step2_flagged(state.steps[2].flags)) {

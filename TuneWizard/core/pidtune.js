@@ -1115,6 +1115,33 @@ function pidtune_firmware(log, version) {
     return { major: Number(found[1]), minor: Number(found[2]), patch: (found[3] != null) ? Number(found[3]) : null }
 }
 
+// Участок ACRO «Rate Loop Only» в интервале range (окно полёта — дизайн этапа 11, раздел 5) → { start, end } в целых
+// секундах внутрь (ceil начала, floor конца) или null. Самый длинный участок режима acro_mode (pidtune_mode_segments,
+// в границах range) с битом acro_rate_only_bit в каждом действующем на нём ACRO_OPTIONS. В отличие от rate_only_segment
+// участок находится и когда весь range — ACRO. null — участка нет, бит не выставлен или после округления end <= start
+function pidtune_acro_interval(log, params, range, rules = pidtune_rules) {
+    const acro = pidtune_mode_segments(log, range).filter((s) => s.mode == rules.acro_mode)
+    if (acro.length == 0) {
+        return null
+    }
+    const longest = acro.reduce((a, b) => ((b.end - b.start) > (a.end - a.start)) ? b : a)
+    const options = pidtune_param_values(params, "ACRO_OPTIONS", [longest.start, longest.end])
+    if (!((options.length > 0) && options.every((v) => (v & rules.acro_rate_only_bit) != 0))) {
+        return null
+    }
+    const start = Math.ceil(longest.start)
+    const end = Math.floor(longest.end)
+    return (end > start) ? { start, end } : null
+}
+
+// Подписи источника интервала анализа PID (шаг 4)
+const pidtune_interval_sources = { step0: "как на шаге 0", acro: "участок ACRO «Rate Loop Only»", own: "свой" }
+
+// Подпись интервала { start, end, source }: «289–370 с, участок ACRO «Rate Loop Only»»
+function pidtune_interval_text(interval) {
+    return interval.start + "–" + interval.end + " с, " + pidtune_interval_sources[interval.source]
+}
+
 // Режим лога для оси axis_name ("roll", "pitch", "yaw") в интервале range:
 //   rate_only — тестовый полёт Acro «Rate Loop Only»: во всём интервале режим ACRO (acro_mode) и в каждом действующем
 //               значении ACRO_OPTIONS бит acro_rate_only_bit — угловой контур выключен, цель — команда пилота;
