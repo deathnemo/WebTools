@@ -787,3 +787,72 @@ test('Этап 11: step4_acro_interval — разница с интервало�
     assert.equal(step4_set_interval(8, 50, 'own'), true)
     assert.deepEqual(step4_acro_interval(), { start: 10, end: 50 })
 })
+
+test('Этап 11: step4_acro_interval на смешанном интервале — за краем участка другой режим: участок есть и при разнице с интервалом PID не больше 1 с; весь интервал ACRO — null', () => {
+    // Хвост четвёртого лога: STABILIZE до 288.07 с, дальше ACRO до конца лога, окно полёта 282–370 с
+    const log = fake_log({ messages: { MODE: { TimeUS: [0, 288070000], Mode: [0, 1] } }, params: roll_params() })
+    state.log = log
+    state.params = log_params(log)
+    state.info = { build_type: 2, flight: { start: 282, end: 370 } }
+    state.settings = { start: 282, end: 370, min: 0, max: 387, window_size: 1024 }
+    step4_reset()
+    assert.deepEqual(step4_interval(), { start: 289, end: 370, source: 'acro' })
+    assert.equal(step4_acro_interval(), null, 'интервал PID — сам участок ACRO')
+    // Начало ползунка на краю заливки ACRO (любая позиция в [288; 289) даёт 288): 0.07 с STABILIZE в интервале — режимы
+    // смешаны, все оси «ненадёжно»; кнопка и подсказка нужны, хотя участок отличается от интервала PID не больше чем на 1 с
+    for (const [a, b] of [[288, 370], [288, 371], [287, 370], [282, 370]]) {
+        assert.equal(step4_set_interval(a, b, 'own'), true)
+        assert.deepEqual(step4_acro_interval(), { start: 289, end: 370 }, 'интервал PID ' + a + '–' + b)
+    }
+    assert.equal(step4_set_interval(288, 370, 'own'), true)
+    assert.equal(step4_acro_hint(), 'лог тестового полёта: сузьте интервал PID до участка ACRO (289–370 с) — кнопка «Интервал — участок ACRO» над вкладками осей шага 4')
+    // Весь интервал PID — ACRO: разница до 1 с — от округления, сужать некуда
+    for (const [a, b] of [[289, 370], [289, 371]]) {
+        assert.equal(step4_set_interval(a, b, 'own'), true)
+        assert.equal(step4_acro_interval(), null, 'интервал PID ' + a + '–' + b)
+    }
+})
+
+test('Этап 11: правка поля интервала PID, отложенная до отпускания мыши, досчитывается в «Принять» и «Применить вариант» сами, не по порядку таймеров', async () => {
+    // Набрали границу и сразу щёлкнули кнопку: change поля пришёл при нажатой кнопке мыши (отложен), кнопку отпустили, а
+    // отложенное по отпусканию (setTimeout 0) ещё не сработало — кнопка должна досчитать правку сама
+    const postpone = (start, end) => {
+        element('step4_start').value = String(start)
+        element('step4_end').value = String(end)
+        step_pointer.down = true
+        step4_interval_input()
+        step_pointer.down = false
+        assert.equal(step4.interval_postponed, true, 'change при нажатой кнопке мыши отложен')
+    }
+    const redraw_all = globalThis.step4_redraw_all
+    globalThis.step4_redraw_all = () => {}
+    try {
+        load(make_log(60, 100), [10, 50])
+        fill_form()
+        for (const name of step4_param_names()) {
+            if (element('pidf_' + name).value === '') {
+                element('pidf_' + name).value = '0.05'
+            }
+        }
+        step4_edit_done()
+        // «Принять»: принято на набранном интервале, отложенного пересчёта не осталось
+        postpone(20, 45)
+        step4_accept()
+        await flush_overlay()
+        assert.deepEqual(state.steps[4]?.interval, { start: 20, end: 45, source: 'own' }, '«Принять» — на набранном интервале PID')
+        assert.deepEqual(step4.calc.roll.range, [20, 45])
+        assert.equal(step4.interval_postponed, false)
+        // «Применить вариант»: расчёт — на набранном интервале
+        postpone(15, 40)
+        step4_apply()
+        await flush_overlay()
+        assert.deepEqual(step4_interval(), { start: 15, end: 40, source: 'own' }, '«Применить вариант» — набранный интервал PID')
+        assert.deepEqual(step4.calc.roll.range, [15, 40])
+        assert.equal(step4.interval_postponed, false)
+    } finally {
+        clearTimeout(step4.interval_timer)
+        step4.interval_timer = null
+        step_pointer.down = false
+        globalThis.step4_redraw_all = redraw_all
+    }
+})

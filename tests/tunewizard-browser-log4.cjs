@@ -3,10 +3,11 @@
 // по умолчанию участок ACRO 289–370 с («289–370 с, участок ACRO «Rate Loop Only»», кнопки ACRO нет): крен и тангаж «надёжно» с
 // запасом 1σ у правил (тангаж — «на границе 20 %», у крена допустимы оба исхода: «на границе 20 %» или «менять нечего» — по зерну
 // суррогатов), рыскание — «мало точности (г)» с советом «ещё ≈ N с»; плитки с «±», строка (г) в таблице качества, пометка раннего
-// отклика у «Нарастания» крена, сводка и шаг 5 без «нужен тестовый полёт». Затем поля «Начало/Конец анализа PID» = 282/370 —
-// смешение режимов: «ненадёжно (б)» у всех осей без «±» и строки (г), кнопка «Интервал — участок ACRO» возвращает 289–370 с.
-// Поля шага 0 (282–370 с) и отпечаток шага 1 при этом не меняются. Отдельный скрипт, чтобы не удлинять основной прогон
-// (tests/tunewizard-browser.cjs).
+// отклика у «Нарастания» крена, сводка и шаг 5 без «нужен тестовый полёт»; «Как на шаге 0» видна, подпись «ACRO» на графике
+// видна целиком. Затем поля «Начало/Конец анализа PID» = 282/370 — смешение режимов: «ненадёжно (б)» у всех осей без «±» и
+// строки (г), кнопка «Интервал — участок ACRO» видна, «Как на шаге 0» — нет (границы шага 0); начало 288 (край заливки ACRO)
+// — кнопка участка 289–370 по-прежнему видна; кнопка возвращает 289–370 с. Поля шага 0 (282–370 с) и отпечаток шага 1 при
+// этом не меняются. Отдельный скрипт, чтобы не удлинять основной прогон (tests/tunewizard-browser.cjs).
 // Запуск: npm run test:tunewizard-log4
 // Нужны: четвёртый лог (TUNEWIZARD_LOG4 или TuneWizard/logs/2 01.01.1970 2-00-00.bin), браузер (CHROME_PATH — путь к
 // chrome.exe; без него Playwright берёт свой Chromium, если он установлен) и python для http.server. Без лога тест
@@ -56,7 +57,9 @@ async function wait_for_server(page, url, server) {
     throw new Error('http.server не поднялся на ' + url)
 }
 
-// Состояние шага 4: статусы, правила, точность, шум, сводка, кнопка интервала
+// Состояние шага 4: статусы, правила, точность, шум, сводка, кнопки интервала; подписи «ACRO» на графике PidFlight4 —
+// сколько их и все ли целиком внутри области построения по горизонтали (итоговое ревью этапа 11, M-6: подпись у начала
+// участка, начатого левее видимого диапазона, обрезалась краем — «CRO» на виде по умолчанию)
 function read4(page) {
     return page.evaluate(() => {
         const calc = (axis) => {
@@ -65,10 +68,16 @@ function read4(page) {
             return { status: c.status, change: c.rule?.change ?? null, borderline: c.rule?.borderline ?? null, noise: c.quality?.noise != null,
                      need_s: p?.need_s ?? null, applied: p?.applied ?? null, halves_null: c.quality?.noise?.halves_null ?? null, sigma_step: c.quality?.noise?.sigma_step ?? null }
         }
+        const gd = document.getElementById('PidFlight4')
+        const box = gd.getBoundingClientRect()
+        const size = gd._fullLayout._size
+        const labels = [...gd.querySelectorAll('text')].filter((t) => t.textContent === 'ACRO').map((t) => t.getBoundingClientRect())
         return {
             calc: Object.fromEntries(['roll', 'pitch', 'yaw'].map((axis) => [axis, calc(axis)])),
             verdict: document.getElementById('verdict4').textContent,
             acro_button: document.getElementById('step4_acro_interval').checkVisibility(),
+            step0_button: document.getElementById('step4_interval_step0').checkVisibility(),
+            labels: { n: labels.length, inside: labels.every((r) => (r.left >= box.left + size.l - 0.5) && (r.right <= box.left + size.l + size.w + 0.5)) },
             label: document.getElementById('step4_interval_label').textContent,
             interval4: step4_interval(),
             fields: [document.getElementById('step4_start').value, document.getElementById('step4_end').value],
@@ -138,6 +147,8 @@ async function main() {
         assert.ok(a4.label.includes('289–370 с, участок ACRO «Rate Loop Only»'), 'подпись интервала PID: ' + a4.label)
         assert.deepEqual(a4.fields, ['289', '370'], 'поля интервала PID')
         assert.equal(a4.acro_button, false, 'кнопки «Интервал — участок ACRO» нет, интервал уже участок ACRO')
+        assert.equal(a4.step0_button, true, '«Как на шаге 0» видна: интервал PID 289–370 отличается от интервала шага 0 282–370')
+        assert.ok((a4.labels.n > 0) && a4.labels.inside, 'подпись «ACRO» на виде по умолчанию видна целиком: ' + JSON.stringify(a4.labels))
         assert.deepEqual([a4.calc.roll.status, a4.calc.roll.change], ['ok', null], 'крен: надёжно, правил нет — ' + JSON.stringify(a4.calc.roll))
         assert.deepEqual([a4.calc.pitch.status, a4.calc.pitch.borderline], ['ok', 20], 'тангаж: на границе 20 % — ' + JSON.stringify(a4.calc.pitch))
         assert.equal(a4.calc.yaw.status, 'imprecise', 'рыскание: мало точности (г)')
@@ -204,6 +215,7 @@ async function main() {
         assert.match(back.verdict, /\(б\)/, back.verdict)
         assert.equal(back.acro_button, true, 'кнопка «Интервал — участок ACRO» видна')
         assert.deepEqual(back.acro_interval, { start: 289, end: 370 })
+        assert.equal(back.step0_button, false, '«Как на шаге 0» не видна: свой интервал PID 282–370 — как на шаге 0 (итоговое ревью M-2)')
 
         // Шаг 5 на смешанном интервале: вердикт и список «Что перелететь» не расходятся — советы по осям, а не «нужен тестовый полёт»
         await page.click('#wizbar button:nth-child(6)')
@@ -213,8 +225,17 @@ async function main() {
         assert.ok(!/нужен тестовый полёт/.test(back5.verdict), 'в вердикте шага 5 нет «нужен тестовый полёт»: ' + back5.verdict)
         assert.ok(back5.refly.some((t) => t.includes('сузьте интервал PID до участка ACRO (289–370 с)')), 'в списке — сузить интервал: ' + back5.refly.join(' | '))
 
-        // Кнопка → снова участок ACRO 289–370 с, источник acro; поля шага 0 и отпечаток шага 1 не менялись
+        // Начало интервала PID на краю заливки ACRO — 288 (ACRO с 288.07 с, итоговое ревью I-1): 0.07 с STABILIZE смешивают режимы,
+        // кнопка и подсказка участка нужны, хотя участок 289–370 отличается от интервала PID меньше чем на секунду
         await page.click('#wizbar button:nth-child(5)')
+        await wait_overlay(page)
+        await page.fill('#step4_start', '288')
+        await page.dispatchEvent('#step4_start', 'change')
+        const edge = await read4(page)
+        assert.deepEqual([edge.interval4, edge.acro_interval, edge.acro_button], [{ start: 288, end: 370, source: 'own' }, { start: 289, end: 370 }, true],
+                         'интервал PID 288–370: участок ACRO 289–370 и кнопка: ' + JSON.stringify([edge.interval4, edge.acro_interval, edge.acro_button]))
+
+        // Кнопка → снова участок ACRO 289–370 с, источник acro; поля шага 0 и отпечаток шага 1 не менялись
         await page.click('#step4_acro_interval')
         await wait_overlay(page)
         await page.waitForFunction(() => (step4_interval().source === 'acro') && (step4.calc?.roll?.status === 'ok'), null, { timeout: 180000 })

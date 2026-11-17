@@ -60,6 +60,7 @@ const step4 = {
     interval_ready: false,    // умолчание интервала PID для лога выбрано (step4_interval); false — ещё нет
     interval_timer: null,     // отложенный пересчёт после смены интервала PID полями или графиком (step4_interval_schedule)
     interval_postponed: false, // change поля интервала PID при нажатой кнопке мыши — после её отпускания (step4_interval_input)
+    interval_held: false,     // пауза кончилась при нажатой кнопке мыши — пересчёт после её отпускания (step4_interval_schedule)
     flight_plot: false,       // график «Интервал PID» (PidFlight4) построен для этого лога (pidflight4_redraw)
 }
 
@@ -193,8 +194,8 @@ function step4_interval_follow() {
 // Участок для кнопки «Интервал — участок ACRO»: участок ACRO «Rate Loop Only» лога (pidtune_acro_interval — самый
 // длинный, целые секунды внутрь участка: MODE ровно на конце участка pidtune_mode_segments в интервал не берёт) в
 // пересечении интервала PID и окна полёта (step4_flight_range: без времени после посадки) → { start, end }. null — нет
-// лога, нет участка, пересечение пустое или участок отличается от интервала PID не больше чем на 1 с на каждом конце
-// (сужать некуда). Расчёт шага не нужен
+// лога, нет участка, пересечение пустое или весь интервал PID — ACRO и участок отличается от него не больше чем на 1 с
+// на каждом конце (сужать некуда). Расчёт шага не нужен
 function step4_acro_interval() {
     if (state.log == null) {
         return null
@@ -206,8 +207,14 @@ function step4_acro_interval() {
         return null
     }
     const acro = pidtune_acro_interval(state.log, state.params, range)
-    // Разница до 1 с на каждом конце — только от округления (интервал шага 0 округлён наружу, участок — внутрь): сужать некуда
-    if ((acro == null) || ((Math.abs(acro.start - interval.start) <= 1) && (Math.abs(acro.end - interval.end) <= 1))) {
+    if (acro == null) {
+        return null
+    }
+    // Разница до 1 с на каждом конце — от округления (интервал округлён наружу, участок — внутрь), если за краем участка тот
+    // же ACRO: сужать некуда. Другой режим за краем (начало ползунка на краю заливки ACRO: 288–370 при ACRO с 288.07 с)
+    // смешивает режимы — все оси «ненадёжно», и кнопка нужна, хотя разница меньше секунды
+    const all_acro = pidtune_mode_segments(state.log, [interval.start, interval.end]).every((s) => s.mode == pidtune_rules.acro_mode)
+    if (all_acro && (Math.abs(acro.start - interval.start) <= 1) && (Math.abs(acro.end - interval.end) <= 1)) {
         return null
     }
     return acro
@@ -327,7 +334,8 @@ function step4_init() {
     document.getElementById("pidf_accept").addEventListener("click", step4_accept)
     // Блок «Интервал PID»: поля — граница сразу, расчёт после паузы (step4_interval_input; change при нажатой кнопке
     // мыши — после её отпускания, если щелчок не отменил правку); кнопки — сразу. Ползунок и зум графика — обработчик
-    // plotly_relayout (pidflight4_setup)
+    // plotly_relayout (pidflight4_setup); пауза кончилась, пока ползунок держат, — пересчёт после отпускания
+    // (step4_interval_schedule). После отпускания — следующей задачей: сначала отработает отпускание у Plotly
     for (const id of ["step4_start", "step4_end"]) {
         document.getElementById(id).addEventListener("change", step4_interval_input)
     }
@@ -338,6 +346,9 @@ function step4_init() {
                     step4_interval_input()
                 }
             }, 0)
+        }
+        if (step4.interval_held) {
+            setTimeout(step4_interval_release, 0)
         }
     })
     document.getElementById("step4_interval_step0").addEventListener("click", step4_interval_step0)
@@ -356,7 +367,7 @@ function step4_reset() {
     Object.assign(step4, {
         pid: null, fft_window: null, axis: "roll", set_choice: { roll: null, pitch: null, yaw: null }, calc: null, key: null, gyro_ref: null,
         error: null, selected: { roll: null, pitch: null, yaw: null }, form_built: false, filled: false, edit_form: null, edit_postponed: false,
-        window_pending: false, interval: null, interval_ready: false, interval_postponed: false, flight_plot: false,
+        window_pending: false, interval: null, interval_ready: false, interval_postponed: false, interval_held: false, flight_plot: false,
     })
     clearTimeout(step4.edit_timer)
     step4.edit_timer = null
@@ -1153,11 +1164,12 @@ function step4_show() {
         }
         step4_update_custom()
         step4_redraw_all()
-        // Введённое учтено: отложенные пересчёты правок и интервала PID не нужны
+        // Введённое учтено: отложенные пересчёты правок и интервала PID (и пересчёт после отпускания мыши) не нужны
         clearTimeout(step4.edit_timer)
         step4.edit_timer = null
         clearTimeout(step4.interval_timer)
         step4.interval_timer = null
+        step4.interval_held = false
         step4_edit_done()
     }, "verdict4", "шага 4")
 }
@@ -1166,11 +1178,13 @@ function step4_show() {
 // до досчёта правок: досчёт выбирает в оси строку формы («Свой»), а щелчок шёл по строке, выбранной до него (ревью
 // задачи 7). Значения строки берутся после досчёта — по её id. Всё — внутри одного step_run, как «Принять»: при
 // устаревшем расчёте (новый интервал) досчёт правок идёт под оверлеем, и вложенные step_run выполняются сразу, а не
-// позже строки с чтением расчёта (аудит области D, M-5)
+// позже строки с чтением расчёта (аудит области D, M-5). Отложенная правка поля интервала PID досчитывается до этого
+// (step4_flush_interval): расчёт — на набранном интервале
 function step4_apply() {
     if (!step4.filled) {
         return
     }
+    step4_flush_interval()
     step_run(() => {
         if (!step4.filled || (state.log == null)) {
             return
@@ -1246,9 +1260,10 @@ function step4_metrics_summary(axis, row) {
 
 // «Принять»: значения формы, набор анализа каждой оси (set_values — «было» для сводки), по каждой оси — строка формы
 // (вариант или «custom»), её отметки и сводка метрик, ключ расчёта и отпечаток входов (step_inputs_key — для «устарело»
-// сводки) — в итог мастера, затем шаг 5. Правки полей сначала досчитываются. Пустые, нечисловые и отрицательные значения
-// принять нельзя (step4_accept_refusal)
+// сводки) — в итог мастера, затем шаг 5. Правки полей (и отложенная правка поля интервала PID — step4_flush_interval)
+// сначала досчитываются. Пустые, нечисловые и отрицательные значения принять нельзя (step4_accept_refusal)
 function step4_accept() {
+    step4_flush_interval()
     step4_flush_window(false)
     step4_flush_edits(true)
     step_run(() => {
@@ -2140,10 +2155,14 @@ const pidflight4_throttle = step4_axis_list.length
 // Точек в ряду цели не больше — прореживание (tarac4_decimate) [наше, как tarac4_max_points: ширина графика ≈ 1300 px,
 // а за весь полёт лога 400 Гц — сотни тысяч отсчётов на ось]
 const pidflight4_max_points = 6000
+// Подпись «ACRO» ставится, если видимая часть участка не уже этой доли видимого диапазона [наше: подпись ≈ 30 px — 2–3 %
+// ширины графика ≈ 1300 px; на более узкой части она вылезла бы за заливку или за правый край графика на ось газа]
+const pidflight4_label_min = 0.04
 
 // Регистрация графика (step4_setup_plots): цели — ось y слева, газ — своя ось справа (подпись — flight_throttle_title, как
-// на графике шага 0), ползунок по оси X, легенда над графиком (справа — ось газа); заливки ACRO — фигуры layout.shapes
-// (pidflight4_redraw). Ползунок и зум задают интервал PID — pidflight4_relayout
+// на графике шага 0), ползунок по оси X, легенда над графиком (справа — ось газа); заливки ACRO — фигуры layout.shapes,
+// их подписи — layout.annotations (pidflight4_redraw, pidflight4_labels). Ползунок и зум задают интервал PID —
+// pidflight4_relayout
 function pidflight4_setup() {
     const trace = (name, yaxis, hover) => ({ mode: "lines", name: name, meta: name, line: { width: 1.2 }, yaxis: yaxis, visible: false, x: [], y: [],
                                              hovertemplate: "<extra></extra>%{meta}<br>%{x:.2f} с<br>" + hover })
@@ -2157,6 +2176,7 @@ function pidflight4_setup() {
         showlegend: true,
         legend: { orientation: "h", x: 0, xanchor: "left", y: 1.02, yanchor: "bottom" },
         shapes: [],
+        annotations: [],
         margin: { b: 50, l: 60, r: 60, t: 30 },
     }, { on_theme: pidflight4_theme })
     document.getElementById("PidFlight4").on("plotly_relayout", pidflight4_relayout)
@@ -2178,7 +2198,9 @@ function pidflight4_theme(palette, data, layout) {
     axis.tickfont = { ...axis.tickfont, color: gas }
     for (const shape of layout.shapes) {
         shape.fillcolor = palette.ink
-        shape.label.font.color = palette.ink
+    }
+    for (const label of layout.annotations) {
+        label.font.color = palette.ink
     }
 }
 
@@ -2206,7 +2228,7 @@ function pidflight4_data() {
 }
 
 // Построить график для лога (step4_show после load_pid; один раз на лог — step4.flight_plot): ряды, подпись газа профиля,
-// заливки ACRO с подписью, ось X — интервал PID. Графика нет (не зарегистрирован — тесты ядра) — ничего
+// заливки ACRO и их подписи, ось X — интервал PID. Графика нет (не зарегистрирован — тесты ядра) — ничего
 function pidflight4_redraw() {
     const p = plot("PidFlight4")
     if (p == null) {
@@ -2227,29 +2249,71 @@ function pidflight4_redraw() {
     p.layout.shapes.length = 0
     for (const segment of data.acro) {
         p.layout.shapes.push({ type: "rect", name: "acro", xref: "x", yref: "paper", x0: segment.start, x1: segment.end, y0: 0, y1: 1, layer: "below",
-                               opacity: 0.12, line: { width: 0 }, label: { text: "ACRO", textposition: "top left", font: { size: 10 } } })
+                               opacity: 0.12, line: { width: 0 } })
     }
     const interval = step4_interval()
     p.layout.xaxis.range = [interval.start, interval.end]
     p.layout.xaxis.autorange = false
+    p.layout.annotations.length = 0
+    p.layout.annotations.push(...pidflight4_labels(p.layout.shapes, p.layout.xaxis.range))
     pidflight4_theme(plot_palette(), p.data, p.layout)
     render_plot("PidFlight4")
     step4.flight_plot = true
 }
 
-// Пустой график (новый лог — step4_reset): ряды и заливки ACRO убрать; построится заново при показе шага
+// Подписи «ACRO» заливок shapes (layout.shapes) при видимом диапазоне оси X range → annotations: у левого края видимой
+// части участка — у начала участка (xref "x": Plotly сам двигает подпись с осью) или, если участок начат левее видимого,
+// у левого края графика (xref "paper", x 0). Подпись у начала такого участка обрезалась бы краем графика: «CRO» на виде
+// по умолчанию четвёртого лога (ACRO с 288.07 с, интервал PID с 289 с). Видимая часть уже pidflight4_label_min
+// диапазона — без подписи
+function pidflight4_labels(shapes, range) {
+    const width = range[1] - range[0]
+    const color = plot_palette().ink
+    const labels = []
+    for (const shape of shapes) {
+        if ((Math.min(shape.x1, range[1]) - Math.max(shape.x0, range[0])) < pidflight4_label_min * width) {
+            continue
+        }
+        const left = shape.x0 < range[0]
+        labels.push({ text: "ACRO", xref: left ? "paper" : "x", x: left ? 0 : shape.x0, yref: "paper", y: 1, xanchor: "left", yanchor: "top",
+                      xshift: 2, showarrow: false, font: { size: 10, color: color } })
+    }
+    return labels
+}
+
+// Подписи заливок ACRO — под текущий диапазон оси X графика (после ползунка, зума, программной смены оси): Plotly.relayout
+// подписей — только если они сменились (у начала участка подпись двигается с осью сама, сменяются они на краях участков);
+// скрытый или ещё не дорисованный график — только layout, дорисуется при показе
+function pidflight4_update_labels() {
+    const p = plot("PidFlight4")
+    const labels = pidflight4_labels(p.layout.shapes, p.layout.xaxis.range)
+    const key = (list) => JSON.stringify(list.map((label) => [label.xref, label.x]))
+    if (key(labels) === key(p.layout.annotations ?? [])) {
+        return
+    }
+    const div = document.getElementById("PidFlight4")
+    if (p.dirty || plot_hidden(div)) {
+        p.layout.annotations = labels
+        render_plot("PidFlight4")
+        return
+    }
+    Plotly.relayout(div, { annotations: labels })
+}
+
+// Пустой график (новый лог — step4_reset): ряды, заливки ACRO и их подписи убрать; построится заново при показе шага
 function pidflight4_clear() {
     const p = plot("PidFlight4")
     if (p == null) {
         return
     }
     p.layout.shapes.length = 0
+    p.layout.annotations.length = 0
     plot_clear("PidFlight4")
 }
 
 // Ось X графика — интервал PID interval. Plotly.relayout — только если график показывает другой диапазон: иначе лишняя
-// перерисовка и лишнее событие plotly_relayout (его границы — интервал PID, обработчик его пропустит). Скрытый или ещё не
-// дорисованный график — только layout, дорисуется при показе (render_plot)
+// перерисовка и лишнее событие plotly_relayout (его границы — интервал PID, обработчик его пропустит; подписи ACRO
+// подгонит он же). Скрытый или ещё не дорисованный график — только layout (и подписи), дорисуется при показе (render_plot)
 function pidflight4_range(interval) {
     const p = plot("PidFlight4")
     const axis = p.layout.xaxis
@@ -2261,6 +2325,7 @@ function pidflight4_range(interval) {
     if (p.dirty || plot_hidden(div)) {
         axis.range = range
         axis.autorange = false
+        p.layout.annotations = pidflight4_labels(p.layout.shapes, range)
         render_plot("PidFlight4")
         return
     }
@@ -2268,9 +2333,10 @@ function pidflight4_range(interval) {
 }
 
 // Ползунок и зум графика (plotly_relayout, как у «FlightData» шага 0): диапазон оси X — свой интервал PID, двойной щелчок
-// (xaxis.autorange) — весь лог. График к целым секундам не подгоняется: событие идёт и во время перетаскивания ползунка
-// (подгонит показ шага после пересчёта). Программный Plotly.relayout (pidflight4_range) присылает то же событие с
-// границами интервала PID — step4_interval_own их пропускает, источник не меняется. Другие события (ось Y, размер) — мимо
+// (xaxis.autorange) — весь лог; подписи ACRO — под новый диапазон (pidflight4_update_labels). График к целым секундам не
+// подгоняется: событие идёт и во время перетаскивания ползунка (подгонит показ шага после пересчёта). Программный
+// Plotly.relayout (pidflight4_range) присылает то же событие с границами интервала PID — step4_interval_own их пропускает,
+// источник не меняется. Другие события (ось Y, размер, подписи) — мимо
 function pidflight4_relayout(data) {
     if (state.log == null) {
         return
@@ -2284,13 +2350,17 @@ function pidflight4_relayout(data) {
         range = [state.settings.min, state.settings.max]
     }
     if (range != null) {
-        step_try(() => step4_interval_own(Number(range[0]), Number(range[1]), false), "verdict4", "шага 4")
+        step_try(() => {
+            pidflight4_update_labels()
+            step4_interval_own(Number(range[0]), Number(range[1]), false)
+        }, "verdict4", "шага 4")
     }
 }
 
 // Блок «Интервал PID» на странице: подпись интервала и источника, поля, заметка об интервале шага 0 (на нём считаются
 // фильтры), кнопки — «Интервал — участок ACRO», если есть участок уже интервала PID (step4_acro_interval), «Как на шаге 0»,
-// если интервал PID не следует за шагом 0; ось X графика. Блок показан впервые при видимой секции — графику подогнать
+// если интервал PID отличается от интервала шага 0 (дизайн, раздел 5: свой или участок ACRO с теми же границами
+// возвращать некуда); ось X графика. Блок показан впервые при видимой секции — графику подогнать
 // размер (show_plots, как панели оси в step4_render_axis). sync_plot — подогнать ось X графика (false — граница пришла с
 // самого графика); force_fields — переписать и поле с фокусом: иначе показ шага после пересчёта не затирает границу,
 // которую ещё набирают (Tab из одного поля в другое — change первого, и пауза кончилась, пока набирают второе)
@@ -2309,7 +2379,7 @@ function step4_render_interval(sync_plot = true, force_fields = false) {
     document.getElementById("step4_interval_note").textContent = "Фильтры (шаги 1–3) считаются на интервале шага 0: " + state.settings.start + "–" +
         state.settings.end + " с."
     document.getElementById("step4_acro_interval").hidden = step4_acro_interval() == null
-    document.getElementById("step4_interval_step0").hidden = interval.source === "step0"
+    document.getElementById("step4_interval_step0").hidden = (interval.start === state.settings.start) && (interval.end === state.settings.end)
     // Реестра графиков нет — тесты ядра
     if (plot("PidFlight4") == null) {
         return
@@ -2326,7 +2396,9 @@ function step4_render_interval(sync_plot = true, force_fields = false) {
 // step4_render_interval). Границы после округления и зажима те же (step4_set_interval) — ничего не меняется, и источник
 // прежний: так программный Plotly.relayout (поля, «Как на шаге 0», участок ACRO) и change поля без правки не делают
 // интервал «своим». Неверные (не числа, конец не позже начала) — поля и график снова показывают интервал PID. Иначе
-// source "own": подпись, поля и график сразу, расчёт — после паузы
+// source "own": подпись, поля и график сразу, расчёт — после паузы. Поле с фокусом переписывается, только если границы
+// сменились или пришли из полей: эхо графика (те же границы после программного Plotly.relayout) не затирает границу,
+// которую набирают во втором поле, а перетаскивание ползунка при фокусе в поле показывает в нём новую
 function step4_interval_own(a, b, sync_plot) {
     if (state.log == null) {
         return
@@ -2338,30 +2410,53 @@ function step4_interval_own(a, b, sync_plot) {
         return
     }
     const after = step4_interval()
-    if ((after.start === before.start) && (after.end === before.end)) {
-        Object.assign(step4, saved)
-    } else {
+    const changed = (after.start !== before.start) || (after.end !== before.end)
+    if (changed) {
         step4_interval_schedule()
+    } else {
+        Object.assign(step4, saved)
     }
-    step4_render_interval(sync_plot, true)
+    step4_render_interval(sync_plot, changed || sync_plot)
 }
 
-// Поля «Начало/Конец анализа PID» (change): свой интервал PID из обоих полей (step4_interval_own). При нажатой кнопке
+// Поля «Начало/Конец анализа PID» (change): свой интервал PID из обоих полей (step4_interval_fields). При нажатой кнопке
 // мыши (щелчок увёл фокус из поля) — после её отпускания (step4_init), как правки формы (step_edit_controller): иначе
 // подпись и кнопки блока перерисовались бы до отпускания, соседняя кнопка сдвинулась бы, и щелчок по ней потерялся
 // (раздел 8 журнала). Щелчок по кнопке блока отложенную правку отменяет — он сам выбирает интервал (step4_interval_step0,
-// step4_acro_apply)
+// step4_acro_apply); «Принять», «Применить вариант» и уход с шага её досчитывают (step4_flush_interval)
 function step4_interval_input() {
     if (step_pointer.down) {
         step4.interval_postponed = true
         return
     }
+    step4_interval_fields()
+}
+
+// Свой интервал PID из обоих полей (step4_interval_own); отложенная правка учтена
+function step4_interval_fields() {
     step4.interval_postponed = false
     step_try(() => {
         const start = parseFloat(document.getElementById("step4_start").value)
         const end = parseFloat(document.getElementById("step4_end").value)
         step4_interval_own(start, end, true)
     }, "verdict4", "шага 4")
+}
+
+// Досчитать отложенную до отпускания мыши правку поля интервала PID (step4_interval_input) сразу. «Принять», «Применить
+// вариант» и уход с шага (step4_leave) приходят щелчком, когда кнопка уже отпущена, а отложенное по отпусканию идёт
+// следующей задачей — после щелчка: принятое и сводка шага 5 взяли бы прежний интервал PID. Как step4_flush_window
+// и step4_flush_edits у кнопок шага
+function step4_flush_interval() {
+    if (step4.interval_postponed) {
+        step4_interval_fields()
+    }
+}
+
+// Уход с шага 4 (set_step в wizard.js, on_leave_step — до показа нового шага): отложенную правку поля интервала PID
+// досчитать — сводка шага 5 читает интервал PID (отпечаток входов шага 4, «устарело»). Пересчёт шага не нужен: показ
+// шага 4 пересчитает сам, интервал PID — часть ключа расчёта
+function step4_leave() {
+    step4_flush_interval()
 }
 
 // «Как на шаге 0»: интервал PID снова повторяет интервал шага 0 (step4_interval_follow); подпись и график сразу, пересчёт
@@ -2377,15 +2472,36 @@ function step4_interval_step0() {
 
 // Пересчёт шага после паузы step4_interval_delay_ms (поля и график): прежний отложенный снимается. К концу паузы шаг 4 не
 // показан (ушли на другой шаг) — ничего: показ шага пересчитает сам (интервал PID — часть ключа расчёта), а поверх
-// другого шага шаг 4 не рисуется. Таймер снимают step4_show (интервал учтён) и step4_reset
+// другого шага шаг 4 не рисуется. Кнопка мыши к концу паузы нажата (ползунок тянут и задержали, не отпуская: Plotly шлёт
+// plotly_relayout только на движение) — пересчёт после её отпускания (interval_held, step4_interval_release): расчёт под
+// оверлеем занял бы главный поток посреди перетаскивания (на логе «Rate Loop Only» — секунды), а график после него
+// прыгнул бы к целым секундам под курсором (дизайн, раздел 3: страница не «залипает» при перетаскивании). Таймер снимают
+// step4_show (интервал учтён) и step4_reset
 function step4_interval_schedule() {
     clearTimeout(step4.interval_timer)
     step4.interval_timer = setTimeout(() => {
         step4.interval_timer = null
-        if (state.step === 4) {
-            step4_show()
+        if (state.step !== 4) {
+            return
         }
+        if (step_pointer.down) {
+            step4.interval_held = true
+            return
+        }
+        step4_show()
     }, step4_interval_delay_ms)
+}
+
+// Кнопку мыши отпустили после паузы, пришедшейся на нажатую кнопку (step4_interval_schedule; из step4_init — следующей
+// задачей после отпускания): пересчитать шаг сейчас, если он показан
+function step4_interval_release() {
+    if (!step4.interval_held) {
+        return
+    }
+    step4.interval_held = false
+    if (state.step === 4) {
+        step4_show()
+    }
 }
 
 // ---------- Графики ----------
