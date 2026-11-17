@@ -112,9 +112,13 @@ function step_depends4_names() {
 // Известное ограничение: step1.fft_key — ключ последнего расчёта шага 1, поэтому смена окна FFT на шаге 0 без
 // пересчёта шага 1 не делает принятое устаревшим, пока шаг 1 не пересчитан
 function step_summary_context() {
+    // Интервал PID шага 4 (step4_interval) — свой, не интервал шага 0: от него зависит отпечаток шага 4
+    const pid = step4_interval()
     return {
         start: state.settings.start,
         end: state.settings.end,
+        pid_start: pid.start,
+        pid_end: pid.end,
         fft_key: step1.fft_key,
         filter_version: state.spectrum.filter_version,
         steps: state.steps,

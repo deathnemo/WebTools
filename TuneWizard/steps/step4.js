@@ -159,6 +159,10 @@ function step4_interval() {
 // → true; не числа или конец не позже начала — false, интервал прежний. Явный выбор заменяет умолчание: оно после этого
 // не выбирается (interval_ready). Только состояние: пересчёт и отрисовка — у вызывающего
 function step4_set_interval(start, end, source) {
+    // Только числа (null и строки не приводятся) и известный источник
+    if ((typeof start !== "number") || (typeof end !== "number") || ((source !== "acro") && (source !== "own"))) {
+        return false
+    }
     start = Math.floor(start)
     end = Math.ceil(end)
     if (state.settings.min != null) {
@@ -182,7 +186,7 @@ function step4_interval_follow() {
 // Участок для кнопки «Интервал — участок ACRO»: участок ACRO «Rate Loop Only» лога (pidtune_acro_interval — самый
 // длинный, целые секунды внутрь участка: MODE ровно на конце участка pidtune_mode_segments в интервал не берёт) в
 // пересечении интервала PID и окна полёта (step4_flight_range: без времени после посадки) → { start, end }. null — нет
-// лога, нет участка, пересечение пустое или участок совпадает с интервалом PID (сужать некуда). Расчёт шага не нужен
+// лога, нет участка, пересечение пустое или участок отличается от интервала PID не больше чем на 1 с на каждом конце (сужать некуда). Расчёт шага не нужен
 function step4_acro_interval() {
     if (state.log == null) {
         return null
@@ -194,7 +198,8 @@ function step4_acro_interval() {
         return null
     }
     const acro = pidtune_acro_interval(state.log, state.params, range)
-    if ((acro == null) || ((acro.start === interval.start) && (acro.end === interval.end))) {
+    // Разница до 1 с на каждом конце — только от округления (интервал шага 0 округлён наружу, участок — внутрь): сужать некуда
+    if ((acro == null) || ((Math.abs(acro.start - interval.start) <= 1) && (Math.abs(acro.end - interval.end) <= 1))) {
         return null
     }
     return acro
@@ -1241,7 +1246,7 @@ function step4_accept() {
         }
         // set_values — набор анализа каждой оси («было» для сводки: конец лога может отличаться, step4_gains_after)
         state.steps[4] = { accepted: values, set_values: step4_set_values(), axes: axes, calc_key: step4.key, inputs: step_inputs_key(4),
-                           evaluated_at: Date.now() }
+                           interval: step4_interval(), evaluated_at: Date.now() }
         step4_redraw_all()
         set_step(5)
     }, "verdict4", "шага 4")
@@ -1401,12 +1406,12 @@ function step4_render_summary() {
     // Коэффициенты осей менялись после интервала анализа — кратко (подробности — вердикт оси)
     const changed_after = step4_axes_changed_after()
     const after_note = (changed_after.length == 0) ? ""
-        : " PID " + changed_after.map((axis) => step4_axis_names[axis].gen).join(", ") + " менялись после интервала анализа — принятое перепишет значения конца лога " +
+        : " PID " + changed_after.map((axis) => step4_axis_names[axis].gen).join(", ") + " менялись после интервала PID — принятое перепишет значения конца лога " +
           "(подробности — во вкладках осей)."
     const accepted = step4_accepted_now()
     if (accepted != null) {
         if (accepted.calc_key !== step4_calc_key()) {
-            step_verdict("verdict4", "warn", "Принято раньше для другого интервала, окна FFT, набора или фильтров шагов 2–3 — проверьте и примите заново.")
+            step_verdict("verdict4", "warn", "Принято раньше для другого интервала PID, окна FFT, набора или фильтров шагов 2–3 — проверьте и примите заново.")
             return
         }
         const names = step4_axis_list.map((axis) => step4_axis_names[axis].nom.toLowerCase() + " " + step4_row_name(axis, accepted.axes[axis].candidate_id))
@@ -1734,7 +1739,7 @@ function step4_render_axis_verdict() {
     if (after != null) {
         warn()
         const list = (gains) => step4_gain_keys.map((k) => k + " = " + step_value_text(gains[k])).join(", ")
-        parts.push("После интервала анализа параметры менялись: в конце лога " + list(after.end) + " (в наборе интервала " + list(res.gains) + "). " +
+        parts.push("После интервала PID параметры менялись: в конце лога " + list(after.end) + " (в наборе интервала " + list(res.gains) + "). " +
                    "Принятое перепишет значения конца лога.")
     }
     // D выключен, шум D — у оси с данными

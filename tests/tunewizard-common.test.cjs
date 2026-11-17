@@ -5,7 +5,7 @@
 // зависит шаг 4) и отпечаток входов принятого шага (и «устарело» без лога).
 // Скрипт классический (общая глобальная область), поэтому загружается как на странице — через vm.runInThisContext
 // (как в tests/tunewizard-core.test.cjs). Глобалы страницы, которые он зовёт (document, window, fetch, loading_call,
-// state, html_escape, step1, step1_ready, step1_prepare, step2_param_names, step4_param_names), — заглушки ниже; модуль
+// state, html_escape, step1, step1_ready, step1_prepare, step2_param_names, step4_param_names, step4_interval), — заглушки ниже; модуль
 // обращается к ним только при вызове.
 // param_to_string — настоящий, из Libraries/Param_Helpers.js; summary_inputs_key и summary_stale (core/summary.js, с его
 // зависимостями: notch_param_names, pidtune_axes), lowpass_param_names (core/lowpass.js) и hmncs_bits (core/params.js) —
@@ -44,6 +44,8 @@ globalThis.step1_prepare = () => false
 // INS_GYRO_FILTER, SCHED_LOOP_RATE и поля обоих notch; шаг 4 — P, I, D трёх осей
 globalThis.step2_param_names = () => ['INS_GYRO_FILTER', 'SCHED_LOOP_RATE', ...notch_param_names().flatMap((notch) => Object.values(notch))]
 globalThis.step4_param_names = () => Object.values(pidtune_axes).flatMap((axis) => ['P', 'I', 'D'].map((k) => axis.rate + k))
+// Интервал PID шага 4 (step4_interval) — в этих тестах как на шаге 0
+globalThis.step4_interval = () => ({ start: state.settings.start, end: state.settings.end, source: 'step0' })
 
 // В порядке index.html: core/summary.js и то, что ему нужно (Param_Helpers.js, filters.js, pid.js и pidtune.js,
 // params.js), lowpass.js (ему при загрузке — candidates.js), core/passmem.js (passmem_depends4_names — список имён,

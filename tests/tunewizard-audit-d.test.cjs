@@ -219,13 +219,13 @@ test('I-2: смена PID после интервала — набор инте�
     step4.axis = 'roll'
     step4_render_axis_verdict()
     const verdict = element('axis_verdict4')
-    assert.match(verdict.textContent, /После интервала анализа параметры менялись: в конце лога P = 0\.12, I = 0\.12, D = 0\.003 \(в наборе интервала P = 0\.1, I = 0\.1, D = 0\.003\)\. Принятое перепишет значения конца лога\./)
+    assert.match(verdict.textContent, /После интервала PID параметры менялись: в конце лога P = 0\.12, I = 0\.12, D = 0\.003 \(в наборе интервала P = 0\.1, I = 0\.1, D = 0\.003\)\. Принятое перепишет значения конца лога\./)
     assert.match(verdict.textContent, /Прогноз недостоверен|Предлагается «По правилам»/)
     assert.equal(verdict.className, 'verdict verdict--warn')
     step4_render_summary()
     const summary = element('verdict4')
     assert.match(summary.textContent, /^Предлагается: крен — /)
-    assert.match(summary.textContent, / PID крена менялись после интервала анализа — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/)
+    assert.match(summary.textContent, / PID крена менялись после интервала PID — принятое перепишет значения конца лога \(подробности — во вкладках осей\)\.$/)
     assert.equal(summary.className, 'verdict verdict--warn')
     // Таблица: название строки и оценка
     step4_render_candidates()
@@ -268,7 +268,7 @@ test('I-2: смена PID внутри интервала — набор инт�
     assert.equal(inlog('ATC_RAT_RLL_P'), 'в логе: 0.12')
     step4.axis = 'roll'
     step4_render_axis_verdict()
-    assert.ok(!element('axis_verdict4').textContent.includes('После интервала анализа'))
+    assert.ok(!element('axis_verdict4').textContent.includes('После интервала PID'))
     step4_render_summary()
     assert.ok(!element('verdict4').textContent.includes('менялись после интервала'))
 })
@@ -707,6 +707,15 @@ test('Этап 11: интервал PID — умолчание (участок A
     assert.equal(step4_set_interval(40, 30, 'own'), false)
     assert.equal(step4_set_interval(NaN, 30, 'own'), false)
     assert.equal(step4_set_interval(30, 30.0, 'own'), false)
+    // Только числа (null и строки не приводятся к числу) и источник «acro» или «own»
+    assert.equal(step4_set_interval(null, 30, 'own'), false)
+    assert.equal(step4_set_interval(12, null, 'own'), false)
+    assert.equal(step4_set_interval('12', 30, 'own'), false)
+    assert.equal(step4_set_interval(12, '30', 'own'), false)
+    assert.equal(step4_set_interval(12, 30, 'step0'), false)
+    assert.equal(step4_set_interval(12, 30, undefined), false)
+    assert.equal(step4_set_interval(12, 30, 'acro'), true)
+    assert.equal(step4_set_interval(12.4, 30.2, 'own'), true)
     assert.deepEqual(step4_interval(), { start: 12, end: 31, source: 'own' })
     // Зажим в границы лога; за пределами лога после зажима пусто — отказ
     assert.equal(step4_set_interval(-5, 1e6, 'own'), true)
@@ -741,4 +750,40 @@ test('Этап 11: интервал PID — умолчание (участок A
     step4_reset()
     assert.equal(step4.interval, null)
     assert.equal(step4.interval_ready, false)
+})
+
+test('Этап 11: «своё» до первого step4_interval() не затирается умолчанием; без окна полёта и границ лога — как на шаге 0, умолчание выбирается позже', () => {
+    load(make_log(60, 100), [10, 50])
+    step4_reset()
+    assert.equal(step4_set_interval(12, 30, 'own'), true)
+    assert.deepEqual(step4_interval(), { start: 12, end: 30, source: 'own' }, 'ленивое умолчание не перезаписывает своё')
+    // Нет окна полёта и границ лога (min/max — null): как на шаге 0, умолчание не выбрано
+    step4_reset()
+    state.info = { build_type: 2 }
+    state.settings.min = null
+    state.settings.max = null
+    assert.equal(step4_interval().source, 'step0')
+    assert.equal(step4.interval_ready, false)
+    // Границы появились — следующий вызов выбирает умолчание ACRO
+    state.settings.min = 0
+    state.settings.max = 60
+    assert.deepEqual(step4_interval(), { start: 0, end: 60, source: 'acro' })
+    assert.equal(step4.interval_ready, true)
+})
+
+test('Этап 11: step4_acro_interval — разница с интервалом PID не больше 1 с на каждом конце (округление) — null; настоящее сужение — нет', () => {
+    // Окно полёта 10.4–49.5, весь лог ACRO: интервал PID 10–50 (наружу), участок 11–49 (внутрь) — сужать некуда
+    load(make_log(60, 100), [10, 50])
+    state.info.flight = { start: 10.4, end: 49.5 }
+    step4_reset()
+    assert.equal(step4_set_interval(10.4, 49.5, 'own'), true)
+    assert.deepEqual(step4_interval(), { start: 10, end: 50, source: 'own' })
+    assert.equal(step4_acro_interval(), null)
+    // Настоящее сужение: интервал 0–60 при окне полёта 10–50 — участок 10–50
+    state.info.flight = { start: 10, end: 50 }
+    assert.equal(step4_set_interval(0, 60, 'own'), true)
+    assert.deepEqual(step4_acro_interval(), { start: 10, end: 50 })
+    // Сужение только с одного конца больше чем на 1 с: 8–50 против 10–50 — участок остаётся
+    assert.equal(step4_set_interval(8, 50, 'own'), true)
+    assert.deepEqual(step4_acro_interval(), { start: 10, end: 50 })
 })
