@@ -118,10 +118,11 @@ function bode2_theme(palette, data, layout) {
     data[3].line.color = palette.series[1]
 }
 
-// Цвета линий спектрограммы: notch значений формы — акцент, записанные в лог — цвет предупреждения
+// Цвета линий спектрограммы: notch формы (сплошные) и записанные в лог (штрихпунктир) — одного цвета по номеру
+// гармоники (plot_notch_color)
 function spectrogram2_theme(palette, data, layout) {
     for (let i = 1; i < data.length; i++) {
-        data[i].line.color = data[i].legendgroup.startsWith("form") ? palette.series[0] : palette.warn
+        data[i].line.color = plot_notch_color(palette, plot_notch_harmonic(data[i].name))
     }
 }
 
@@ -1628,7 +1629,7 @@ function redraw_spectrogram2() {
     const lines = tracking_lines(current.filters, state.logged, [state.settings.start, state.settings.end])
     const line_hover = "<extra></extra>%{meta}<br>%{x:.2f} с<br>" + spec_freq_hover("y")
     const add_line = (group, title, line, meta, visible, dash) => {
-        const name = (line.harmonic == 1) ? "основная" : "гармоника " + line.harmonic
+        const name = plot_notch_name(line.harmonic)
         p.data.push({
             type: "scatter",
             mode: "lines",
@@ -1636,7 +1637,7 @@ function redraw_spectrogram2() {
             meta: meta + ": " + name,
             legendgroup: group,
             legendgrouptitle: { text: title },
-            line: { width: 1, dash: dash },
+            line: { width: 2, dash: dash },
             visible: line_visible[meta + ": " + name] ?? visible,
             hovertemplate: line_hover,
             x: line.time,

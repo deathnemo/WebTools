@@ -12,13 +12,20 @@
 # берётся, память прохода привязана к адресу страницы. Коды выхода: 0 — мастер работает или вкладка открыта; 2 — отказ
 # с сообщением (в интерактивной консоли сервер уже дождался клавиши, «Мастер настройки.cmd» второй раз не ждёт); прочие
 # (1 — сбой PowerShell, например параметр или политика) — .cmd оставляет окно открытым.
+# Автозакрытие (решение пользователя 17.11.2026): страница мастера держит соединение /__tunewizard/alive (EventSource;
+# что сервер это умеет, она узнаёт по заголовку X-TuneWizard-Alive). Когда закрыто последнее такое соединение (закрыли
+# вкладку мастера) и за CloseDelay секунд не открылось новое (обновление страницы), сервер завершается с кодом 0 —
+# «Мастер настройки.cmd» закрывает окно. Пока ни одна вкладка не подключалась, сервер ждёт. Вкладки FilterReview и
+# PIDReview соединения не держат.
 # Файл — UTF-8 с BOM: без BOM PowerShell 5.1 читает русский текст как ANSI.
 # Параметры: -Root — корень (по умолчанию два уровня выше скрипта: репозиторий или переносная папка), -Port (8000),
-# -NoBrowser — не открывать браузер (тест tests/tunewizard-serve.cjs).
+# -NoBrowser — не открывать браузер (тест tests/tunewizard-serve.cjs), -CloseDelay — секунды до остановки после
+# закрытия последней вкладки мастера (10; 0 — не останавливаться и не предлагать соединение — тест).
 param(
     [string]$Root = '',
     [ValidateRange(1, 65535)][int]$Port = 8000,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [ValidateRange(0, 86400)][int]$CloseDelay = 10
 )
 
 Set-StrictMode -Version Latest
@@ -54,6 +61,13 @@ $refused_code = 2
 # Начат ли ответ на текущий запрос: после заголовков ответа 500 уже не отправить
 $script:response_started = $false
 $script:stdout = $null
+# Соединение вкладки мастера (автозакрытие): адрес; пустое событие раз в ping_seconds — сокет, который закрылся без FIN
+# (сон компьютера), находится по сбою записи; открыл ли текущий запрос такое соединение
+$alive_path = '/__tunewizard/alive'
+$ping_seconds = 15
+$script:alive_started = $false
+# Заголовок ответов, по которому страница узнаёт, что сервер умеет автозакрытие
+$alive_header = $(if ($CloseDelay -gt 0) { @('X-TuneWizard-Alive: ' + $CloseDelay) } else { @() })
 
 # Строка в консоль. В окне — Write-Host (консоль выводит Юникод при любой кодовой странице); вывод перенаправлен (тест)
 # — байты UTF-8 прямо в stdout, без смены кодовой страницы консоли. Color — цвет в окне (пусто — обычный)
@@ -206,7 +220,8 @@ function Resolve-RequestFile([string]$RawPath, [string]$Query) {
 
 # Ответ: строка состояния и заголовки (Content-Length; Cache-Control: no-cache — правки файлов видны без очистки кэша;
 # Connection: close — одно соединение на запрос; X-TuneWizard-Root — корень в %-кодировании, по нему второй запуск
-# отличает мастер из другой папки; Extra — строки дополнительных заголовков), затем тело — байты Body или файл File
+# отличает мастер из другой папки; X-TuneWizard-Alive — при автозакрытии; Extra — строки дополнительных заголовков),
+# затем тело — байты Body или файл File
 # (открывается до заголовков: не открылся — ещё можно ответить 500); при HeadOnly тело не отправляется
 function Send-Response($Socket, [int]$Status, [string]$Type, [byte[]]$Body = $null, [string]$File = '', [string[]]$Extra = @(), [bool]$HeadOnly = $false) {
     $file_stream = $null
@@ -220,7 +235,7 @@ function Send-Response($Socket, [int]$Status, [string]$Type, [byte[]]$Body = $nu
         }
         # Запятая в PowerShell связывает сильнее «+» — каждая строка в скобках
         $lines = @(('HTTP/1.1 ' + $Status + ' ' + $reasons[$Status]), ('Content-Type: ' + $Type), ('Content-Length: ' + $length), 'Cache-Control: no-cache',
-                   'Connection: close', ('X-TuneWizard-Root: ' + $root_header)) + $Extra
+                   'Connection: close', ('X-TuneWizard-Root: ' + $root_header)) + $alive_header + $Extra
         $head = [Text.Encoding]::UTF8.GetBytes(($lines -join "`r`n") + "`r`n`r`n")
         $script:response_started = $true
         $stream.Write($head, 0, $head.Length)
@@ -294,6 +309,12 @@ function Invoke-Request($Socket, [string]$Head) {
             $query = $target.Substring($cut).Split('#')[0]
         }
     }
+    # Соединение вкладки мастера — только при автозакрытии (иначе — обычный путь: такого файла нет, 404)
+    if (($raw_path -ceq $alive_path) -and (-not $head_only) -and ($CloseDelay -gt 0)) {
+        Send-AliveStart $Socket
+        $script:alive_started = $true
+        return
+    }
     $result = Resolve-RequestFile $raw_path $query
     if ($result.Status -eq 200) {
         $type = $types[[IO.Path]::GetExtension($result.File)]
@@ -347,9 +368,45 @@ function Close-Connection($Socket) {
     }
 }
 
+# Начало ответа на /__tunewizard/alive (EventSource): заголовки без длины и первое событие (retry — через сколько
+# браузер переподключится, если соединение порвётся при открытой вкладке). Соединение остаётся открытым, пока его не
+# закроет браузер: по нему сервер знает, что вкладка мастера открыта
+function Send-AliveStart($Socket) {
+    $lines = @('HTTP/1.1 200 OK', 'Content-Type: text/event-stream; charset=utf-8', 'Cache-Control: no-store', ('X-TuneWizard-Root: ' + $root_header))
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`r`n") + "`r`n`r`n" + "retry: 2000`n: tunewizard`n`n")
+    $script:response_started = $true
+    [void]$Socket.Send($bytes)
+}
+
+# Соединение вкладки: браузер в него ничего не пишет — пришедшие байты отбросить; закрыто (0 байт, Select сказал, что
+# сокет читается) или сбой — соединение закончено (Done = $true)
+function Receive-Alive($Connection) {
+    try {
+        $count = $Connection.Socket.Available
+        if ($count -le 0) {
+            $Connection.Done = $true
+        } else {
+            $buffer = New-Object byte[] ([Math]::Min($count, 4096))
+            [void]$Connection.Socket.Receive($buffer)
+        }
+    } catch {
+        $Connection.Done = $true
+    }
+}
+
+# Пустое событие (комментарий EventSource) в соединение вкладки: сбой записи — соединение закончено
+function Send-AlivePing($Connection) {
+    try {
+        [void]$Connection.Socket.Send([Text.Encoding]::ASCII.GetBytes(": ping`n`n"))
+        $Connection.Since = [DateTime]::UtcNow
+    } catch {
+        $Connection.Done = $true
+    }
+}
+
 # Дочитать пришедшие байты соединения Connection (без ожидания: Select сказал, что они есть). Заголовок запроса
-# целиком — ответить; клиент закрыл соединение, сбой или заголовок длиннее head_limit (431) — закрыть. Законченное
-# соединение — Done = $true
+# целиком — ответить (запрос /__tunewizard/alive оставляет соединение открытым: Alive = $true); клиент закрыл
+# соединение, сбой или заголовок длиннее head_limit (431) — закрыть. Законченное соединение — Done = $true
 function Receive-Head($Connection) {
     $socket = $Connection.Socket
     $end = -1
@@ -376,8 +433,14 @@ function Receive-Head($Connection) {
         $Connection.Done = $true
     }
     if ((-not $Connection.Done) -and ($end -ge 0)) {
-        $Connection.Done = $true
+        $script:alive_started = $false
         Invoke-RequestSafe $socket ([Text.Encoding]::UTF8.GetString($Connection.Data.GetBuffer(), 0, $end))
+        if ($script:alive_started) {
+            $Connection.Alive = $true
+            $Connection.Since = [DateTime]::UtcNow
+        } else {
+            $Connection.Done = $true
+        }
     }
     if ($Connection.Done) {
         Close-Connection $socket
@@ -430,7 +493,8 @@ if ($busy -or ($null -ne $start_error)) {
     Exit-Refused ('Порт ' + $Port + ' недоступен: ' + $start_error.Exception.Message)
 }
 
-# Соединения, ждущие запроса: сокет, пришедшие байты, время приёма, закончено ли
+# Соединения, ждущие запроса, и соединения вкладки мастера: сокет, пришедшие байты, время приёма (у соединения вкладки
+# — последнего пустого события), закончено ли, соединение ли вкладки (Alive)
 $connections = New-Object Collections.Generic.List[object]
 try {
     Write-Line ''
@@ -440,8 +504,15 @@ try {
         Write-Line ('Мастер настройки открыт в браузере: ' + $url) 'Green'
     }
     Write-Line ('Папка: ' + $root_full)
-    Write-Line 'Чтобы остановить — закройте это окно.'
+    if ($CloseDelay -gt 0) {
+        Write-Line 'Окно закроется само, когда вы закроете вкладку мастера. Остановить сразу — закройте это окно.'
+    } else {
+        Write-Line 'Чтобы остановить — закройте это окно.'
+    }
     Open-Wizard $url
+    # Автозакрытие: подключалась ли вкладка мастера; с какого времени нет ни одного соединения вкладки
+    $alive_seen = $false
+    $alive_gone = $null
     while ($true) {
         # Ждать не дольше 0.25 с: между ожиданиями PowerShell обрабатывает Ctrl+C
         $readable = New-Object Collections.ArrayList
@@ -455,12 +526,22 @@ try {
                 $socket = $listener.AcceptSocket()
                 $socket.SendTimeout = 15000
                 $socket.NoDelay = $true
-                $connections.Add([pscustomobject]@{ Socket = $socket; Data = (New-Object IO.MemoryStream); Since = [DateTime]::UtcNow; Done = $false })
+                $connections.Add([pscustomobject]@{ Socket = $socket; Data = (New-Object IO.MemoryStream); Since = [DateTime]::UtcNow; Done = $false; Alive = $false })
             }
         }
         $now = [DateTime]::UtcNow
         foreach ($connection in $connections.ToArray()) {
-            if ($readable.Contains($connection.Socket)) {
+            if ($connection.Alive) {
+                # Соединение вкладки мастера: закрыто браузером — закончено; иначе раз в ping_seconds — пустое событие
+                if ($readable.Contains($connection.Socket)) {
+                    Receive-Alive $connection
+                } elseif (($now - $connection.Since).TotalSeconds -ge $ping_seconds) {
+                    Send-AlivePing $connection
+                }
+                if ($connection.Done) {
+                    Close-Connection $connection.Socket
+                }
+            } elseif ($readable.Contains($connection.Socket)) {
                 Receive-Head $connection
             } elseif (($now - $connection.Since).TotalSeconds -gt $idle_seconds) {
                 $connection.Done = $true
@@ -468,6 +549,27 @@ try {
             }
             if ($connection.Done) {
                 [void]$connections.Remove($connection)
+            }
+        }
+        # Автозакрытие: вкладки мастера подключались, а теперь ни одной — через CloseDelay секунд выйти (код 0 —
+        # «Мастер настройки.cmd» закрывает окно); новое соединение за это время (обновление страницы) — отмена
+        if ($CloseDelay -gt 0) {
+            $alive_now = 0
+            foreach ($connection in $connections) {
+                if ($connection.Alive) {
+                    $alive_now++
+                }
+            }
+            if ($alive_now -gt 0) {
+                $alive_seen = $true
+                $alive_gone = $null
+            } elseif ($alive_seen) {
+                if ($null -eq $alive_gone) {
+                    $alive_gone = $now
+                } elseif (($now - $alive_gone).TotalSeconds -ge $CloseDelay) {
+                    Write-Line 'Вкладка мастера закрыта — окно закрывается.'
+                    break
+                }
             }
         }
     }

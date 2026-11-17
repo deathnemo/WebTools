@@ -466,9 +466,15 @@ async function main() {
         // В логе есть ESC-телеметрия и запись «до»: атрибуция по порядковому спектру, в подписи — процентили частоты ESC
         assert.ok(s1.peak_rows.every((row) => row[5] === 'порядковый спектр'), 'метод атрибуции: ' + JSON.stringify(s1.peak_rows))
         assert.match(await page.textContent('#peaks1_note'), /порядковому спектру ESC.*p5 [\d.]+, p50 [\d.]+, p95 [\d.]+ Гц/, 'подпись называет метод и процентили')
-        // Линии логированных notch (FTN в этом логе) — только в легенде, тонкие, как выключенный SpecNotchShowLogged в FilterReview
-        const logged_lines = await page.evaluate(() => document.getElementById('Spectrogram1').data.slice(1).map((t) => [t.visible, t.line.width]))
-        assert.ok(logged_lines.length > 0 && logged_lines.every(([visible, width]) => (visible === 'legendonly') && (width === 1)), 'линии notch: ' + JSON.stringify(logged_lines))
+        // Линии логированных notch (FTN в этом логе) — только в легенде, как выключенный SpecNotchShowLogged в FilterReview;
+        // толщина 2 и цвет по номеру гармоники из токенов --notch-N — не цвет предупреждения, который терялся на Viridis
+        const logged_lines = await page.evaluate(() => {
+            const palette = plot_palette()
+            return document.getElementById('Spectrogram1').data.slice(1).map((t) => [t.visible, t.line.width, t.line.dash,
+                t.line.color === plot_notch_color(palette, plot_notch_harmonic(t.name)), palette.notch.includes(palette.warn)])
+        })
+        assert.ok(logged_lines.length > 0 && logged_lines.every((line) => JSON.stringify(line) === JSON.stringify(['legendonly', 2, 'dashdot', true, false])),
+                  'линии notch: ' + JSON.stringify(logged_lines))
         assert.equal(await page.isDisabled('#FFTWindow_size'), true, 'batch-лог: поле окна FFT шага 0 выключено')
         assert.equal(await page.isVisible('#spec_batch_field'), true, 'batch-лог: поле «Окон на пакет» видно (аудит A, M9)')
         // Окно raw шага 0 (2048 — выставлено выше) расчёт batch не трогает: поле показывает окно batch 1024 только для сведения (аудит A, I5)

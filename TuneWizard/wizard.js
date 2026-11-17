@@ -313,6 +313,28 @@ function init_wizard() {
         prep0_init()
     }
     set_step(0)
+    wizard_server_link()
+}
+
+// Связь вкладки с сервером мастера для Windows (windows/serve.ps1, двойной клик по «Мастер настройки.cmd»): пока
+// вкладка открыта, открыто соединение /__tunewizard/alive (EventSource). Закрыли последнюю вкладку мастера — через
+// несколько секунд сервер останавливается, и его окно закрывается само (решение пользователя 17.11.2026). Что сервер
+// это умеет, он говорит заголовком X-TuneWizard-Alive; у python http.server (F5 в VS Code, браузерные тесты) его нет —
+// соединения нет, лишних запросов и ошибок консоли тоже. Ссылка на EventSource хранится, иначе сборщик мусора мог бы
+// закрыть соединение при открытой вкладке
+const wizard_link = { url: "/__tunewizard/alive", source: null }
+async function wizard_server_link() {
+    if ((location.protocol !== "http:") || (wizard_link.source != null)) {
+        return
+    }
+    try {
+        const response = await fetch(location.pathname, { method: "HEAD", cache: "no-store" })
+        if (response.headers.has("X-TuneWizard-Alive")) {
+            wizard_link.source = new EventSource(wizard_link.url)
+        }
+    } catch {
+        // Сервер не ответил — связи нет: окно сервера закрывают вручную
+    }
 }
 
 // ---------- Загрузка лога (шаг 0) ----------

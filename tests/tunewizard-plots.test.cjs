@@ -197,3 +197,23 @@ test('render_plot: незарегистрированный график — о�
     assert.throws(() => render_plot('nope'), /не зарегистрирован/)
     assert.equal(plot('nope'), undefined)
 })
+
+test('линии notch на спектрограмме: имя и номер гармоники туда и обратно, цвет по номеру гармоники из токенов --notch-N по кругу', () => {
+    assert.deepEqual([1, 2, 3, 8].map(plot_notch_name), ['основная', 'гармоника 2', 'гармоника 3', 'гармоника 8'])
+    for (const harmonic of [1, 2, 3, 4, 5, 8]) {
+        assert.equal(plot_notch_harmonic(plot_notch_name(harmonic)), harmonic, 'гармоника ' + harmonic)
+    }
+    assert.equal(plot_notch_harmonic(undefined), 1, 'без имени — основная')
+    const notch = { '--notch-1': '#ffffff', '--notch-2': '#ff4fd8', '--notch-3': '#ff6b3d', '--notch-4': '#b794f6' }
+    const saved = tokens
+    tokens = { ...DARK, ...notch }
+    try {
+        const palette = plot_palette()
+        assert.deepEqual(palette.notch, Object.values(notch), 'палитра notch — из токенов по порядку')
+        assert.deepEqual([1, 2, 3, 4, 5, 8].map((h) => plot_notch_color(palette, h)), ['#ffffff', '#ff4fd8', '#ff6b3d', '#b794f6', '#ffffff', '#b794f6'],
+                         'гармоники 5 и 8 — по кругу')
+        assert.ok(!palette.notch.includes(palette.warn), 'не цвет предупреждения (терялся на Viridis)')
+    } finally {
+        tokens = saved
+    }
+})
