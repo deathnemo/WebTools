@@ -16,7 +16,7 @@ function css_token(name) {
 }
 
 // Палитра линий из токенов: оси X/Y/Z, предупреждение; стили pre / оценка post / логированное post;
-// прозрачность для второго и третьего гироскопа
+// прозрачность для второго и третьего гироскопа; линии notch на спектрограммах — по номеру гармоники
 function plot_palette() {
     return {
         series: [css_token("--accent"), css_token("--low"), css_token("--ok"), css_token("--high")],
@@ -26,7 +26,26 @@ function plot_palette() {
         line: css_token("--line"),
         dash: { pre: "solid", est: "dash", post: "dot" },
         gyro_opacity: [1, 0.65, 0.4],
+        notch: [css_token("--notch-1"), css_token("--notch-2"), css_token("--notch-3"), css_token("--notch-4")],
     }
+}
+
+// Имя линии notch на спектрограмме по номеру гармоники: 1 — «основная», дальше — «гармоника N»
+function plot_notch_name(harmonic) {
+    return (harmonic == 1) ? "основная" : "гармоника " + harmonic
+}
+
+// Номер гармоники по имени линии (plot_notch_name): «основная» — 1, «гармоника N» — N; другое — 1
+function plot_notch_harmonic(name) {
+    const found = /(\d+)$/.exec(name ?? "")
+    return (found != null) ? Number(found[1]) : 1
+}
+
+// Цвет линии notch на спектрограмме по номеру гармоники — из palette.notch по кругу (гармоник бывает до 8): цвета,
+// которых нет в карте Viridis, чтобы линии выделялись на фоне спектра (решение пользователя 17.11.2026)
+function plot_notch_color(palette, harmonic) {
+    const n = palette.notch.length
+    return palette.notch[(((harmonic - 1) % n) + n) % n]
 }
 
 // Общая часть layout под текущую тему

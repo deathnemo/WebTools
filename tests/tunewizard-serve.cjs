@@ -13,7 +13,12 @@
 // - запуски на занятом порте: мастер этой папки — код 0 без второго сервера (serve.ps1 и .cmd), мастер другой папки —
 //   код 2 и сообщение, мастер без X-TuneWizard-Root (как python http.server) — код 0; чужой сервер на всех адресах
 //   (listen без host — двойной стек, Start() на 127.0.0.1 его не заметил бы) — код 2 и сообщение, .cmd второй раз не
-//   ждёт; .cmd без своей папки и при сбое PowerShell — код 1 и сообщение; запуск после остановки — порт снова свой.
+//   ждёт; .cmd без своей папки и при сбое PowerShell — код 1 и сообщение; запуск после остановки — порт снова свой;
+// - автозакрытие: без него (-CloseDelay 0 — так запущен основной сервер: открытое соединение вкладки не дало бы
+//   Playwright дождаться networkidle) нет заголовка X-TuneWizard-Alive, /__tunewizard/alive — 404, страница его не
+//   открывает; с ним (.cmd, как ярлык) — заголовок, поток text/event-stream, сервер работает, пока соединение открыто
+//   и пока его открыли снова за CloseDelay (обновление страницы), после закрытия — выход с кодом 0 не раньше CloseDelay;
+//   в Chrome обновление страницы сервер не останавливает, закрытие вкладки — останавливает (код 0).
 // Запуск: npm run test:tunewizard-serve [-- <корень>] — корень по умолчанию — репозиторий; переносную папку проверяет
 // тот же тест с её корнем (её serve.ps1, .cmd и файлы) — команду печатает сборка tests/tunewizard-portable.cjs. Порт 8797.
 // Нужны: Windows (powershell.exe), браузер (CHROME_PATH — путь к chrome.exe; без него Playwright берёт свой Chromium,
@@ -183,6 +188,22 @@ function idle_connection(text) {
     })
 }
 
+// Соединение вкладки мастера, как EventSource страницы: GET /__tunewizard/alive. Итог — статус, заголовки, первая порция
+// тела и close() — закрыть соединение (как закрытие вкладки)
+function open_alive() {
+    return new Promise((resolve, reject) => {
+        const req = http.get({ host: '127.0.0.1', port: port, path: '/__tunewizard/alive', headers: { Accept: 'text/event-stream' }, agent: false }, (res) => {
+            res.on('error', () => {})
+            res.once('data', (d) => {
+                req.setTimeout(0)
+                resolve({ status: res.statusCode, headers: res.headers, first: d.toString('utf8'), close: () => req.destroy() })
+            })
+        })
+        req.setTimeout(10000, () => req.destroy(new Error('нет ответа за 10 с: /__tunewizard/alive')))
+        req.on('error', reject)
+    })
+}
+
 // Сервер Node с обработчиком handler на порту теста: host — адрес (undefined — все адреса, двойной стек «::»)
 async function listen(handler, host) {
     const server = http.createServer(handler)
@@ -337,7 +358,7 @@ async function check_http() {
 async function check_browser(problems) {
     let browser = null
     try {
-        browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || undefined })
+        browser = await launch_browser()
         const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
         page.on('console', (m) => { if (m.type() === 'error') problems.push('console: ' + m.text()) })
         page.on('pageerror', (e) => problems.push('pageerror: ' + e.message))
@@ -395,6 +416,39 @@ async function check_browser(problems) {
     }
 }
 
+// Браузер теста: CHROME_PATH или Chromium Playwright
+function launch_browser() {
+    return chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || undefined })
+}
+
+// Автозакрытие в Chrome (сервер server запущен с -CloseDelay delay): страница мастера открывает соединение вкладки
+// (EventSource), обновление страницы открывает его снова — сервер работает; закрытие вкладки — сервер завершается с
+// кодом 0. Итог — секунды от закрытия вкладки до выхода сервера
+async function check_alive_browser(server, delay) {
+    let browser = null
+    try {
+        browser = await launch_browser()
+        const page = await browser.newPage()
+        const connected = () => page.waitForFunction(() => (wizard_link.source != null) && (wizard_link.source.readyState === EventSource.OPEN), null, { timeout: 10000 })
+        // networkidle не наступит: соединение вкладки открыто, пока открыта страница
+        await page.goto(base + '/TuneWizard/', { waitUntil: 'load' })
+        await connected()
+        await page.reload({ waitUntil: 'load' })
+        await connected()
+        await sleep((delay + 1) * 1000)
+        assert.equal(server.proc.exitCode, null, 'обновление страницы в Chrome не останавливает сервер; вывод: ' + server.output())
+        const t_close = Date.now()
+        await page.close()
+        assert.equal(await exit_code(server, (delay + 10) * 1000, 'закрытие вкладки в Chrome'), 0, 'закрыли вкладку — код 0; вывод: ' + server.output())
+        assert.match(server.output(), /Вкладка мастера закрыта — окно закрывается\./, server.output())
+        return (Date.now() - t_close) / 1000
+    } finally {
+        if (browser) {
+            await browser.close()
+        }
+    }
+}
+
 async function main() {
     if (process.platform !== 'win32') {
         console.log('tunewizard-serve: сервер мастера — для Windows (powershell.exe) — пропуск')
@@ -423,11 +477,17 @@ async function main() {
         fs.copyFileSync(path.join(root, 'TuneWizard', 'index.html'), path.join(tmp, 'TuneWizard', 'index.html'))
         fs.writeFileSync(path.join(tmp, 'TuneWizard', 'locked.js'), '// файл блокирует тест\n')
 
-        server = start_serve(['-Root', root, '-Port', String(port)])
+        // Без автозакрытия: открытое соединение вкладки не дало бы Playwright дождаться networkidle
+        server = start_serve(['-Root', root, '-Port', String(port), '-CloseDelay', '0'])
         await wait_ready(server)
         assert.match(server.output(), /Мастер настройки: http:\/\/127\.0\.0\.1:8797\/TuneWizard\//, 'сообщение о запуске: ' + server.output())
+        assert.match(server.output(), /Чтобы остановить — закройте это окно\./, 'без автозакрытия — как остановить: ' + server.output())
 
         const checked = await check_http()
+        // Без автозакрытия страница о нём не узнаёт: заголовка X-TuneWizard-Alive нет, адреса соединения вкладки — тоже
+        // (страница его не открывает: 404 попал бы в problems)
+        assert.equal((await request('/TuneWizard/', 'HEAD')).headers['x-tunewizard-alive'], undefined, 'без автозакрытия — нет X-TuneWizard-Alive')
+        assert.equal((await request('/__tunewizard/alive')).status, 404, 'без автозакрытия /__tunewizard/alive — 404')
         const page = await check_browser(problems)
         assert.deepEqual(problems, [], 'ошибки консоли и ответы 4xx')
 
@@ -513,12 +573,47 @@ async function main() {
         locker.proc.stdin.end()
         await within(locker.exited, 5000)
 
+        // Автозакрытие через .cmd (как ярлык; -CloseDelay 2 вместо 10): заголовок X-TuneWizard-Alive, поток событий;
+        // пока соединение вкладки открыто дольше CloseDelay — сервер работает; закрыли и открыли снова за CloseDelay
+        // (обновление страницы) — работает; закрыли — serve.ps1 выходит с кодом 0 не раньше CloseDelay, .cmd тоже
+        // (окно закрывается)
+        server = start_cmd(root, ['-Port', String(port), '-NoBrowser', '-CloseDelay', '2'])
+        await wait_ready(server)
+        assert.match(server.output(), /Окно закроется само, когда вы закроете вкладку мастера\./, 'с автозакрытием — сообщение: ' + server.output())
+        assert.equal((await request('/TuneWizard/', 'HEAD')).headers['x-tunewizard-alive'], '2', 'X-TuneWizard-Alive — задержка закрытия')
+        let alive = await open_alive()
+        assert.equal(alive.status, 200, 'соединение вкладки — 200')
+        assert.equal(alive.headers['content-type'], 'text/event-stream; charset=utf-8')
+        assert.ok(alive.first.includes('retry: 2000'), 'первое событие с retry: ' + JSON.stringify(alive.first))
+        await sleep(3000)
+        assert.equal(server.proc.exitCode, null, 'соединение вкладки открыто — сервер работает; вывод: ' + server.output())
+        alive.close()
+        await sleep(500)
+        alive = await open_alive()
+        await sleep(3000)
+        assert.equal(server.proc.exitCode, null, 'соединение открыли снова за CloseDelay — сервер работает; вывод: ' + server.output())
+        const t_close = Date.now()
+        alive.close()
+        assert.equal(await exit_code(server, 15000, 'автозакрытие через .cmd'), 0, 'закрыли соединение вкладки — .cmd с кодом 0; вывод: ' + server.output())
+        const close_s = (Date.now() - t_close) / 1000
+        assert.ok(close_s >= 1.8, 'выход не раньше CloseDelay: ' + close_s.toFixed(1) + ' с')
+        assert.match(server.output(), /Вкладка мастера закрыта — окно закрывается\./, server.output())
+        server = null
+
+        // Автозакрытие в Chrome: обновление страницы сервер не останавливает, закрытие вкладки — останавливает
+        server = start_serve(['-Root', root, '-Port', String(port), '-CloseDelay', '3'])
+        await wait_ready(server)
+        const chrome_close_s = await check_alive_browser(server, 3)
+        server = null
+
         console.log('tunewizard-serve: сервер PowerShell проверен за ' + ((Date.now() - started) / 1000).toFixed(1) + ' с, корень ' + root)
         console.log('  HTTP-проверок: ' + checked + '; мастер в Chrome — load за ' + page.load_ms + ' мс, запросов к серверу ' + page.requests +
             ', групп описаний параметров ' + page.metadata + '; подготовка — «' + page.prep_verdict + '»; FilterReview и PIDReview открылись')
         console.log('  порт с мастером этой папки — код 0 (serve.ps1 за ' + second_s.toFixed(1) + ' с и .cmd), другой папки — ' + refused_code +
             '; чужой сервер на всех адресах — ' + refused_code + '; .cmd без папки и при сбое PowerShell — ' + failed_code + '; запуск после остановки — ' +
             restart_s.toFixed(1) + ' с, 500 на заблокированном файле')
+        console.log('  автозакрытие: .cmd — код 0 через ' + close_s.toFixed(1) + ' с после закрытия соединения (CloseDelay 2), Chrome — через ' +
+            chrome_close_s.toFixed(1) + ' с после закрытия вкладки (CloseDelay 3), обновление страницы сервер не останавливает')
     } catch (e) {
         if (problems.length) {
             console.error('Сообщения консоли:', problems)

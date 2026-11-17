@@ -91,7 +91,7 @@ function spectrum1_theme(palette, data, layout) {
 // Цвета линий логированных notch на спектрограмме (трассы после тепловой карты)
 function spectrogram1_theme(palette, data, layout) {
     for (let i = 1; i < data.length; i++) {
-        data[i].line.color = palette.warn
+        data[i].line.color = plot_notch_color(palette, plot_notch_harmonic(data[i].name))
     }
 }
 
@@ -716,7 +716,7 @@ function redraw_spectrogram1() {
         const line_hover = "<extra></extra>%{meta}<br>%{x:.2f} с<br>" + spec_freq_hover("y")
         for (let i = 0; i < lines.length; i++) {
             for (const line of lines[i].logged) {
-                const name = (line.harmonic == 1) ? "основная" : "гармоника " + line.harmonic
+                const name = plot_notch_name(line.harmonic)
                 const meta = "Notch " + (i + 1) + " в логе: " + name
                 p.data.push({
                     type: "scatter",
@@ -725,7 +725,7 @@ function redraw_spectrogram1() {
                     meta: meta,
                     legendgroup: "notch" + i,
                     legendgrouptitle: { text: "Notch " + (i + 1) + " в логе" },
-                    line: { width: 1, dash: "dashdot" },
+                    line: { width: 2, dash: "dashdot" },
                     visible: line_visible[meta] ?? "legendonly",
                     hovertemplate: line_hover,
                     x: line.time,
