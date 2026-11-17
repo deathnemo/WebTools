@@ -28,9 +28,10 @@
 // Нужны глобалы страницы: core/pid.js (load_pid, pid_run_batch_fft, pid_step_response, PID_STEP_MIN_RATE),
 // core/pidtune.js (pidtune_*), core/lowpass.js (lowpass_log_values — фильтры лога для ключа расчёта),
 // core/candidates.js (candidate_key), core/filters.js (notch_param_names), core/spectrum.js (find_instance),
-// core/gyro.js (find_start_index, find_end_index), Libraries/Array_Math.js (complex_abs, array_add),
-// Libraries/Param_Helpers.js (param_to_string),
-// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots), wizard.js (state, set_step, html_escape),
+// core/gyro.js (find_start_index, find_end_index), core/log.js (log_mode_segments — участки ACRO на графике интервала PID),
+// Libraries/Array_Math.js (complex_abs, array_add), Libraries/Param_Helpers.js (param_to_string),
+// plots.js (register_plot, render_plot, plot, plot_hidden, show_plots, plot_palette), wizard.js (state, set_step, html_escape,
+// flight_data и flight_throttle_title — газ графика интервала PID),
 // steps/common.js (step_signed, step_plural, step_value_text, step_tile, step_cell, step_verdict, step_gyro_sensor,
 // step_ensure_step1, step_try, step_run, step_open_in, step_find_metadata, step_metadata, step_load_metadata,
 // step_edit_controller, step_pointer, plot_axis, plot_trace_visibility, plot_clear) и steps/step1.js
@@ -57,10 +58,16 @@ const step4 = {
     window_pending: false,    // поле окна FFT изменено (change), а step4.window ещё не обновлён (step4_flush_window)
     interval: null,           // интервал PID { start, end, source: "acro" | "own" }; null — как на шаге 0 (читать через step4_interval)
     interval_ready: false,    // умолчание интервала PID для лога выбрано (step4_interval); false — ещё нет
+    interval_timer: null,     // отложенный пересчёт после смены интервала PID полями или графиком (step4_interval_schedule)
+    interval_postponed: false, // change поля интервала PID при нажатой кнопке мыши — после её отпускания (step4_interval_input)
+    flight_plot: false,       // график «Интервал PID» (PidFlight4) построен для этого лога (pidflight4_redraw)
 }
 
 // Пауза в наборе, после которой поле пересчитывается, мс [наше, как на шаге 3]
 const step4_edit_delay_ms = 400
+// Пауза после смены интервала PID полями или графиком, после которой шаг пересчитывается, мс [наше, дизайн этапа 11,
+// раздел 5: дольше, чем у полей шага 3, — расчёт шага 4 на логе «Rate Loop Only» до 2 с на ось, а ползунок тянут]
+const step4_interval_delay_ms = 700
 
 // Механизм правок полей формы и поля окна FFT (каркас — step_edit_controller из steps/common.js, см. «Правки полей»):
 // отложенный пересчёт — step4_flush_pending (окно, затем форма)
@@ -186,7 +193,8 @@ function step4_interval_follow() {
 // Участок для кнопки «Интервал — участок ACRO»: участок ACRO «Rate Loop Only» лога (pidtune_acro_interval — самый
 // длинный, целые секунды внутрь участка: MODE ровно на конце участка pidtune_mode_segments в интервал не берёт) в
 // пересечении интервала PID и окна полёта (step4_flight_range: без времени после посадки) → { start, end }. null — нет
-// лога, нет участка, пересечение пустое или участок отличается от интервала PID не больше чем на 1 с на каждом конце (сужать некуда). Расчёт шага не нужен
+// лога, нет участка, пересечение пустое или участок отличается от интервала PID не больше чем на 1 с на каждом конце
+// (сужать некуда). Расчёт шага не нужен
 function step4_acro_interval() {
     if (state.log == null) {
         return null
@@ -265,6 +273,7 @@ function step4_init() {
         d_noise_hz: rules.d_noise_hz + " Гц",
         crossover_min: rules.crossover_min_hz + " Гц",
         pidreview_windows: String(stepresp4_max_windows),
+        interval_delay: (step4_interval_delay_ms / 1000) + " с",
     }
     for (const span of document.querySelectorAll("[data-rule4]")) {
         span.textContent = rule_texts[span.dataset.rule4]
@@ -316,6 +325,22 @@ function step4_init() {
     })
     document.getElementById("cand4_apply").addEventListener("click", step4_apply)
     document.getElementById("pidf_accept").addEventListener("click", step4_accept)
+    // Блок «Интервал PID»: поля — граница сразу, расчёт после паузы (step4_interval_input; change при нажатой кнопке
+    // мыши — после её отпускания, если щелчок не отменил правку); кнопки — сразу. Ползунок и зум графика — обработчик
+    // plotly_relayout (pidflight4_setup)
+    for (const id of ["step4_start", "step4_end"]) {
+        document.getElementById(id).addEventListener("change", step4_interval_input)
+    }
+    step_on_pointer_release(() => {
+        if (step4.interval_postponed) {
+            setTimeout(() => {
+                if (step4.interval_postponed) {
+                    step4_interval_input()
+                }
+            }, 0)
+        }
+    })
+    document.getElementById("step4_interval_step0").addEventListener("click", step4_interval_step0)
     document.getElementById("step4_acro_interval").addEventListener("click", step4_acro_apply)
     // «Открыть в PIDReview» — как «Открыть в FilterReview» шага 1
     document.getElementById("step4_open_pidreview").addEventListener("click", () => step_open_in("../PIDReview/", () => {
@@ -325,25 +350,28 @@ function step4_init() {
 }
 
 // Новый лог или ошибка загрузки: забыть данные PID, расчёт, выбор, интервал PID (умолчание выберется для нового лога —
-// step4_interval) и форму, графики — пустые. Окно FFT шага остаётся (как окно шага 0); недосчитанная правка его поля
-// забывается — поле снова показывает действующее окно
+// step4_interval) и его отложенный пересчёт, форму; блок «Интервал PID» скрыт, графики — пустые. Окно FFT шага остаётся
+// (как окно шага 0); недосчитанная правка его поля забывается — поле снова показывает действующее окно
 function step4_reset() {
     Object.assign(step4, {
         pid: null, fft_window: null, axis: "roll", set_choice: { roll: null, pitch: null, yaw: null }, calc: null, key: null, gyro_ref: null,
         error: null, selected: { roll: null, pitch: null, yaw: null }, form_built: false, filled: false, edit_form: null, edit_postponed: false,
-        window_pending: false, interval: null, interval_ready: false,
+        window_pending: false, interval: null, interval_ready: false, interval_postponed: false, flight_plot: false,
     })
     clearTimeout(step4.edit_timer)
     step4.edit_timer = null
+    clearTimeout(step4.interval_timer)
+    step4.interval_timer = null
     document.getElementById("step4_window").value = step4.window
     document.getElementById("pidf_form").innerHTML = ""
-    for (const id of ["verdict4", "step4_acro_row", "step4_tabs", "step4_panel", "memory4"]) {
+    for (const id of ["verdict4", "step4_interval_block", "step4_tabs", "step4_panel", "memory4"]) {
         document.getElementById(id).hidden = true
     }
     for (const id of ["cand4_apply", "pidf_accept", "step4_open_pidreview"]) {
         document.getElementById(id).disabled = true
     }
     step4_clear_plots()
+    pidflight4_clear()
 }
 
 // ---------- Правки полей ----------
@@ -1099,8 +1127,9 @@ function step4_best_unflagged(axis) {
 // ---------- Действия ----------
 // Неожиданная ошибка действия — в консоль и вердикт «Ошибка шага 4: …»: step_try (сразу) и step_run (под оверлеем)
 
-// Показ шага: данные PID (один раз на лог), форма (один раз на лог, значения — наборов анализа), расчёт заново, если
-// сменились интервал PID, окно, набор или фильтры шагов 2–3. Расчёт на тестовом логе (400 Гц, 3 оси) — доли секунды
+// Показ шага: данные PID (один раз на лог), форма и график «Интервал PID» (один раз на лог; значения формы — наборов
+// анализа), расчёт заново, если сменились интервал PID, окно, набор или фильтры шагов 2–3. Расчёт на тестовом логе
+// (400 Гц, 3 оси) — доли секунды
 function step4_show() {
     if (state.log == null) {
         return
@@ -1112,6 +1141,9 @@ function step4_show() {
         if (!step4.form_built) {
             step4_build_form()
         }
+        if (!step4.flight_plot) {
+            pidflight4_redraw()
+        }
         if (step4_stale()) {
             step4_compute()
         }
@@ -1121,9 +1153,11 @@ function step4_show() {
         }
         step4_update_custom()
         step4_redraw_all()
-        // Введённое учтено: отложенный пересчёт правок не нужен
+        // Введённое учтено: отложенные пересчёты правок и интервала PID не нужны
         clearTimeout(step4.edit_timer)
         step4.edit_timer = null
+        clearTimeout(step4.interval_timer)
+        step4.interval_timer = null
         step4_edit_done()
     }, "verdict4", "шага 4")
 }
@@ -1161,8 +1195,9 @@ function step4_apply() {
 // «Интервал — участок ACRO»: интервал PID — участок ACRO лога тестового полёта (step4_acro_interval, source "acro"),
 // затем показ шага с пересчётом (интервал PID — часть ключа расчёта). Интервал и поля шага 0 не меняются — фильтры
 // шагов 1–3 не пересчитываются. Под step_try, как остальные кнопки шага: неожиданная ошибка — в вердикт, а не в консоль
-// молча
+// молча. Отложенная правка поля интервала PID отменяется (step4_interval_input)
 function step4_acro_apply() {
+    step4.interval_postponed = false
     step_try(() => {
         const interval = step4_acro_interval()
         if ((interval != null) && step4_set_interval(interval.start, interval.end, "acro")) {
@@ -1260,8 +1295,8 @@ function step4_redraw_all() {
     const ready = step4_ready()
     document.getElementById("pidf_accept").disabled = !(ready && step4.filled)
     document.getElementById("step4_open_pidreview").disabled = state.file == null
-    // Кнопка «Интервал — участок ACRO» — только у лога тестового полёта с интервалом шире участка ACRO
-    document.getElementById("step4_acro_row").hidden = !ready || (step4_acro_interval() == null)
+    // Блок «Интервал PID» — и без расчёта: интервал PID без данных выбирают заново на его графике
+    step4_render_interval()
     if (!ready) {
         for (const id of ["step4_tabs", "step4_panel"]) {
             document.getElementById(id).hidden = true
@@ -2092,6 +2127,267 @@ function step4_render_candidates() {
     note.hidden = false
 }
 
+// ---------- Блок «Интервал PID»: график, поля, кнопки ----------
+// Над вкладками осей (дизайн этапа 11, разделы 5–7): график всего полёта PidFlight4 — цель скорости трёх осей и газ,
+// участки ACRO заливкой, ползунок по оси X (как «FlightData» шага 0 и «Flight Data» PIDReview); поля начала и конца,
+// подпись источника, кнопки «Интервал — участок ACRO» и «Как на шаге 0», заметка об интервале шага 0. Ползунок, зум и поля
+// меняют интервал PID сразу (подпись, поля, график), а расчёт — после паузы step4_interval_delay_ms без изменений
+// (step4_interval_schedule): расчёт оси на логе «Rate Loop Only» — до 2 с, на каждое движение ползунка он не запускается.
+// Кнопки — законченное действие, пересчёт сразу. График строится один раз на лог (step4_show после load_pid)
+
+// Трасса газа — после целей осей (по порядку step4_axis_list)
+const pidflight4_throttle = step4_axis_list.length
+// Точек в ряду цели не больше — прореживание (tarac4_decimate) [наше, как tarac4_max_points: ширина графика ≈ 1300 px,
+// а за весь полёт лога 400 Гц — сотни тысяч отсчётов на ось]
+const pidflight4_max_points = 6000
+
+// Регистрация графика (step4_setup_plots): цели — ось y слева, газ — своя ось справа (подпись — flight_throttle_title, как
+// на графике шага 0), ползунок по оси X, легенда над графиком (справа — ось газа); заливки ACRO — фигуры layout.shapes
+// (pidflight4_redraw). Ползунок и зум задают интервал PID — pidflight4_relayout
+function pidflight4_setup() {
+    const trace = (name, yaxis, hover) => ({ mode: "lines", name: name, meta: name, line: { width: 1.2 }, yaxis: yaxis, visible: false, x: [], y: [],
+                                             hovertemplate: "<extra></extra>%{meta}<br>%{x:.2f} с<br>" + hover })
+    const data = step4_axis_list.map((axis) => trace("цель " + step4_axis_names[axis].gen, "y", "%{y:.1f} °/с"))
+    const title = flight_throttle_title()
+    data[pidflight4_throttle] = trace(title, "y2", "%{y:.2f}")
+    register_plot("PidFlight4", data, {
+        xaxis: { ...plot_axis("Время, с"), rangeslider: {} },
+        yaxis: plot_axis("Цель скорости, °/с"),
+        yaxis2: { ...plot_axis(title), overlaying: "y", side: "right", showgrid: false },
+        showlegend: true,
+        legend: { orientation: "h", x: 0, xanchor: "left", y: 1.02, yanchor: "bottom" },
+        shapes: [],
+        margin: { b: 50, l: 60, r: 60, t: 30 },
+    }, { on_theme: pidflight4_theme })
+    document.getElementById("PidFlight4").on("plotly_relayout", pidflight4_relayout)
+}
+
+// Цвета графика: цели крена, тангажа и рыскания — первый, второй и четвёртый цвета палитры, газ — третий, как на графике
+// полёта шага 0 (и его ось справа — тем же цветом); заливка участков ACRO и её подпись — цвет текста (заливка бледная —
+// прозрачностью фигуры)
+function pidflight4_theme(palette, data, layout) {
+    const colors = [palette.series[0], palette.series[1], palette.series[3]]
+    for (let i = 0; i < step4_axis_list.length; i++) {
+        data[i].line.color = colors[i]
+    }
+    const gas = palette.series[2]
+    data[pidflight4_throttle].line.color = gas
+    const axis = layout.yaxis2
+    axis.color = gas
+    axis.title.font.color = gas
+    axis.tickfont = { ...axis.tickfont, color: gas }
+    for (const shape of layout.shapes) {
+        shape.fillcolor = palette.ink
+        shape.label.font.color = palette.ink
+    }
+}
+
+// Данные графика по всему логу → { targets: { roll: { x, y }, pitch, yaw }, throttle: { x, y }, acro: [{ start, end }] }:
+// цель оси — "Tar" всех пакетов всех наборов step4_source(axis) (у RATE — его цель), на отрезок прореживания — до двух
+// точек (tarac4_decimate: минимум и максимум, разрывы между пакетами), не больше pidflight4_max_points; газ — ряд графика
+// полёта шага 0 (flight_data, не пересчитывается); ACRO — участки режима pidtune_rules.acro_mode по всему логу
+// (log_mode_segments). Оси без данных PID — пустой ряд
+function pidflight4_data() {
+    const targets = {}
+    for (const axis of step4_axis_list) {
+        const parts = []
+        let samples = 0
+        for (const batches of step4_source(axis)?.sets ?? []) {
+            for (const batch of batches ?? []) {
+                parts.push({ batch: batch, i0: 0, i1: batch.time.length })
+                samples += batch.time.length
+            }
+        }
+        targets[axis] = tarac4_decimate(parts, "Tar", Math.max(1, Math.ceil(2 * samples / pidflight4_max_points)))
+    }
+    const throttle = flight_data.data[2]
+    const acro = log_mode_segments(state.log, [state.settings.min, state.settings.max]).filter((s) => s.mode == pidtune_rules.acro_mode)
+    return { targets: targets, throttle: { x: throttle?.x ?? [], y: throttle?.y ?? [] }, acro: acro.map((s) => ({ start: s.start, end: s.end })) }
+}
+
+// Построить график для лога (step4_show после load_pid; один раз на лог — step4.flight_plot): ряды, подпись газа профиля,
+// заливки ACRO с подписью, ось X — интервал PID. Графика нет (не зарегистрирован — тесты ядра) — ничего
+function pidflight4_redraw() {
+    const p = plot("PidFlight4")
+    if (p == null) {
+        return
+    }
+    const data = pidflight4_data()
+    step4_axis_list.forEach((axis, i) => {
+        p.data[i].x = data.targets[axis].x
+        p.data[i].y = data.targets[axis].y
+    })
+    const gas = p.data[pidflight4_throttle]
+    const title = flight_throttle_title()
+    Object.assign(gas, { x: data.throttle.x, y: data.throttle.y, name: title, meta: title })
+    p.layout.yaxis2.title.text = title
+    for (const trace of p.data) {
+        plot_trace_visibility(trace, true)
+    }
+    p.layout.shapes.length = 0
+    for (const segment of data.acro) {
+        p.layout.shapes.push({ type: "rect", name: "acro", xref: "x", yref: "paper", x0: segment.start, x1: segment.end, y0: 0, y1: 1, layer: "below",
+                               opacity: 0.12, line: { width: 0 }, label: { text: "ACRO", textposition: "top left", font: { size: 10 } } })
+    }
+    const interval = step4_interval()
+    p.layout.xaxis.range = [interval.start, interval.end]
+    p.layout.xaxis.autorange = false
+    pidflight4_theme(plot_palette(), p.data, p.layout)
+    render_plot("PidFlight4")
+    step4.flight_plot = true
+}
+
+// Пустой график (новый лог — step4_reset): ряды и заливки ACRO убрать; построится заново при показе шага
+function pidflight4_clear() {
+    const p = plot("PidFlight4")
+    if (p == null) {
+        return
+    }
+    p.layout.shapes.length = 0
+    plot_clear("PidFlight4")
+}
+
+// Ось X графика — интервал PID interval. Plotly.relayout — только если график показывает другой диапазон: иначе лишняя
+// перерисовка и лишнее событие plotly_relayout (его границы — интервал PID, обработчик его пропустит). Скрытый или ещё не
+// дорисованный график — только layout, дорисуется при показе (render_plot)
+function pidflight4_range(interval) {
+    const p = plot("PidFlight4")
+    const axis = p.layout.xaxis
+    const range = [interval.start, interval.end]
+    if ((axis.autorange === false) && (axis.range?.[0] === range[0]) && (axis.range?.[1] === range[1])) {
+        return
+    }
+    const div = document.getElementById("PidFlight4")
+    if (p.dirty || plot_hidden(div)) {
+        axis.range = range
+        axis.autorange = false
+        render_plot("PidFlight4")
+        return
+    }
+    Plotly.relayout(div, { "xaxis.range": range, "xaxis.autorange": false })
+}
+
+// Ползунок и зум графика (plotly_relayout, как у «FlightData» шага 0): диапазон оси X — свой интервал PID, двойной щелчок
+// (xaxis.autorange) — весь лог. График к целым секундам не подгоняется: событие идёт и во время перетаскивания ползунка
+// (подгонит показ шага после пересчёта). Программный Plotly.relayout (pidflight4_range) присылает то же событие с
+// границами интервала PID — step4_interval_own их пропускает, источник не меняется. Другие события (ось Y, размер) — мимо
+function pidflight4_relayout(data) {
+    if (state.log == null) {
+        return
+    }
+    let range = null
+    if (data["xaxis.range"] !== undefined) {
+        range = data["xaxis.range"]
+    } else if ((data["xaxis.range[0]"] !== undefined) && (data["xaxis.range[1]"] !== undefined)) {
+        range = [data["xaxis.range[0]"], data["xaxis.range[1]"]]
+    } else if (data["xaxis.autorange"] === true) {
+        range = [state.settings.min, state.settings.max]
+    }
+    if (range != null) {
+        step_try(() => step4_interval_own(Number(range[0]), Number(range[1]), false), "verdict4", "шага 4")
+    }
+}
+
+// Блок «Интервал PID» на странице: подпись интервала и источника, поля, заметка об интервале шага 0 (на нём считаются
+// фильтры), кнопки — «Интервал — участок ACRO», если есть участок уже интервала PID (step4_acro_interval), «Как на шаге 0»,
+// если интервал PID не следует за шагом 0; ось X графика. Блок показан впервые при видимой секции — графику подогнать
+// размер (show_plots, как панели оси в step4_render_axis). sync_plot — подогнать ось X графика (false — граница пришла с
+// самого графика); force_fields — переписать и поле с фокусом: иначе показ шага после пересчёта не затирает границу,
+// которую ещё набирают (Tab из одного поля в другое — change первого, и пауза кончилась, пока набирают второе)
+function step4_render_interval(sync_plot = true, force_fields = false) {
+    const block = document.getElementById("step4_interval_block")
+    const was_hidden = block.hidden
+    block.hidden = false
+    const interval = step4_interval()
+    document.getElementById("step4_interval_label").textContent = pidtune_interval_text(interval)
+    for (const [id, value] of [["step4_start", interval.start], ["step4_end", interval.end]]) {
+        const input = document.getElementById(id)
+        if (force_fields || (document.activeElement !== input)) {
+            input.value = value
+        }
+    }
+    document.getElementById("step4_interval_note").textContent = "Фильтры (шаги 1–3) считаются на интервале шага 0: " + state.settings.start + "–" +
+        state.settings.end + " с."
+    document.getElementById("step4_acro_interval").hidden = step4_acro_interval() == null
+    document.getElementById("step4_interval_step0").hidden = interval.source === "step0"
+    // Реестра графиков нет — тесты ядра
+    if (plot("PidFlight4") == null) {
+        return
+    }
+    if (sync_plot) {
+        pidflight4_range(interval)
+    }
+    if (was_hidden && !plot_hidden(block)) {
+        show_plots(block)
+    }
+}
+
+// Свой интервал PID с графика (ползунок, зум) или из полей: a, b — секунды, могут быть дробными (sync_plot —
+// step4_render_interval). Границы после округления и зажима те же (step4_set_interval) — ничего не меняется, и источник
+// прежний: так программный Plotly.relayout (поля, «Как на шаге 0», участок ACRO) и change поля без правки не делают
+// интервал «своим». Неверные (не числа, конец не позже начала) — поля и график снова показывают интервал PID. Иначе
+// source "own": подпись, поля и график сразу, расчёт — после паузы
+function step4_interval_own(a, b, sync_plot) {
+    if (state.log == null) {
+        return
+    }
+    const before = step4_interval()
+    const saved = { interval: step4.interval, interval_ready: step4.interval_ready }
+    if (!step4_set_interval(a, b, "own")) {
+        step4_render_interval(true, true)
+        return
+    }
+    const after = step4_interval()
+    if ((after.start === before.start) && (after.end === before.end)) {
+        Object.assign(step4, saved)
+    } else {
+        step4_interval_schedule()
+    }
+    step4_render_interval(sync_plot, true)
+}
+
+// Поля «Начало/Конец анализа PID» (change): свой интервал PID из обоих полей (step4_interval_own). При нажатой кнопке
+// мыши (щелчок увёл фокус из поля) — после её отпускания (step4_init), как правки формы (step_edit_controller): иначе
+// подпись и кнопки блока перерисовались бы до отпускания, соседняя кнопка сдвинулась бы, и щелчок по ней потерялся
+// (раздел 8 журнала). Щелчок по кнопке блока отложенную правку отменяет — он сам выбирает интервал (step4_interval_step0,
+// step4_acro_apply)
+function step4_interval_input() {
+    if (step_pointer.down) {
+        step4.interval_postponed = true
+        return
+    }
+    step4.interval_postponed = false
+    step_try(() => {
+        const start = parseFloat(document.getElementById("step4_start").value)
+        const end = parseFloat(document.getElementById("step4_end").value)
+        step4_interval_own(start, end, true)
+    }, "verdict4", "шага 4")
+}
+
+// «Как на шаге 0»: интервал PID снова повторяет интервал шага 0 (step4_interval_follow); подпись и график сразу, пересчёт
+// — тоже сразу (щелчок — законченное действие, ждать нечего). Отложенная правка поля отменяется (step4_interval_input)
+function step4_interval_step0() {
+    step4.interval_postponed = false
+    step_try(() => {
+        step4_interval_follow()
+        step4_render_interval()
+        step4_show()
+    }, "verdict4", "шага 4")
+}
+
+// Пересчёт шага после паузы step4_interval_delay_ms (поля и график): прежний отложенный снимается. К концу паузы шаг 4 не
+// показан (ушли на другой шаг) — ничего: показ шага пересчитает сам (интервал PID — часть ключа расчёта), а поверх
+// другого шага шаг 4 не рисуется. Таймер снимают step4_show (интервал учтён) и step4_reset
+function step4_interval_schedule() {
+    clearTimeout(step4.interval_timer)
+    step4.interval_timer = setTimeout(() => {
+        step4.interval_timer = null
+        if (state.step === 4) {
+            step4_show()
+        }
+    }, step4_interval_delay_ms)
+}
+
 // ---------- Графики ----------
 // Реестр plots.js: графики регистрируются один раз (step4_setup_plots в step4_init), дальше данные меняются на месте
 // и render_plot; цвета — только в хуках on_theme (лог и измеренный — первый цвет палитры, выбранный вариант — второй).
@@ -2212,6 +2508,8 @@ function lbode4_theme(palette, data, layout) {
 }
 
 function step4_setup_plots() {
+    // График блока «Интервал PID» — над вкладками осей
+    pidflight4_setup()
     const margin = { b: 50, l: 60, r: 20, t: 20 }
     // Трасса-линия без данных; extra — свои поля (группа легенды, подсказка, прозрачность)
     const line_trace = (name, width, dash, extra = {}) => ({ mode: "lines", name: name, meta: name, line: { width: width, dash: dash }, visible: false,

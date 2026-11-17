@@ -86,7 +86,7 @@ p{margin:0}
 .lede{color:var(--ink-2); font-size:15px; max-width:70ch}
 header.hero{display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--line); padding-bottom:14px}
 section{display:flex; flex-direction:column; gap:14px}
-section > .head,.memory0 > .head,.prep0 > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
+section > .head,.memory0 > .head,.prep0 > .head,.interval4 > .head{display:flex; flex-direction:column; gap:3px; border-bottom:1px solid var(--line); padding-bottom:8px}
 
 /* Кнопки */
 button,label.pickbtn{font-family:"IBM Plex Sans",sans-serif; font-size:12px; padding:5px 11px; cursor:pointer;
@@ -204,6 +204,8 @@ tr:last-child td{border-bottom:0}
 .tabs button[aria-selected="true"]{background:var(--accent-soft); box-shadow:inset 0 -2px 0 var(--accent)}
 .tabpanel{display:flex; flex-direction:column; gap:14px}
 #pidf_form input[type=number]{width:112px}
+/* Шаг 4: блок «Интервал PID» над вкладками осей — раскладка как у секции (заголовок — общим правилом .head выше) */
+.interval4{display:flex; flex-direction:column; gap:14px}
 /* Предупреждение у поля размера винта шага 3 */
 #prop_warn{border-left-color:var(--accent); color:var(--accent)}
 .tag{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
@@ -742,6 +744,27 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">04 · PID по осям</span><h2>Регулятор скорости: отклик, правила и прогноз</h2></div>
   <p class="lede">Мастер измеряет отклик контура скорости по каждой оси — импульсную характеристику «цель → факт» методом наименьших квадратов по данным лога PID — и проверяет, можно ли этому измерению верить. По надёжному измерению он предлагает ATC_RAT_*_P/I/D по правилам (шаг <span data-rule4="step">10 %</span>, I = P, у рыскания I = 0.1·P) и прогнозирует запас фазы и отклик каждого варианта. Вариант отмечается, если запас фазы в прогнозе ниже <span data-rule4="pm_min">30°</span> или хуже лога больше чем на <span data-rule4="pm_drop">5°</span>, или перерегулирование выше <span data-rule4="overshoot">20 %</span>; отметки выбор не блокируют.</p>
 
+  <div class="interval4" id="step4_interval_block" hidden>
+    <div class="head" id="step4_interval_head"><span class="eyebrow">Полёт</span><h2>Интервал PID: <span id="step4_interval_label"></span></h2></div>
+    <div id="PidFlight4" class="plot"></div>
+    <div class="lab">
+      <div class="row">
+        <div class="fld">
+          <label for="step4_start">Начало анализа PID, <span class="unit">с</span></label>
+          <input id="step4_start" type="number" step="1">
+        </div>
+        <div class="fld">
+          <label for="step4_end">Конец анализа PID, <span class="unit">с</span></label>
+          <input id="step4_end" type="number" step="1">
+        </div>
+        <button type="button" id="step4_acro_interval" hidden>Интервал — участок ACRO</button>
+        <button type="button" id="step4_interval_step0" hidden>Как на шаге 0</button>
+      </div>
+      <p class="note" id="step4_interval_note"></p>
+      <p class="note">На графике — цель скорости крена, тангажа и рыскания и газ за весь полёт, заливка — участки ACRO. Интервал PID — только для этого шага: задаётся ползунком под графиком, выделением на графике (двойной щелчок — весь лог) или полями, шаг пересчитывается через <span data-rule4="interval_delay">0.7 с</span> после последнего изменения. По умолчанию это участок ACRO «Rate Loop Only» лога тестового полёта в окне полёта, а без него — интервал шага 0: такой интервал PID следует за ним. «Как на шаге 0» возвращает интервал шага 0, «Интервал — участок ACRO» сужает интервал PID до участка ACRO «Rate Loop Only», если интервал шире него.</p>
+    </div>
+  </div>
+
   <div class="lab">
     <div class="row">
       <div class="fld">
@@ -756,9 +779,6 @@ details.more > .tablewrap{margin-top:8px}
   </div>
 
   <div class="verdict" id="verdict4" hidden></div>
-  <div class="row" id="step4_acro_row" hidden>
-    <button type="button" id="step4_acro_interval">Интервал — участок ACRO</button>
-  </div>
 
   <div class="tabs" id="step4_tabs" role="tablist" aria-label="Оси" hidden>
     <button type="button" role="tab" id="step4_tab_roll" aria-selected="true" aria-controls="step4_panel"><span class="t">Крен</span><span class="s"></span><span class="f"></span></button>
@@ -808,7 +828,7 @@ details.more > .tablewrap{margin-top:8px}
     <div class="head"><span class="eyebrow">Данные</span><h2>Цель и факт во времени</h2></div>
     <div id="TarAct4" class="plot"></div>
     <p class="note" id="tarac4_note" hidden></p>
-    <p class="note">Скорость оси, °/с: цель регулятора скорости и факт (отфильтрованный гироскоп) набора параметров оси за интервал анализа — из этих данных отбираются окна для измерения. Цель нарисована поверх факта. Разрывы — между пакетами лога.</p>
+    <p class="note">Скорость оси, °/с: цель регулятора скорости и факт (отфильтрованный гироскоп) набора параметров оси за интервал PID — из этих данных отбираются окна для измерения. Цель нарисована поверх факта. Разрывы — между пакетами лога.</p>
 
     <div class="head"><span class="eyebrow">Спектр</span><h2>Спектр D-составляющей и выхода регулятора</h2></div>
     <div id="DSpec4" class="plot"></div>
@@ -824,7 +844,7 @@ details.more > .tablewrap{margin-top:8px}
   <div class="head"><span class="eyebrow">Параметры</span><h2>Коэффициенты регулятора скорости</h2></div>
   <div class="lab">
     <div class="pgroups pform" id="pidf_form"></div>
-    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала анализа; если PID менялись после интервала — например, AutoTune сохранил их при дизарме, — подпись показывает и значения конца лога, строка таблицы называется «Набор интервала», а принятое перепишет значения конца лога). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
+    <p class="note">Значения — из лога (набор параметров, действующий в конце интервала PID; если PID менялись после интервала PID — например, AutoTune сохранил их при дизарме, — подпись показывает и значения конца лога, строка таблицы называется «Набор интервала», а принятое перепишет значения конца лога). Описания (во всплывающей подсказке у имени) — из метаданных параметров ArduPilot (FilterReview/params.json), поэтому на английском. «Применить вариант» переносит выбранную строку таблицы открытой оси в её поля; правка поля пересчитывается после паузы в наборе или при выходе из поля, в таблице оси появляется строка «Свой». Пустое поле и отрицательное значение принять нельзя. FF, угловые ATC_ANG_* и пределы шаг не трогает; фильтры решил шаг 3. Файла .param на шаге нет: итоговый файл собирает сводка (шаг 5).</p>
   </div>
   <div class="row">
     <button type="button" id="pidf_accept" disabled>Принять</button>

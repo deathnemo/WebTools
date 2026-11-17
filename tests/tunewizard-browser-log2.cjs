@@ -212,7 +212,7 @@ async function main() {
             statuses: Object.fromEntries(['roll', 'pitch', 'yaw'].map((axis) => [axis, step4.calc[axis].status])),
             modes: step4.calc.roll.mode?.modes ?? null, rate_hz: step4.calc.roll.rate_hz ?? null,
             verdict: document.getElementById('verdict4').textContent, verdict_class: document.getElementById('verdict4').className,
-            acro_row: document.getElementById('step4_acro_row').hidden,
+            acro_row: document.getElementById('step4_acro_interval').hidden,
         }))
         assert.ok(Object.values(p4.statuses).every((status) => status !== 'ok'), 'ни одна ось не надёжна: ' + JSON.stringify(p4.statuses))
         assert.deepEqual(p4.modes, ['STABILIZE'], 'режим лога')
