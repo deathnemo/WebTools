@@ -839,6 +839,35 @@ test('pidtune_mode_segments и rate_only_segment: лог тестового по
     assert.deepEqual(pidtune_mode_segments(fake_log({ params: ANG }), [5, 15]), [])
 })
 
+test('pidtune_acro_interval: участок ACRO «Rate Loop Only» в окне полёта — целые секунды внутрь, весь интервал в ACRO — тоже; без MODE, бита или участка — null; pidtune_interval_text', () => {
+    // STAB@0 → ACRO@20.3 → LAND@300.7, бит 2: окно полёта 10–310 → 21–300
+    const log = mode_log([[0, 0], [20.3, 1], [300.7, 9]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    const params = log_params(log)
+    assert.deepEqual(pidtune_acro_interval(log, params, [10, 310]), { start: 21, end: 300 })
+    // Последний режим — ACRO до конца лога (как четвёртый лог: данные до 386.6 с): окно полёта обрезает участок
+    const tail = mode_log([[0, 0], [288.07, 1]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    assert.deepEqual(pidtune_acro_interval(tail, log_params(tail), [282, 370]), { start: 289, end: 370 })
+    assert.deepEqual(pidtune_acro_interval(tail, log_params(tail), [0, 387]), { start: 289, end: 387 })
+    // Весь интервал — ACRO: участок — весь интервал
+    assert.deepEqual(pidtune_acro_interval(log, params, [50, 100]), { start: 50, end: 100 })
+    // Самый длинный из нескольких
+    const two = mode_log([[0, 0], [20, 1], [30, 0], [40, 1], [100, 9]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    assert.deepEqual(pidtune_acro_interval(two, log_params(two), [0, 120]), { start: 40, end: 100 })
+    // Бит не выставлен, бит включили во время участка, ACRO не было, нет MODE, короче секунды — null
+    const off = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 1, 0.3], ...ANG])
+    assert.equal(pidtune_acro_interval(off, log_params(off), [10, 310]), null)
+    const late = mode_log([[0, 0], [20, 1], [300, 9]], [['ACRO_OPTIONS', 0, 0.3], ['ACRO_OPTIONS', 2, 50], ...ANG])
+    assert.equal(pidtune_acro_interval(late, log_params(late), [10, 310]), null)
+    const stab = mode_log([[0, 0]], [['ACRO_OPTIONS', 2, 0.3], ...ANG])
+    assert.equal(pidtune_acro_interval(stab, log_params(stab), [10, 310]), null)
+    assert.equal(pidtune_acro_interval({ messageTypes: {}, get: () => undefined }, params, [10, 310]), null, 'лог без MODE')
+    assert.equal(pidtune_acro_interval(log, params, [20.2, 20.9]), null)
+    // Подписи
+    assert.equal(pidtune_interval_text({ start: 289, end: 370, source: 'acro' }), '289–370 с, участок ACRO «Rate Loop Only»')
+    assert.equal(pidtune_interval_text({ start: 282, end: 370, source: 'step0' }), '282–370 с, как на шаге 0')
+    assert.equal(pidtune_interval_text({ start: 300, end: 320, source: 'own' }), '300–320 с, свой')
+})
+
 test('pidtune_log_mode: ACRO_TRAINER ≠ 0 в Rate Loop Only — предупреждение (тренер подмешивает выравнивание по углу в цель)', () => {
     const trained = mode_log([[10, 1]], [['ACRO_OPTIONS', 2, 1], ['ACRO_TRAINER', 2, 1], ...ANG])
     const mode = pidtune_log_mode(trained, log_params(trained), V46, [20, 80], 'roll', RATE_HZ)
